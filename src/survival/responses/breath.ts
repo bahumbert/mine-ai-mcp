@@ -1,8 +1,9 @@
 import type { Bot } from "mineflayer";
-import { horizontalControlsToward, longestBreakDurationMs, SWIM_UP_TICKS } from "../../navigation/index.js";
+import { horizontalControlsToward, longestBreakDurationMs, nativeDigTicks, SWIM_UP_TICKS } from "../../navigation/index.js";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
+import { foreignRegionAt } from "../../world/protected-regions.js";
 import { airSupplyPoints, FULL_AIR_POINTS, isInWater } from "../perception/body.js";
 import { routeVerticalControls, swimmingRoof } from "../positioning/swim-escape.js";
 import type { Budgets } from "../state/budgets.js";
@@ -15,8 +16,11 @@ const WALL_CLOCK_FACTOR = 2;
 const DROWNING_DAMAGE_INTERVAL_TICKS = 20;
 const DROWNING_DAMAGE = 2;
 
-/** What became of the roof over a drowning swimmer in one surfacing: none to dig, dug, or too slow to start. */
-export type RoofDig = "none" | "dug" | "too_slow";
+/**
+ * What became of the roof over a drowning swimmer in one surfacing: none to dig, dug, too slow to start, or inside another
+ * owner's protected region (ADR-012: not dug; the stalled ways are tried again, as after a slow roof).
+ */
+export type RoofDig = "none" | "dug" | "too_slow" | "refused";
 
 type Roof = NonNullable<ReturnType<typeof swimmingRoof>>;
 
@@ -79,8 +83,8 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
         if (result === "dug") {
           dug += 1;
           roofDig = "dug";
-        } else if (result === "too_slow" && roofDig === "none") {
-          roofDig = "too_slow";
+        } else if ((result === "too_slow" || result === "refused") && roofDig === "none") {
+          roofDig = result;
           route.reopenClosedWays();
         }
         signal.throwIfAborted();
@@ -120,7 +124,8 @@ export async function surface(bot: Bot, signal: AbortSignal, budgets: Budgets, m
  * cancel, the attempt's wall clock, its tick budget, a death) stops the equip wait and the dig. "failed" is a dig the
  * server or Mineflayer refused or that `stop` cut: the loop yields a tick and looks again.
  */
-async function digRoof(bot: Bot, roof: Roof, stop: AbortSignal): Promise<"dug" | "too_slow" | "failed"> {
+async function digRoof(bot: Bot, roof: Roof, stop: AbortSignal): Promise<"dug" | "too_slow" | "refused" | "failed"> {
+  if (foreignRegionAt(bot, roof.position) !== null) return "refused";
   const tool = selectHarvestTool(bot, roof);
   if (!roofDigFits(bot, roof, tool?.type ?? null)) return "too_slow";
   let digging = false;
@@ -152,7 +157,7 @@ export function roofDigFits(bot: Bot, roof: Roof, toolType: number | null): bool
   if (digMs === null) return false;
   const air = Math.max(0, airSupplyTicks(bot) ?? 0);
   const drowningHits = Math.floor(bot.health / 2 / DROWNING_DAMAGE);
-  return Math.ceil(digMs / TICK_MS) + SWIM_UP_TICKS <= air + drowningHits * DROWNING_DAMAGE_INTERVAL_TICKS;
+  return nativeDigTicks(digMs) + SWIM_UP_TICKS <= air + drowningHits * DROWNING_DAMAGE_INTERVAL_TICKS;
 }
 
 /** `work`, or a rejection with `signal`'s reason as soon as it aborts; the listener goes either way. */

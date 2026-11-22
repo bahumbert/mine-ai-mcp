@@ -32,10 +32,25 @@ export type ResolvedGoal =
        */
       readonly revision: string;
       heuristic(node: PlanningNode): number;
+      /** Distance remaining for partial-route selection, when it differs from A* ordering. */
+      progress?(node: PlanningNode): number;
       /** Search supplies predicted edits; arrival supplies the observed world. */
       isSatisfied(node: PlanningNode, world: WorldView): boolean;
-      /** Work that completes this goal from a candidate stance, priced alongside travel. */
-      finish?(state: PlanningState, context: GenerationContext, digContext: DigContext): GeneratedMovement | null;
+      /**
+       * Every integer feet cell `satisfies` accepts, or null for an unbounded set, a cube over `limit`,
+       * or a fractional centre. `satisfies` is the goal's own `isSatisfied` function object.
+       */
+      endpoints?(limit: number): {
+        readonly satisfies: (node: PlanningNode, world: WorldView) => boolean;
+        readonly cells: readonly BlockPosition[];
+      } | null;
+      /** Work priced alongside travel; only the physical search root receives an actual pose. */
+      finish?(
+        state: PlanningState,
+        context: GenerationContext,
+        digContext: DigContext,
+        actualStart?: NavigationObservation,
+      ): GeneratedMovement | null;
     }
   | { readonly kind: "invalid"; readonly observation: string };
 

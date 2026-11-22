@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { preferredScaffoldItem } from "../../../navigation/mineflayer/movement-policy.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { findPlacementSupport, occupiedCell } from "../../../world/placement.js";
+import { cellsOutsideRegionsFirst, foreignRegionAt } from "../../../world/protected-regions.js";
 import type { CreeperObservation } from "../../perception/combat/creepers.js";
 
 /** One supported block on an exposed blast-to-body segment. This is partial
@@ -28,7 +29,10 @@ export function blastBarrierCells(bot: Bot, threats: readonly CreeperObservation
       }
     }
   }
-  return [...cells.values()];
+  // Never another owner's region (ADR-012: the placement would be refused); outside every region first, the bot's own
+  // regions' cells only after them.
+  const allowed = [...cells.values()].filter((cell) => foreignRegionAt(bot, cell) === null);
+  return cellsOutsideRegionsFirst(bot, allowed);
 }
 
 export function blastBarrierMaterial(bot: Bot) {

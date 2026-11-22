@@ -1,0 +1,41 @@
+template: ../../templates/flat-single-action.yaml
+name: burning-with-water-bucket
+tags: [regression]
+description: >-
+  A lethal residual lava burn with no water nearby must pour the carried bucket and extinguish within three seconds.
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+reset:
+  - "fill -12 -63 -12 12 -40 12 air"
+geometry:
+  - fill: { block: stone, from: [-10, -63, -10], to: [10, -61, 10] }
+  - fill: { block: stone, from: [-6, -60, -1], to: [-4, -60, 1] }
+  - fill: { block: lava, from: [-5, -60, 0], to: [-5, -60, 0] }
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: water_bucket, count: 1 }
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/burning-far-from-water.ts]
+params:
+  contact: [-4.5, -60, 0.5]
+  start: [0.5, -60, 0.5]
+  waterBucket: true
+goal:
+  kind: all
+  timeout: 40
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: hasItem, who: Actor, item: bucket, count: 1 }

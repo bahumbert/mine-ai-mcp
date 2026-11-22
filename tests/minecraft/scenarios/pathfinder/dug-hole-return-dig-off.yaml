@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: dug-hole-return-dig-off
+tags: [regression]
+description: >-
+  P4-20 failure A, rebuilt from reports/2026-11-16-p4-20-staircase-return-root-cause.md.
+  A replanned descent dug its own tread. Through the real NavigationRun, the return
+  with digging off names that cause without a style escape; the next action digs out.
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [-6, -63, -6], to: [6, -46, 6] }
+  # Upper treads and heads, with the report's z shifted by -4096.
+  - fill: { block: air, from: [1, -46, -5], to: [1, -45, -5] }
+  - fill: { block: air, from: [1, -47, -4], to: [1, -46, -4] }
+  - fill: { block: air, from: [1, -48, -3], to: [1, -47, -3] }
+  - fill: { block: air, from: [1, -49, -2], to: [1, -48, -2] }
+  - fill: { block: air, from: [1, -50, -1], to: [1, -49, -1] }
+  - fill: { block: air, from: [1, -51, 0], to: [1, -50, 0] }
+  # Failure A's route feet and heads, then the undercut tread.
+  - fill: { block: air, from: [1, -52, 1], to: [1, -51, 1] }
+  - fill: { block: air, from: [0, -53, 1], to: [0, -52, 1] }
+  - fill: { block: air, from: [0, -54, 0], to: [0, -53, 0] }
+  - fill: { block: air, from: [0, -55, -1], to: [0, -54, -1] }
+  - fill: { block: air, from: [0, -56, 0], to: [0, -55, 0] }
+
+players:
+  - name: Climber
+    pos: [0.5, -56, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/navigate-route.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Climber,gamemode=!spectator]"
+
+params:
+  noDigStraightDown: true
+  legs:
+    - { label: shut in, target: [0, -45, 0], range: 0, dig: false, expectFailure: "not dug because this request has digging off" }
+    - { label: dig out, target: [0, -45, 0], range: 0, dig: true }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - { kind: reach, who: Climber, pos: [0.5, -45, 0.5], radius: 1.0 }
+    - { kind: health, who: Climber, health: 20 }
+    - { kind: completion, who: Climber }

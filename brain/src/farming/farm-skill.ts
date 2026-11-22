@@ -1,11 +1,17 @@
 import { z } from "zod";
 import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
-import type { KnownFarm } from "../memory.ts";
-import type { BotSnapshot, Position } from "../runtime-client.ts";
-import { describeWay, firstOfOwnSeed } from "../gathering.ts";
-import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, overlapsOf, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
-import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
+import type { FarmState, KnownFarm } from "../memory.ts";
+import type { BotSnapshot, Position, ProtectedArea } from "../runtime-client.ts";
+import { describeWay } from "../gathering/fetch-farther.ts";
+import { firstOfOwnSeed } from "../gathering/how-to-get.ts";
+import type { SkillContext, SkillResult } from "../skills.ts";
+import { levelZone } from "../skills/level-zone.ts";
+import { findPlayer, navigateInput } from "../skills/positions.ts";
+import { releaseArea } from "../skills/protect-area.ts";
+import { describeOverlaps, nearestClearSpot, noteArea, overlapsOf, SITE_SEARCH } from "../skills/protected-areas.ts";
+import { cropStage, describeStage, nextPace } from "./growth.ts";
+import { farmBox, farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
@@ -16,7 +22,18 @@ const STARTING_SEEDS = 16;
 /** What `tend_crops` reports of the plot afterwards (src/actions/tend-crops/contract.ts). */
 const tendedSchema = z.object({
   tended: z.object({
-    after: z.object({ crops: z.record(z.string(), z.number()), emptyFarmland: z.number() }),
+    // Each of these but `crops` and `emptyFarmland` is optional: an older runtime reports none of them.
+    after: z.object({
+      crops: z.record(z.string(), z.number()),
+      emptyFarmland: z.number(),
+      dryFarmland: z.number().optional(),
+      /** The age at which each crop block standing is ripe. */
+      ripeAge: z.record(z.string(), z.number()).optional(),
+    }),
+    /** The plot as the tend found it, before it harvested (the pace measure reads it). */
+    before: z.object({ crops: z.record(z.string(), z.number()) }).optional(),
+    harvested: z.number().optional(),
+    planted: z.number().optional(),
     skipped: z.record(z.string(), z.array(z.unknown())).optional(),
     tilledSoil: z.record(z.string(), z.number()).optional(),
     untillable: z.record(z.string(), z.array(z.unknown())).optional(),
@@ -90,9 +107,26 @@ export async function farm(context: SkillContext, step: Extract<Step, { skill: "
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plot = at === null ? plotBehind(snapshot.position, toward, step.size) : farmPlot({ x: at.x, y: at.y - 1, z: at.z }, step.size);
   // The ground there must be tillable under the open sky; if not, the nearest plot that is, else a refusal that says why.
-  const site = await chooseSite(context.runtime, plot, context.soil);
-  if ("refusal" in site) return { status: "failed", detail: site.refusal };
+  const areas = await context.runtime.protectedRegions();
+  const site = await chooseSite(context.runtime, plot, context.soil, areas);
+  if ("refusal" in site) {
+    if (site.overlaps === undefined) return { status: "failed", detail: site.refusal };
+    return { status: "failed", detail: overlapRefusal(context, snapshot, plot, `a ${plot.size}x${plot.size} ${crop} farm`, areas, site.overlaps) };
+  }
   return makeFarm(context, snapshot, site.plot, crop);
+}
+
+/**
+ * Why a farm's site is refused over protected areas, and where the nearest plot clear of them lies (live 2026-10-10:
+ * a farm protected over her own house, then leveling failed, and the house was undone).
+ */
+function overlapRefusal(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, what: string, areas: readonly ProtectedArea[], blocked: readonly ProtectedArea[]): string {
+  const { water } = plot;
+  const clear = nearestClearSpot(areas, water, (spot) => farmBox(farmPlot(spot, plot.size)));
+  const where = clear === null
+    ? `no plot clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or farm somewhere else`
+    : `the nearest plot clear of them has its middle ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y + 1} ${clear.z} (clear of protected areas; its ground is checked when you farm there): farm there with those coordinates, or if that fails for its ground, farm somewhere else`;
+  return `the site of ${what} (middle at ${water.x} ${water.y + 1} ${water.z}) ${describeOverlaps(context, blocked)}; ${where}`;
 }
 
 async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, asked: string): Promise<SkillResult> {
@@ -127,21 +161,12 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
   // A plot clear of every protected area before anything is protected or dug, and if not, where the nearest clear one
   // is (live 2026-10-10: a farm protected over her own house, then leveling failed, and the house was undone).
   const areas = await context.runtime.protectedRegions();
-  const boxAt = (middle: Position) => ({
-    min: { x: plot.min.x - 1 + middle.x - water.x, y: water.y - 1, z: plot.min.z - 1 + middle.z - water.z },
-    max: { x: plot.max.x + 1 + middle.x - water.x, y: water.y + 2, z: plot.max.z + 1 + middle.z - water.z },
-  });
-  const blocked = overlapsOf(areas, boxAt(water));
-  if (blocked.length > 0) {
-    const clear = nearestClearSpot(areas, water, boxAt);
-    const where = clear === null
-      ? `no plot clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or farm somewhere else`
-      : `the nearest plot clear of them has its middle ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y + 1} ${clear.z}: farm there with those coordinates`;
-    return { status: "failed", detail: `the site of ${what} (middle at ${water.x} ${water.y + 1} ${water.z}) ${describeOverlaps(context, blocked)}; ${where}` };
-  }
+  const box = farmBox(plot);
+  const blocked = overlapsOf(areas, box);
+  if (blocked.length > 0) return { status: "failed", detail: overlapRefusal(context, snapshot, plot, what, areas, blocked) };
   // Protected before the first change, ring included: her own gathering never digs or tramples into it (ADR-012).
   const protection = await context.runtime.protectRegion({
-    ...boxAt(water),
+    ...box,
     label: `farm ${crop}`,
     reason: `Keep my own digging out of the ${crop} farm I am making.`,
   });
@@ -206,7 +231,7 @@ async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: Kn
   // Planting is asked only with the item carried: without it the harvest still replants its own cells from the drops.
   const plant = carried(snapshot, wanted) > 0 ? wanted : null;
   context.progress?.(`tending your ${known.crop} farm: harvesting what is ripe and replanting`);
-  return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
+  return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt, previous: known }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
 }
 
 /**
@@ -224,31 +249,56 @@ function learnSoil(soil: TillFacts | undefined, plot: FarmPlot, tended: { readon
   for (const block of Object.keys(tended?.tilledSoil ?? {})) soil.tilled(block);
 }
 
+/**
+ * The block a farm's crop item is planted as (`wheat_seeds` -> `wheat`), from the runtime's drop data; null when the
+ * item has no planted source or the lookup fails (the tend goes on without a stage).
+ */
+async function plantedBlock(runtime: SkillContext["runtime"], crop: string): Promise<string | null> {
+  try {
+    return ((await runtime.blockSources([crop]))[crop] ?? []).find((source) => source.planted)?.block ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** One `tend_crops` over the plot, then the farm remembered as it stands. */
-async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string }, doneDetail: string): Promise<SkillResult> {
+async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string; previous?: KnownFarm }, doneDetail: string): Promise<SkillResult> {
   const input = { x1: plot.min.x, z1: plot.min.z, x2: plot.max.x, z2: plot.max.z, y: plot.water.y, ...(plant !== null && { plant }) };
+  // Resolved before the tend: the farm's own crop block is what its stage is the mean age of.
+  const cropBlock = await plantedBlock(context.runtime, crop);
+  const near = made.previous === undefined ? null : context.nearMinutes?.(made.previous) ?? null;
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
-  if (context.signal.aborted) return { status: "stopped" };
+  if (context.signal.aborted || outcome.status === "cancelled") {
+    if (made.previous !== undefined) context.rememberFarm?.({ ...made.previous, paceFresh: false });
+    return { status: "stopped" };
+  }
   const tended = tendedSchema.safeParse(outcome.result).data?.tended;
   learnSoil(context.soil, plot, tended);
   const after = tended?.after;
   const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});
-  const state = {
+  const growth = after === undefined || cropBlock === null ? null : cropStage(after.crops, after.ripeAge?.[cropBlock], cropBlock);
+  const before = tended?.before === undefined || cropBlock === null ? null : cropStage(tended.before.crops, after?.ripeAge?.[cropBlock] ?? made.previous?.state.ripeAge, cropBlock);
+  const pace = nextPace(made.previous, before?.stage ?? null, near);
+  const state: FarmState = {
     planted: crops.reduce((sum, [, count]) => sum + count, 0),
     ripe: crops.filter(([key]) => key.endsWith(" ripe")).reduce((sum, [, count]) => sum + count, 0),
     empty: after?.emptyFarmland ?? 0,
+    ...(growth !== null && growth),
+    ...(after?.dryFarmland !== undefined && { dry: after.dryFarmland }),
   };
+  const snapshot = await context.runtime.status();
   if (after !== undefined) {
-    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state });
+    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state, dimension: snapshot.dimension, ...(pace !== undefined && { pace }), paceFresh: true });
   }
   // Why farmland stays empty, as the step that fixes it (live 2026-10-03: told only "4 farmland empty", the model
   // tended the farm three more times).
-  const seeds = carried(await context.runtime.status(), crop);
+  const seeds = carried(snapshot, crop);
   const empty = state.empty > 0 && seeds === 0
     ? `${state.empty} farmland empty because you carry no ${crop}: get_items ${crop} ${state.empty}, then farm again to plant them`
     : `${state.empty} farmland empty`;
-  const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}`;
+  const growing = describeStage(state);
+  const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}${growing === "" ? "" : `, ${growing}`}`;
   if (outcome.status === "succeeded") return { status: "done", detail: `${doneDetail}: ${summary}` };
   if (outcome.status === "partial") return { status: "done", detail: `${doneDetail}, partly: ${summary}; ${left ?? outcome.error ?? ""}` };
   // Ground of air: the plot hangs in a cave or over a pit (live 2026-10-09: Ayla, in a cave at y 10, farmed "near my

@@ -1,13 +1,16 @@
 import type { Step } from "./actions.ts";
 import type { Activity } from "./activities.ts";
-import type { Facing } from "./building/blueprint.ts";
+import type { Facing, Variants } from "./building/blueprint.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
+import type { SituationView } from "./agent/situation-options.ts";
+import type { SituationInfo } from "./agent/situations.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import type { ActivityTotal } from "./time-spent.ts";
+import type { ClaimResult } from "./skills/claim-sign.ts";
 
 export interface ChatLine {
   readonly speaker: string;
@@ -54,6 +57,11 @@ export interface KnownPlace {
     readonly door: Position;
     readonly facing: Facing;
     readonly materials: Materials;
+    /** Substitute stairs and slabs, saved at build time; older notes keep full blocks. */
+    readonly shapes?: Variants;
+    readonly owner?: string;
+    readonly dimension?: string;
+    readonly claim?: NonNullable<ClaimResult["claim"]>;
   };
 }
 
@@ -152,8 +160,22 @@ export interface WorkInput {
   readonly earlierFailures?: readonly EarlierFailure[];
   /** It owns a house with temporary parts: only then is `improve_house` offered in the skill list. */
   readonly ownsTemporaryHouse?: boolean;
+  /**
+   * A situation event on the stack (spec 2026-11-15-p4-18-night-reflex-l2 D5): what it is, what the model reads of it, the
+   * work it interrupts or sets aside, and whether this call decides (`deciding`) or a pushed situation's later call.
+   */
+  readonly situation?: {
+    readonly info: SituationInfo;
+    readonly view: SituationView;
+    readonly objective: Objective | null;
+    /** The step label running now, null when none runs. */
+    readonly running: string | null;
+    readonly deciding: boolean;
+  };
   /** Step key -> refusals since that step last ran; mutable, owned by the agent's work for this objective (counted here, reset there). */
   readonly refused?: Map<string, number>;
+  /** Caller-owned one-time corrections; omitted by direct callers that use the mind's objective memory. */
+  readonly sentBackSteps?: Set<string>;
 }
 
 /** The work tier's answer: the next step, or the objective is over. */
@@ -198,17 +220,25 @@ export interface ChosenObjective {
   readonly purpose: Activity | null;
 }
 
+export interface SignLinesInput {
+  readonly persona: Persona;
+  readonly occasion: "claim";
+  readonly owner: string;
+  readonly what: string;
+}
+
 export interface NarrateInput {
   readonly persona: Persona;
   readonly objective: string;
-  /** How the order ended, or "progress": what it starts doing now (`detail`), the order still under way. */
-  readonly outcome: "done" | "failed" | "progress";
+  /** An order's end or new phase, or an event fact that does not claim the order is still active. */
+  readonly outcome: "done" | "failed" | "progress" | "event";
   readonly detail: string;
   readonly history: readonly ChatLine[];
 }
 
 /** The thinking part of an agent (ADR-008, ADR-011). Code around it only runs the skills it picks. */
 export interface Mind {
+  signLines(input: SignLinesInput, signal: AbortSignal): Promise<string[]>;
   /** Chat tier: fast, in character; answers and routes every message it hears. */
   chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision>;
   /** Work tier (action model): the next step towards an objective, seeing what the last steps did. */

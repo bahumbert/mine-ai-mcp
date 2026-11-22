@@ -92,7 +92,6 @@ export function createCombatController(
       perception,
       resolvedIds: perception.resolvedIds,
       attackerIds: perception.attackerIds,
-      unreachableIds: new Set<number>(),
       policy: policy.combat,
       food: policy.food,
       survival,
@@ -156,7 +155,12 @@ export function createCombatController(
       if (active === engagement) active = null;
     }
   }
-  async function engage(targetId: number, signal: AbortSignal, movement: "pursue" | "hold"): Promise<CombatOutcome> {
+  async function engage(
+    targetId: number,
+    signal: AbortSignal,
+    movement: "pursue" | "hold",
+    options?: { readonly satisfied?: () => boolean },
+  ): Promise<CombatOutcome> {
     if (active)
       return { ...emptyCombatEvidence(targetId, "failed"), observation: "Combat controller is already engaged." };
     signal.throwIfAborted();
@@ -192,6 +196,7 @@ export function createCombatController(
           policyUse = value;
         },
       },
+      options?.satisfied,
     );
     const engagement = { kind: "mob" as const, targetId, controller, outcome };
     active = engagement;
@@ -202,8 +207,7 @@ export function createCombatController(
     }
   }
 
-  /** Abort the current engagement and wait for it to leave the bot neutral. */
-
+  /** Abort the engagement and wait for the bot to be neutral; a body abort that ended it first is a stop too, other errors throw. */
   async function stop(reason: string | BodyAbort): Promise<void> {
     const engagement = active;
     if (!engagement) return;
@@ -211,7 +215,7 @@ export function createCombatController(
     try {
       await engagement.outcome;
     } catch (cause) {
-      if (cause !== engagement.controller.signal.reason) throw cause;
+      if (!(cause instanceof BodyAbort) && cause !== engagement.controller.signal.reason) throw cause;
     }
   }
 
@@ -234,7 +238,6 @@ export function createCombatController(
         {
           resolvedIds: perception.resolvedIds,
           attackerIds: perception.attackerIds,
-          unreachableIds: new Set<number>(),
           perception,
           policy: policy.combat,
           food: policy.food,

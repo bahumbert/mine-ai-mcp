@@ -4,16 +4,33 @@ import { Vec3 } from "vec3";
 import { observeMineflayerBlock, type WorldView } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { createFakeBot, type FakeCell } from "../../test-support/fake-bot/index.js";
-import { isInFire } from "../perception/body.js";
+import { isInFire, isInLava } from "../perception/body.js";
 import {
   clearFireEscape,
   clearFireHop,
   escapeCells,
+  FIRE_ESCAPE_RISE_IN_LAVA,
   fireEscapeDeparture,
   fireEscapeRoute,
   fireWaterRoute,
   nearbyFireEscape,
+  nearestDryCellToSwimTo,
+  lethalRouteBlocks,
 } from "./fire-escape.js";
+
+test("the lethal burn route is limited by remaining health and capped", () => {
+  const { bot } = createFakeBot();
+  for (const [health, expected] of [[4, 8.634], [3, 4.317], [2, 0], [10, 16]] as const) {
+    bot.health = health;
+    assert.ok(Math.abs(lethalRouteBlocks(bot) - expected) < 0.001);
+  }
+});
+
+test("the widened lethal scan does not route through unloaded cells", () => {
+  const { bot, world } = sceneAt({ "5,65,0": "water" }, new Vec3(0.5, 65, 0.5), ["1,65,0", "1,66,0", "0,65,1", "0,66,1", "0,65,-1", "0,66,-1", "-1,65,0", "-1,66,0"]);
+  bot.health = 8;
+  assert.equal(fireWaterRoute(bot, world, "lethal_burn"), null);
+});
 
 test("a newly burning occupied cell has a dry escape through navigation's observed geometry", () => {
   const { bot, world: game } = createFakeBot({ cells: { "0,64,0": "soul_fire", "1,64,0": "fire", "-1,64,0": "cactus" } });
@@ -88,12 +105,13 @@ test("a lava escape retains its departure while the body is airborne above the p
 });
 
 /** The lava-escape-to-water scene on the fixture's floor: stone up to y 64, so the body stands at y 65 and a pit cell is a hole in it. */
-function sceneAt(cells: Record<string, FakeCell>, position: Vec3) {
+function sceneAt(cells: Record<string, FakeCell>, position: Vec3, unloaded: readonly string[] = []) {
   const { bot } = createFakeBot({ cells, groundY: 64, position });
   const world = new MemoryWorld();
   for (let x = -6; x <= 6; x++)
     for (let z = -6; z <= 6; z++)
       for (let y = 62; y <= 68; y++) {
+        if (unloaded.includes(`${x},${y},${z}`)) continue;
         const at = new Vec3(x, y, z);
         world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
       }
@@ -277,6 +295,44 @@ test("a body in lava whose only bank is within the lava's reach takes it, as the
     ["-1,65,0"],
     "no safe cell exists and staying in lava is worse",
   );
+});
+
+/** A 3 x 3 lava pool two deep in the ground (lava at y 63 and 64), the body on its floor: the bank is two cells above the feet. */
+const POOL_TWO_DEEP: Record<string, FakeCell> = {};
+for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) for (const y of [63, 64]) POOL_TWO_DEEP[`${x},${y},${z}`] = "lava";
+const ON_THE_POOL_FLOOR = new Vec3(0.5, 63, 0.5);
+
+test("a body in lava scans one more row up", () => {
+  const { bot, world } = sceneAt(POOL_TWO_DEEP, ON_THE_POOL_FLOOR);
+  assert.ok(isInLava(bot));
+  const bank = (rise?: number) => escapeCells(bot, world, rise === undefined ? {} : { rise }).dry.map(cellOf);
+  assert.ok(!bank().includes("2,65,0"), "the default scan stops one row above the feet");
+  assert.ok(bank(2).includes("2,65,0"), "a bank two above the feet is a dry cell with rise 2");
+  assert.equal(FIRE_ESCAPE_RISE_IN_LAVA, 2);
+  assert.equal(fireEscapeRoute(bot, world, "contact")?.[0]?.y, 65, "the route a body in lava takes starts on that bank");
+  assert.equal(nearestDryCellToSwimTo(bot, world)?.y, 65, "and the cell it steers to while it rises is on the bank");
+});
+
+test("an unloaded cell in the extra row is not a dry cell", () => {
+  const { bot, world } = sceneAt(POOL_TWO_DEEP, ON_THE_POOL_FLOOR, ["2,65,0"]);
+  assert.ok(!escapeCells(bot, world, { rise: 2 }).dry.map(cellOf).includes("2,65,0"));
+  assert.doesNotThrow(() => fireEscapeRoute(bot, world, "contact"), "an unloaded cell is no error either");
+});
+
+test("the own water cell is not the route when lava reaches it", () => {
+  // Water under the feet, lava beside the head cell: the head cell is a body cell lava flows into.
+  const { bot, world } = sceneAt({ "0,64,0": "water", "1,65,0": "lava", "-3,64,0": "water" }, new Vec3(0.5, 64, 0.5));
+  const route = fireWaterRoute(bot, world, "contact");
+  assert.notDeepEqual(route?.map(cellOf), ["0,64,0"], "the own cell is not a refuge");
+});
+
+test("a body in fire in water with lava beside its head does not stay in its own water cell", () => {
+  const { bot, world } = sceneAt(
+    { "0,64,0": "water", "0,65,0": "fire", "1,65,0": "lava", "-3,64,0": "water" },
+    new Vec3(0.5, 64, 0.5),
+  );
+  assert.ok(isInFire(bot));
+  assert.notDeepEqual(fireEscapeRoute(bot, world, "contact")?.map(cellOf), ["0,64,0"], "the last-resort scan does not stay either");
 });
 
 test("a body on dry ground does not shuffle between cells lava can reach", () => {

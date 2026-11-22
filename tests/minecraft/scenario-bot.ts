@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import { once, type EventEmitter } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import mineflayer, { type Bot } from "mineflayer";
@@ -5,6 +6,8 @@ import type { NodeClientSession } from "mine-labs/client";
 import { BOT_PHYSICS_OPTIONS, assertBotPluginsLoaded, loadBotPlugins } from "@aibengineering/mine-ai-mcp";
 import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../../src/world/world-age.ts";
 import { observeScenarioPlayerPreparation } from "./player-preparation.ts";
+import { watchServerTags } from "../../src/world/server-tags.ts";
+import { watchAirHistory } from "../../src/world/air-supply.ts";
 
 type PreparationSession = Pick<NodeClientSession, "scenario" | "signal" | "ready" | "arranged">;
 
@@ -77,6 +80,8 @@ export function createScenarioBot(session: NodeClientSession): Bot {
     ...BOT_PHYSICS_OPTIONS,
     physicsEnabled: false,
   });
+  watchServerTags(bot);
+  watchAirHistory(bot);
   // Match the MCP host's allowance for runtime observers.
   bot.setMaxListeners(40);
   bot.on("error", (error) => session.log(`bot error: ${error.message}`));
@@ -138,10 +143,10 @@ async function waitForArrangement(bot: Bot, session: PreparationSession, signal:
 }
 
 async function waitForStandingColumn(bot: Bot, signal: AbortSignal): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = monotonicNow() + 30_000;
   while (bot.blockAt(bot.entity.position) === null) {
     signal.throwIfAborted();
-    if (Date.now() > deadline) throw new Error(`The starting column at ${bot.entity.position} did not load within 30 seconds.`);
+    if (monotonicNow() > deadline) throw new Error(`The starting column at ${bot.entity.position} did not load within 30 seconds.`);
     await delay(50, undefined, { signal });
   }
   signal.throwIfAborted();

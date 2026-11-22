@@ -3,6 +3,12 @@
 *
 !src/
 !docker/
+!patches/
+!scripts/modules-guard.ts
+!packaging/manifest.json
+!packaging/paper-settings.json
+!launcher/src/install/paper-settings.ts
+!launcher/src/install/paper-settings-cli.ts
 !package.json
 !bun.lock
 !tsconfig.json

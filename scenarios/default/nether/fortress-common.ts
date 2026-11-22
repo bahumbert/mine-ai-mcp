@@ -1,8 +1,17 @@
 /** Arrangement checks and observed combat evidence shared by the fortress trials. */
+import { NAVIGATE } from "@aibengineering/mine-ai-mcp";
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { waitForWorldAge } from "../../../src/world/world-age.ts";
+import { DRIVER_CLOCK_STOPPED_MS, waitServerTicks } from "../../../tests/minecraft/drivers/server-ticks.ts";
+import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
+import type { Vec3 } from "vec3";
 import { z } from "zod";
 import { declaredEntitiesArranged, standStill, wearArmor } from "../../src/runtime.ts";
+import type { Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { isReturn, requestOf } from "./withdrawal-judge.ts";
+import type { WithdrawalRequest } from "./withdrawal-judge.ts";
 
 /** The surveyed exit a fortress trial returns to. Everything else is declared in the scenario file. */
 export const fortressParamsSchema = z.strictObject({
@@ -61,9 +70,112 @@ export async function releaseThreats(context: MineAiScenarioContext): Promise<vo
   }
 }
 
+/**
+ * Ask the server whether the bot stands within `radius` blocks of `exit`: the server's own answer, not the client's
+ * position. True when the answer arrives within 40 server ticks; false otherwise. The listener is removed on every exit.
+ */
+export async function confirmArrival(context: MineAiScenarioContext, exit: Vec3, radius: number): Promise<boolean> {
+  const { bot } = context;
+  let arrived = false;
+  const arrival = (text: string) => {
+    if (text.includes("fortress_arrived")) arrived = true;
+  };
+  bot.on("messagestr", arrival);
+  try {
+    const { x, y, z } = exit;
+    bot.chat(`/execute as ${bot.username} at @s if entity @s[x=${x},y=${y},z=${z},distance=..${radius}] run say fortress_arrived`);
+    await waitServerTicks(bot, 40, { signal: context.signal, until: () => arrived });
+    return arrived;
+  } finally {
+    bot.off("messagestr", arrival);
+  }
+}
+
+/** How a wait for the runner to be free ended: free, the bot died, or the world age stood still for `DRIVER_CLOCK_STOPPED_MS`. */
+export type IdleWait = { kind: "idle" } | { kind: "dead" } | { kind: "stalled" };
+type Output = Awaited<ReturnType<Runtime["run"]>>;
+export interface NavigateInput {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly range: number;
+}
+export type ReturnRun =
+  | { kind: "not_admitted"; wait: IdleWait & { owners: string[] }; outputs: Output[] }
+  /** `wait` is how the last wait ended: `idle` after the last admitted navigate, or death or a stall during a wait for a second one. */
+  | { kind: "completed"; wait: IdleWait; outputs: Output[]; last: Output; requests: WithdrawalRequest[]; returns: number; owners: string[] };
+
+/** The most navigates a hand-back admits: the first and one fresh one after a return. */
+const MOST_ADMITTED_NAVIGATES = 2;
+
+/**
+ * Wait until `runtime.status().busy` is false: nothing holds the body and no request is settling. The bot's death
+ * (`died` or no health), a world age still for `DRIVER_CLOCK_STOPPED_MS` of wall time, or an abort of `signal`
+ * (throws) end it. `owners` lists each action seen holding the body, in order. The status is read on every poll, not
+ * only on a time packet: a reflex hands the body back between two packets.
+ */
+export async function waitForIdleRunner(
+  runtime: Pick<Runtime, "status">, bot: Bot, died: AbortSignal, signal: AbortSignal,
+): Promise<IdleWait & { owners: string[] }> {
+  const owners: string[] = [];
+  const dead = () => died.aborted || bot.health <= 0;
+  const end = await waitForWorldAge(bot, Infinity, {
+    signal, wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS,
+    until: () => {
+      const { busy, activeAction } = runtime.status();
+      if (activeAction && !owners.includes(activeAction.action)) owners.push(activeAction.action);
+      return !busy || dead();
+    },
+  });
+  if (dead()) return { kind: "dead", owners };
+  return { kind: end === "until" ? "idle" : "stalled", owners };
+}
+
+/** A request the runner refused before it ran, because the body was taken in between: nothing ran, so it is no request of ours. */
+function isUnadmitted(output: Output): boolean {
+  return output.durationMs === 0 && (requestOf(output).error ?? "").startsWith("[ACTION_BUSY]");
+}
+
+/**
+ * Navigate once the runner is idle; one return (a stalled or cover-refused request) gets one fresh navigate, never a third.
+ * Each call follows `waitForIdleRunner`, so a navigate is never sent into a body a reflex still holds. A refused
+ * `[ACTION_BUSY]` is waited out again: one world-age tick, then the idle wait, bounded by the same death, stall and abort.
+ */
+export async function navigateWithOneReturn(
+  runtime: Pick<Runtime, "run" | "status" | "actions">, bot: Bot, input: NavigateInput, died: AbortSignal, signal: AbortSignal,
+): Promise<ReturnRun> {
+  const navigate = runtime.actions.find((action) => action.name === NAVIGATE);
+  if (!navigate) throw new Error("Fortress hand-back requires navigate.");
+  const travel = AbortSignal.any([signal, died]);
+  const outputs: Output[] = [];
+  const admitted: Output[] = [];
+  // Every action seen holding the body across all the waits, in order.
+  const owners: string[] = [];
+  const finish = (wait: IdleWait): ReturnRun => {
+    if (admitted.length === 0) return { kind: "not_admitted", wait: { ...wait, owners }, outputs };
+    const requests = admitted.map(requestOf);
+    return { kind: "completed", wait: { kind: wait.kind }, outputs, last: admitted[admitted.length - 1]!, requests, returns: requests.filter(isReturn).length, owners };
+  };
+  for (;;) {
+    const wait = await waitForIdleRunner(runtime, bot, died, signal);
+    for (const owner of wait.owners) if (!owners.includes(owner)) owners.push(owner);
+    if (wait.kind !== "idle") return finish(wait);
+    const output = await runtime.run(navigate, input, travel);
+    outputs.push(output);
+    if (isUnadmitted(output)) {
+      // A refusal returns at once: without a pause a runner that stays busy would be asked again with no time between.
+      const paused = await waitForWorldAge(bot, 1, { signal, wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, until: () => died.aborted });
+      if (paused === "stalled") return finish({ kind: "stalled" });
+      continue;
+    }
+    admitted.push(output);
+    if (admitted.length >= MOST_ADMITTED_NAVIGATES || !isReturn(requestOf(output))) return finish({ kind: "idle" });
+  }
+}
+
 export function observeFortress(context: MineAiScenarioContext) {
   const { bot } = context;
-  const started = Date.now();
+  const started = monotonicNow();
   const initialHealth = bot.health;
   const start = bot.entity.position.clone();
   const dimension = bot.game.dimension;
@@ -100,7 +212,7 @@ export function observeFortress(context: MineAiScenarioContext) {
     if (entity.name === "small_fireball" || entity.name === "fireball") fireballs++;
   };
   const snapshot = () => ({
-    elapsedMs: Date.now() - started,
+    elapsedMs: monotonicNow() - started,
     deaths,
     initialHealth,
     minimumHealth,

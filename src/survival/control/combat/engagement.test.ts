@@ -1,12 +1,23 @@
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../../test-support/fake-bot/index.js";
+import { createNavigationRuntime } from "../../../navigation/index.js";
+import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { CombatPerception } from "../../perception/combat/observations.js";
+import { FootingRecovery } from "../../responses/footing.js";
+import { survivalResources } from "../../state/resources.js";
+import { SurvivalPolicyState } from "../../state/survival-policy.js";
+import { swingReadiness } from "../../weapons/swing-readiness.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
 import type { CombatDecisionFacts } from "../../policy/combat/decision.js";
+import { combatDecisionFacts } from "../../../test-support/combat.js";
 import type { CombatOutcome } from "./contract.js";
 
 import { runEngagement } from "./engagement.js";
+import { runMobEngagement } from "./mob.js";
+import { Vec3 } from "vec3";
 
 const result = (kind: "cancelled" | "died", attacks: number): CombatOutcome => ({
   kind,
@@ -139,10 +150,58 @@ for (const cleanupFails of [false, true]) {
   });
 }
 
+test("a pursuit of a target whose fight is answered returns unreachable at once", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  const request = new AbortController();
+  let recovered = 0;
+  const base = operations(bot);
+  const outcome = await runEngagement(request.signal, {
+    ...base,
+    observe: () => ({ ...base.observe(), answeredFights: new Map([[7, 1]]) }),
+    fight: async () => {
+      throw new Error("An answered target must not be fought again.");
+    },
+    recover: async () => {
+      // Bounded: the old code evades the same answered target forever without yielding.
+      if (++recovered === 100) request.abort("evade loop");
+      return { kind: "recovered" };
+    },
+  });
+  if (outcome.kind !== "unreachable") throw new Error("Expected an unreachable outcome.");
+  assert.equal(outcome.targetId, 7);
+  assert.equal(
+    outcome.observation,
+    "[COMBAT_ANSWERED] The fight with #7 is answered for this scope after an earlier failed attempt; choose another target.",
+  );
+  assert.equal(recovered, 0, "the answered pursuit does not move");
+});
+
+test("a contact defence of an answered target keeps its evade", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let recovered = 0;
+  const base = operations(bot);
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...base,
+    purpose: { kind: "contact_defence", targetId: 7 },
+    observe: () => ({ ...base.observe(), answeredFights: new Map([[7, 1]]) }),
+    fight: async () => {
+      throw new Error("An answered target must not be fought again.");
+    },
+    recover: async () => {
+      recovered++;
+      return { kind: "blocked", observation: "The withdrawal stopped." };
+    },
+  });
+  assert.equal(recovered, 1, "the reflex's evade still runs once");
+  assert.equal(outcome.kind, "capability_blocked");
+});
+
 function operations(bot: Bot, minimumHealth = 12) {
   return {
     purpose: { kind: "pursuit", targetId: 7, minimumHealth } as const,
-    observe: (): CombatDecisionFacts => ({
+    ticks: () => 0,
+    nextTick: async () => {},
+    observe: (): CombatDecisionFacts => combatDecisionFacts({
       policy: DEFAULT_COMBAT_POLICY,
       health: bot.health,
       burning: false,
@@ -153,7 +212,6 @@ function operations(bot: Bot, minimumHealth = 12) {
       shield: true,
       contacts: [],
       fireball: null,
-      unreachable: new Set(),
       answeredFights: new Map(),
       answered: new Set(),
     }),
@@ -190,4 +248,200 @@ test("the selected deflection executes before the quarry fight", async () => {
   });
   assert.equal(outcome.kind, "died");
   assert.deepEqual(effects, ["deflect", "fight"]);
+});
+
+for (const response of ["fight", "deflect", "recover"] as const) {
+  test(`a ${response} that returns in the same tick lets a timer run before the third response`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot } = createFakeBot({ clock });
+    const base = operations(bot);
+    const request = new AbortController();
+    let ticks = 0, responses = 0, timerFired = false, timerBeforeThird = false;
+    setTimeout(() => { timerFired = true; }, 0);
+    const respond = () => {
+      responses++;
+      if (responses === 3) timerBeforeThird = timerFired;
+      // The old resolved-promise loop must terminate even though it starves the timer (a10 T3a).
+      if (responses === 10_000) request.abort("same-tick spin");
+    };
+    const pending = runEngagement(request.signal, {
+      ...base,
+      ticks: () => ticks,
+      nextTick: async () => { await clock.sleep(50, request.signal); ticks++; },
+      observe: () => ({ ...base.observe(), health: response === "recover" && responses < 3 ? 7 : 20,
+        fireball: response === "deflect" && responses < 3
+          ? { id: 99, name: "fireball", position: { x: 1, y: 65, z: 0 }, distance: 1 } : null }),
+      fight: async () => {
+        respond();
+        return responses >= 3 ? result("died", 1)
+          : { ...result("cancelled", 0), kind: "response_required", observation: "Reconsider the response." };
+      },
+      deflect: async () => { respond(); },
+      recover: async () => { respond(); return { kind: "recovered" }; },
+    });
+    const outcome = await clock.settle(pending, 500);
+    assert.equal(timerBeforeThird, true, "the zero-delay timer ran before the third response");
+    assert.equal(outcome.kind, "died");
+    assert.equal(clock.pendingTimers(), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  });
+}
+
+test("a response that took a tick does not wait", async () => {
+  const { bot } = createFakeBot();
+  let ticks = 0, fights = 0;
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...operations(bot),
+    ticks: () => ticks,
+    nextTick: async () => { assert.fail("A response that already took a tick must not wait again."); },
+    fight: async () => {
+      ticks++;
+      return ++fights === 2 ? result("died", 1)
+        : { ...result("cancelled", 0), kind: "response_required", observation: "Reconsider after a tick." };
+    },
+    recover: async () => { assert.fail("No recovery selected."); },
+  });
+  assert.equal(outcome.kind, "died");
+});
+
+test("an abort during the next tick cancels once and removes the wait even with physics stopped", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const harness = createFakeBot({ clock });
+  const { bot } = harness;
+  bot.physicsEnabled = false;
+  harness.server.stop();
+  const age = bot.time.age;
+  const added = listenersAddedSince(bot);
+  const request = new AbortController();
+  let waiting = false, settlements = 0, fights = 0;
+  const pending = runEngagement(request.signal, {
+    ...operations(bot),
+    nextTick: () => { waiting = true; return waitForPhysicsTicks(bot, 1, request.signal); },
+    fight: async () => {
+      if (++fights === 10_000) request.abort("same-tick spin");
+      return { ...result("cancelled", 0), kind: "response_required", observation: "Reconsider now." };
+    },
+    recover: async () => { assert.fail("No recovery selected."); },
+  });
+  void pending.then(() => { settlements++; });
+  await clock.advance(0);
+  assert.equal(waiting, true, "cancellation happens with the next-tick wait armed");
+  assert.equal(added("physicsTick"), 1);
+  request.abort("a successor took the body");
+  assert.equal((await clock.settle(pending, 50)).kind, "cancelled");
+  await clock.advance(100);
+  assert.equal(bot.time.age, age);
+  assert.equal(settlements, 1);
+  assert.equal(added("physicsTick"), 0);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+});
+
+for (const exit of ["normal", "abort", "throw"] as const) {
+  test(`a mob engagement removes its tick listener after ${exit}`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot } = createFakeBot({ clock, carried: { diamond_sword: 1 },
+      entities: { 7: { name: "cow", position: new Vec3(2, 64, 0) } } });
+    await using navigation = createNavigationRuntime(bot);
+    using perception = new CombatPerception(bot);
+    using footingRecovery = new FootingRecovery(bot, navigation.world);
+    using _pace = serverTickPace(bot);
+    using _readiness = swingReadiness(bot);
+    const added = listenersAddedSince(bot);
+    const clientAdded = listenersAddedSince(bot._client);
+    const request = new AbortController();
+    const failure = new Error("fight setup failed");
+    let positions = 0, settlements = 0;
+    const pending = runMobEngagement({ bot, navigation, perception, footingRecovery,
+      policy: new SurvivalPolicyState(bot), survival: survivalResources(), reportDecision: () => {} },
+    7, "pursue", request.signal, {
+      position: () => {
+        positions++;
+        assert.ok(added("physicsTick") > 0, "the engagement observes ticks during the fight");
+        if (exit === "throw") throw failure;
+        if (exit === "abort") request.abort("caller cancelled");
+      },
+      execution: () => {}, policyUse: () => {},
+    });
+    void pending.then(() => { settlements++; }, () => { settlements++; });
+    if (exit === "normal") bot.entities[7]!.isValid = false;
+    if (exit === "throw") await clock.settle(assert.rejects(pending, failure), 1_000);
+    else assert.equal((await clock.settle(pending, 1_000)).kind, exit === "abort" ? "cancelled" : "target_lost");
+    assert.equal(positions, 1, "the physical fight was entered");
+    await clock.advance(100);
+    assert.equal(settlements, 1);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(clientAdded("explosion"), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  });
+}
+
+// The caller's own goal (`satisfied`) ends an engagement at its next decision turn (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+test("a caller goal met during a fight ends the engagement at the next turn, keeping the fight's attacks", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let fights = 0;
+  let satisfied = false;
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...operations(bot),
+    satisfied: () => satisfied,
+    fight: async () => {
+      fights++;
+      satisfied = true;
+      // A second fight (the old code's path) ends the test's loop with a kill instead of spinning on microtasks.
+      return fights === 1
+        ? { ...result("cancelled", 2), kind: "response_required", observation: "Boundary response." }
+        : result("died", 1);
+    },
+    recover: async () => {
+      throw new Error("No recovery is needed.");
+    },
+  });
+  assert.equal(outcome.kind, "target_lost");
+  assert.equal(outcome.attacks, 2);
+  assert.equal(fights, 1);
+});
+
+// A goal already met at the first turn: abort, then death, then the goal decide (order of runEngagement).
+for (const row of [
+  { name: "ends the engagement before any fight", health: 20, aborted: false, kind: "target_lost" },
+  { name: "loses to an aborted signal", health: 20, aborted: true, kind: "cancelled" },
+  { name: "loses to a dead bot", health: 0, aborted: false, kind: "bot_died" },
+] as const)
+  test(`a caller goal already met at the first turn ${row.name}`, async () => {
+    const bot = createFakeBot({ health: row.health }).bot;
+    const request = new AbortController();
+    if (row.aborted) request.abort("user cancelled");
+    const outcome = await runEngagement(request.signal, {
+      ...operations(bot),
+      satisfied: () => true,
+      fight: async () => {
+        throw new Error("A met goal starts no fight.");
+      },
+      recover: async () => {
+        throw new Error("A met goal starts no recovery.");
+      },
+    });
+    assert.equal(outcome.kind, row.kind);
+    assert.equal(outcome.attacks, 0);
+  });
+
+test("a caller goal that is never met leaves the engagement outcome unchanged", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let fights = 0;
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...operations(bot),
+    satisfied: () => false,
+    fight: async () => {
+      fights++;
+      return fights === 1
+        ? { ...result("cancelled", 1), kind: "response_required", observation: "Boundary response." }
+        : result("died", 2);
+    },
+    recover: async () => ({ kind: "recovered" }),
+  });
+  assert.equal(outcome.kind, "died");
+  assert.equal(outcome.attacks, 3);
+  assert.equal(fights, 2);
 });

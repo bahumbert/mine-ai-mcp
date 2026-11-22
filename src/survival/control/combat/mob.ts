@@ -1,11 +1,14 @@
 import { ExecutionScope } from "../../../execution/execution-scope.js";
+import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { isHostile } from "../../perception/combat/threats.js";
 import { combatDecisionEvidence } from "../../policy/combat/decision.js";
 import type { CombatPosition } from "../../positioning/combat/position.js";
 import { runMobFight } from "../../responses/fight/run.js";
 import type { FightEnvironment } from "../../responses/fight/scene.js";
 import { ProtectedAttackProgress } from "./attack-progress.js";
-import type { CombatOutcome, CombatResult } from "./contract.js";
+import { EndermanProgress } from "./enderman-progress.js";
+import { QuarryProgress } from "./quarry-progress.js";
+import type { CombatDecision, CombatOutcome, CombatResult } from "./contract.js";
 import { runEngagement } from "./engagement.js";
 import { CombatExecution, type CombatExecutionSnapshot } from "./execution.js";
 import { observeCombatDecision } from "./observation.js";
@@ -32,6 +35,82 @@ export interface MobObservation {
   policyUse(value: "fight" | "recovery"): void;
 }
 
+/** Tick and explosion evidence spans deflections, recoveries and physical fights. */
+function observeEngagementEvents(bot: FightEnvironment["bot"]) {
+  let explosions = 0, ticks = 0;
+  const onExplosion = () => { explosions++; };
+  const onTick = () => { ticks++; };
+  bot._client.on("explosion", onExplosion);
+  bot.on("physicsTick", onTick);
+  return {
+    get explosions() { return explosions; },
+    ticks: () => ticks,
+    stop: () => {
+      bot._client.off("explosion", onExplosion);
+      bot.off("physicsTick", onTick);
+    },
+  };
+}
+
+/** Read current policy and answered responses through the same context for every physical response. */
+function engagementContext({ bot, policy, perception, survival }: FightEnvironment) {
+  return {
+    resolvedIds: perception.resolvedIds,
+    attackerIds: perception.attackerIds,
+    perception,
+    survival,
+    get policy() { return policy.combat; },
+    get food() { return policy.food; },
+    get blockedResponses() { return answeredResponses(bot, () => policy.effective, survival); },
+  };
+}
+
+/** A deflect or recovery owns its own execution observation while quarry clocks are paused. */
+async function runResponseEffect<T>(
+  environment: FightEnvironment,
+  targetId: number,
+  observe: MobObservation,
+  phase: "recover" | "defend",
+  run: () => Promise<T>,
+): Promise<T> {
+  const { bot, reportDecision } = environment;
+  observe.position(null);
+  observe.policyUse(phase === "recover" ? "recovery" : "fight");
+  using scope = new ExecutionScope({ bot: bot.username, operation: `combat_${phase}`, targetId });
+  const execution = new CombatExecution(scope, (current, completedEffects) =>
+    reportDecision({ kind: "phase", targetId, phase: current, completedEffects }),
+  );
+  observe.execution(() => execution.snapshot(0));
+  const tick = () => {
+    execution.tick();
+    execution.progress.observe(bot.health);
+  };
+  bot.on("physicsTick", tick);
+  try {
+    return await execution.run(phase, run);
+  } finally {
+    bot.off("physicsTick", tick);
+    observe.policyUse("fight");
+  }
+}
+
+/** The caller's goal, read at the engagement's turns and the fight's tactic boundaries; its first true is recorded once. */
+function recordingGoal(
+  goal: () => boolean,
+  targetId: number,
+  reportDecision: (event: CombatDecision) => void,
+): () => boolean {
+  let recorded = false;
+  return () => {
+    if (!goal()) return false;
+    if (!recorded) {
+      recorded = true;
+      reportDecision({ kind: "response", evidence: { response: "caller_satisfied", targetId } });
+    }
+    return true;
+  };
+}
+
 /** Bind the shared request coordinator to physical responses under one owner's signal. */
 export async function runMobEngagement(
   environment: FightEnvironment,
@@ -39,64 +118,32 @@ export async function runMobEngagement(
   movement: "pursue" | "hold",
   signal: AbortSignal,
   observe: MobObservation,
+  callerSatisfied?: () => boolean,
 ): Promise<CombatOutcome> {
-  const { bot, navigation, policy, perception, survival, reportDecision } = environment;
+  const { bot, navigation, policy, survival, reportDecision } = environment;
+  const satisfied = callerSatisfied && recordingGoal(callerSatisfied, targetId, reportDecision);
   const minimumHealth =
     movement === "pursue" && isHostile(bot.entities[targetId]) ? policy.combat.engage_min_health : 0;
   const purpose =
     movement === "pursue"
       ? ({ kind: "pursuit", targetId, minimumHealth } as const)
       : ({ kind: "contact_defence", targetId } as const);
-  const context = {
-    resolvedIds: perception.resolvedIds,
-    attackerIds: perception.attackerIds,
-    unreachableIds: new Set<number>(),
-    perception,
-    survival,
-    get policy() {
-      return policy.combat;
-    },
-    get food() {
-      return policy.food;
-    },
-    get blockedResponses() {
-      return answeredResponses(bot, () => policy.effective, survival);
-    },
-  };
+  const context = engagementContext(environment);
   using protectedProgress = new ProtectedAttackProgress(
     survival.budgets,
     targetId,
     policy.combat.protected_wait_ticks,
   );
-  const responseEffect = async <T>(phase: "recover" | "defend", run: () => Promise<T>): Promise<T> => {
-    observe.position(null);
-    observe.policyUse(phase === "recover" ? "recovery" : "fight");
-    using scope = new ExecutionScope({ bot: bot.username, operation: `combat_${phase}`, targetId });
-    const execution = new CombatExecution(scope, (current, completedEffects) =>
-      reportDecision({ kind: "phase", targetId, phase: current, completedEffects }),
-    );
-    observe.execution(() => execution.snapshot(0));
-    const tick = () => {
-      execution.tick();
-      execution.progress.observe(bot.health);
-    };
-    bot.on("physicsTick", tick);
-    try {
-      return await execution.run(phase, run);
-    } finally {
-      bot.off("physicsTick", tick);
-      observe.policyUse("fight");
-    }
-  };
+  using endermanProgress = new EndermanProgress(survival.budgets, policy.combat.enderman_wait_ticks);
+  using quarryProgress = new QuarryProgress(survival.budgets, targetId, policy.combat.quarry_wait_ticks, () => bot.time?.age);
   // Evidence belongs to the engagement, including intervals between physical responses.
-  let explosions = 0;
-  const onExplosion = () => {
-    explosions++;
-  };
-  bot._client.on("explosion", onExplosion);
+  const events = observeEngagementEvents(bot);
   try {
     const result = await runEngagement(signal, {
       purpose,
+      ticks: events.ticks,
+      ...(satisfied && { satisfied }),
+      nextTick: () => waitForPhysicsTicks(bot, 1, signal),
       observe: () => observeCombatDecision(bot, context),
       record: (facts, response) =>
         reportDecision({ kind: "response", evidence: combatDecisionEvidence(facts, purpose, response) }),
@@ -105,17 +152,19 @@ export async function runMobEngagement(
         if (!target?.isValid) return emptyCombatEvidence(targetId, "target_lost");
         return runMobFight(
           environment,
-          { target, movement, minimumHealth, signal, ownerSignal: signal },
+          { target, movement, minimumHealth, signal, ownerSignal: signal, ...(satisfied && { satisfied }) },
           protectedProgress,
+          endermanProgress,
           observe,
+          quarryProgress,
         );
       },
       deflect: (projectileId) =>
-        responseEffect("defend", async () => {
+        runResponseEffect(environment, targetId, observe, "defend", async () => {
           await deflectWithinCombat(bot, projectileId, context, signal);
         }),
       recover: () =>
-        responseEffect("recover", async () => {
+        runResponseEffect(environment, targetId, observe, "recover", async () => {
           reportDecision({
             kind: "recovery",
             targetId,
@@ -134,8 +183,8 @@ export async function runMobEngagement(
           return result;
         }),
     });
-    return { ...result, explosions };
+    return { ...result, explosions: events.explosions };
   } finally {
-    bot._client.off("explosion", onExplosion);
+    events.stop();
   }
 }

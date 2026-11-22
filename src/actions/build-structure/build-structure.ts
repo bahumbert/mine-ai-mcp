@@ -18,6 +18,7 @@ import { DIG_REACH } from "../../navigation/movements/excavation.js";
 import {
   build,
   BuildProgress,
+  keptWith,
   type BuildCell,
   type BuildCellState,
   type BuildRequest,
@@ -26,6 +27,7 @@ import {
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { placeBlock } from "../../world/index.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
@@ -96,7 +98,7 @@ function recordingPlacements(bot: Bot, botData: SqlBotData, physics: BuildStruct
     ...physics,
     place: async (placement) => {
       const result = await physics.place(placement);
-      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block);
+      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block, familyIndexOf(bot));
       return result;
     },
   };
@@ -258,7 +260,7 @@ async function buildAttempt(run: BuildRun, context: ActionContext): Promise<Buil
     ...physics,
     // Its own correct cells, and what earlier calls of the same structure built (`keep`): a route to the roof must
     // not dig through the walls (live 2026-10-01: 11 cells of a finished house dug out).
-    movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : new Set([...protectedCells, ...kept])),
+    movements: (protectedCells) => physics.movements(kept.size === 0 ? protectedCells : keptWith(protectedCells, kept)),
     route: (options) => physics.route({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
     breakInPlace: (options) => physics.breakInPlace({ ...options, ...(toolLoss && { onToolSelected: toolLoss.select }) }),
     cells: request.cells.map(toBuildCell),

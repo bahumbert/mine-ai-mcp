@@ -7,29 +7,98 @@ import {
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 import path from "node:path";
 import { Vec3 } from "vec3";
+import { startFreezeWatch, type FreezeWatch, type FreezeWatchOptions } from "../../src/diagnostics/freeze-watch.ts";
 
 export type Runtime = Awaited<ReturnType<typeof createMinecraftRuntime>>;
+
+/** What a scenario closes: its runtime's `close`, and its disposal (`await using`). */
+export interface RuntimeHandle extends AsyncDisposable {
+  close(): Promise<void>;
+}
+
+export type RuntimeOptions = Pick<MinecraftRuntimeOptions, "stepFieldProvider" | "createCombatController" | "incidents">;
+
+/** The two things `openRuntimeWith` builds outside itself: the runtime and its freeze watch. Tests inject stubs. */
+export interface RuntimeDeps<R extends RuntimeHandle, B extends { readonly username: string }> {
+  createRuntime(bot: B, options: MinecraftRuntimeOptions): Promise<R>;
+  startWatch(options: FreezeWatchOptions): FreezeWatch;
+}
 
 /** One runtime per scenario, named after the behaviour under test. */
 // @function-metrics size=1 branches=0 fan-out=1 depth=2 interface=2 fan-in=2
 export function openRuntime(
   context: MineAiScenarioContext,
   worldId: string,
-  options: Pick<MinecraftRuntimeOptions, "stepFieldProvider" | "createCombatController" | "incidents"> = {},
+  options: RuntimeOptions = {},
 ): Promise<Runtime> {
-  const artifacts = process.env.MINE_LABS_ARTIFACTS_DIR;
-  return createMinecraftRuntime(context.bot, {
+  return openRuntimeWith(
+    { createRuntime: createMinecraftRuntime, startWatch: startFreezeWatch },
+    context.bot,
+    worldId,
+    options,
+    process.env.MINE_LABS_ARTIFACTS_DIR,
+  );
+}
+
+/**
+ * Open the runtime of `bot`. With an artifacts folder, also start a freeze watch beside the bot's records: a
+ * main thread that never yields then leaves a record naming its last phase markers. The watch starts only once the
+ * runtime exists, so a failed creation starts none.
+ */
+export async function openRuntimeWith<R extends RuntimeHandle, B extends { readonly username: string }>(
+  deps: RuntimeDeps<R, B>,
+  bot: B,
+  worldId: string,
+  options: RuntimeOptions,
+  artifacts: string | undefined,
+): Promise<R> {
+  const runtime = await deps.createRuntime(bot, {
     ...options,
     ...(artifacts
-      ? { incidents: { ...options.incidents, directory: path.join(artifacts, context.bot.username, "incidents") } }
+      ? { incidents: { ...options.incidents, directory: path.join(artifacts, bot.username, "incidents") } }
       : {}),
     botData: {
       // Failed collection runs need the complete semantic chronology after
       // the client closes; incident files only retain bounded physical windows.
       storage: artifacts ? { kind: "persistent", root: path.join(artifacts, "bot-data") } : { kind: "temporary" },
-      identity: { worldId, scope: { kind: "bot", botId: context.bot.username } },
+      identity: { worldId, scope: { kind: "bot", botId: bot.username } },
     },
   });
+  if (artifacts) {
+    const watch = deps.startWatch({ dir: path.join(artifacts, bot.username, "freezes"), botName: bot.username });
+    disposeWatchOnClose(runtime, watch);
+  }
+  return runtime;
+}
+
+/**
+ * Dispose `watch` exactly once, after the runtime's `close` resolves or throws, whichever of `close` and
+ * `asyncDispose` runs first. Both are wrapped on the runtime itself: the class's own `asyncDispose` calls `this.close()`,
+ * so it reaches the wrapper and the flag keeps the second call from disposing again.
+ */
+function disposeWatchOnClose(runtime: RuntimeHandle, watch: FreezeWatch): void {
+  let disposed = false;
+  const releaseWatch = () => {
+    if (disposed) return;
+    disposed = true;
+    watch[Symbol.dispose]();
+  };
+  const close = runtime.close.bind(runtime);
+  const asyncDispose = runtime[Symbol.asyncDispose].bind(runtime);
+  runtime.close = async () => {
+    try {
+      await close();
+    } finally {
+      releaseWatch();
+    }
+  };
+  runtime[Symbol.asyncDispose] = async () => {
+    try {
+      await asyncDispose();
+    } finally {
+      releaseWatch();
+    }
+  };
 }
 
 /** How long to give a bot to land on its pinned column before the fixture gives up on it. */

@@ -26,7 +26,8 @@ server logs, and the seed prompt — are published as a
 This fork builds on the runtime above to run several independent AI players in one Minecraft Java 1.21.4 world, as
 companions or as rivals. Each one gathers, crafts, builds shelters and settles with the others, toward a small
 civilisation. Each player is run by an AI model of your choice, local (through Ollama) or remote, and its persona
-decides what it does: its choices are not scripted.
+decides what it does: its choices are not scripted. The Minecraft server the installer sets up runs Paper by default (a
+faster server program for the same game); vanilla stays a choice.
 
 ### Download for Windows and code signing policy
 

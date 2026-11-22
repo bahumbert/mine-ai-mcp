@@ -7,10 +7,22 @@ import {
   type FakeBotOptions,
   type FakeCell,
   type FakeEntitySpec,
+  type FakeServer,
   createFakeBot,
   createFakeClock,
+  itemOf,
+  listenersAddedSince,
 } from "../../test-support/fake-bot/index.js";
+import { regionRefusalText, setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
+import { observeHostileResponse } from "../control/combat/observation.js";
+import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
+import { exactBlockGoal } from "../../navigation/goals/index.js";
+import { createMovementPolicy } from "../../navigation/movements/policy.js";
+import { createNavigationRuntime } from "../../navigation/runtime.js";
+import { SEALED_BOX, sealedBox } from "../../test-support/shelter-shell.js";
+import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
+import { PHYSICS_TICK_WALL_MS } from "../../utils/physics-ticks.js";
 import { hideInPlace } from "./hide.js";
 import { capBlock, countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../positioning/combat/hide-blocks.js";
 
@@ -23,12 +35,6 @@ function boxOf(cell: FakeCell, x: Range, y: Range, z: Range): Record<string, Fak
     for (let cy = y[0]; cy <= y[1]; cy++) for (let cz = z[0]; cz <= z[1]; cz++) cells[`${cx},${cy},${cz}`] = cell;
   return cells;
 }
-
-/** The eight wall cells (feet and head height) and the cap around a bot standing at (0, 64, 0): the box the hide closes. */
-const SEALED_BOX: Record<string, FakeCell> = Object.fromEntries([
-  ...[[1, 0], [-1, 0], [0, 1], [0, -1]].flatMap(([x, z]) => [64, 65].map((y) => [`${x},${y},${z}`, "stone"])),
-  ["0,66,0", "stone"],
-]);
 
 type SceneOptions = Omit<FakeBotOptions, "clock" | "overrides"> & {
   readonly overrides?: FakeBotOptions["overrides"];
@@ -60,18 +66,19 @@ function refuseEquip(message: string): Pick<NonNullable<FakeBotOptions["override
 
 /** The clock a hide may take before the test calls it stuck. */
 const HIDE_LIMIT_MS = 150_000;
+/** The deadline of a hide a test expects to withhold every swing, so only the deadline ends it. */
+const SHORT_HIDE_MS = 2_000;
 
-function hide(bot: FakeBot, resolvedIds: Set<number> = new Set()): ReturnType<typeof hideInPlace> {
+function hide(bot: FakeBot, resolvedIds: Set<number> = new Set(), maximumMs: number = DEFAULT_COMBAT_POLICY.recovery_timeout_ms): ReturnType<typeof hideInPlace> {
   return hideInPlace(bot, {
     threatContext: {
       ...combatTestContext(bot),
       resolvedIds,
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
     signal: new AbortController().signal,
     recoverTo: 18,
-    maximumMs: DEFAULT_COMBAT_POLICY.recovery_timeout_ms,
+    maximumMs,
   });
 }
 
@@ -129,6 +136,7 @@ test("a bot already sealed in is hidden, not failed", async () => {
   assert.equal(result.enclosed, true);
   assert.equal(result.dug, 0);
   assert.equal(result.walled, 0);
+  assert.equal(result.margin.placed, 0, "no block is carried: the margin cells wait for a spare shell");
   assert.equal(result.error, undefined);
 });
 
@@ -180,6 +188,7 @@ test("with nothing to dig and nothing to place, the failure says the bot carried
 test("a wall-in that cannot clear the body's overlap refuses before placing walls", async () => {
   let equips = 0;
   const { bot, clock } = scene({
+    mockedClock: true,
     health: 20,
     position: new Vec3(0.5, 64, 0.146),
     carried: { cobblestone: 32 },
@@ -190,19 +199,23 @@ test("a wall-in that cannot clear the body's overlap refuses before placing wall
       },
     },
   });
+  using _installed = clock.install();
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /could not centre inside/);
+  assert.equal(result.refusal?.cause, "not_centred");
   assert.equal(equips, 0);
   assert.equal(result.walled, 0);
 });
 
-test("wall centering does not walk off adjacent lip support into an unsupported origin cell", async () => {
+for (const floor of ["lip", "slab"] as const) test(`wall centering refuses an unsupported ${floor} floor`, async () => {
   let presses = 0;
   const { bot, clock } = scene({
+    mockedClock: true,
     health: 20,
-    position: new Vec3(0.5, 64, 0.146),
+    position: new Vec3(0.5, 64, floor === "lip" ? 0.146 : 0.5),
     groundY: null,
+    ...(floor === "slab" ? { cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]) } : {}),
     carried: { cobblestone: 32 },
     overrides: {
       // Counts the controls pressed; the fake's clearControlStates releases each control through this too.
@@ -211,22 +224,17 @@ test("wall centering does not walk off adjacent lip support into an unsupported 
       },
     },
   });
+  using _installed = clock.install();
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
-  assert.equal(presses, 0);
-});
-
-test("a partial collision block without center-height footing is not a wall-in floor", async () => {
-  const { bot, clock } = scene({
-    health: 20,
-    groundY: null,
-    cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]),
-    carried: { cobblestone: 32 },
-  });
-  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
-  assert.equal(result.kind, "failed");
-  assert.match(result.error ?? "", /no solid floor/);
+  assert.equal(result.refusal?.cause, "no_floor");
+  if (floor === "lip") assert.equal(presses, 0);
+  else {
+    assert.deepEqual(result.refusal?.floor?.shapes, [[0, 0, 0, 1, 0.5, 1]]);
+    assert.equal(result.refusal?.position.y, 64);
+    assert.equal(result.refusal?.onGround, true);
+  }
 });
 
 test("breaking a block without falling into its cell is a failed hide, even at full health", async () => {
@@ -294,12 +302,14 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   let raisedAt: number | undefined;
   const { bot, clock, server } = scene({
     health: 20,
+    mockedClock: true,
     carried: { iron_sword: 1, iron_pickaxe: 1, shield: 1, cobblestone: 32 },
     entities: {
       2: closeMob("wither_skeleton"),
       3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) },
     },
   });
+  using _timers = clock.install();
   const intruder = bot.entities[2]!;
   const bystander = bot.entities[3]!;
   const resolvedIds = killableIntruder(bot, intruder.id, 3); // the pickaxe's one hit is 4 at a full swing (`weapon-damage-pickaxes`)
@@ -330,6 +340,54 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   assert.equal(bot.usingHeldItem, false, "the construction owner releases its shield on settlement");
 });
 
+/**
+ * A shelter intruder with an Enderman beside it, the bot holding `held` as its only weapon. The unequip is a no-op: which
+ * item the loadout puts in the hand is the loadout's rule (survival/weapons/equipment.ts), this test pins the swing
+ * check on what is held when the bystander is in sweep range.
+ */
+function heldWeaponBesideBystander(held: string, datapackSwords: readonly string[]) {
+  const harness = scene({
+    health: 20,
+    carried: { [held]: 1, cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton"), 3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) } },
+    overrides: { unequip: async () => {} },
+    mockedClock: true, // the hide never ends by itself when it withholds the swing: its 2 s deadline does
+  });
+  const { bot } = harness;
+  if (datapackSwords.length > 0) addItemsToServerTag(harness, "swords", datapackSwords);
+  const resolvedIds = killableIntruder(bot, 2, 1);
+  const equip = bot.equip;
+  bot.equip = async (item, destination) => {
+    if (typeof item === "number") throw new Error("Fixture expects a resolved item.");
+    if (item.name === "cobblestone") throw new Error("construction boundary");
+    return equip(item, destination);
+  };
+  return { ...harness, resolvedIds };
+}
+
+test("shelter contact withholds vanilla and datapack swords beside a neutral Enderman", async () => {
+  for (const { held, datapackSwords } of [
+    ...["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]
+      .map(held => ({ held, datapackSwords: [] })),
+    { held: "stick", datapackSwords: ["stick"] },
+  ]) {
+    const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander(held, datapackSwords);
+    using _installed = clock.install();
+    assert.equal(bot.heldItem?.name, held);
+    const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
+    assert.deepEqual(attackedIds(server), [], `the ${held}'s sweep would have hit the Enderman`);
+    assert.equal(result.swings, 0, held);
+  }
+});
+
+test("shelter contact swings a held item outside the swords family beside a neutral Enderman", async () => {
+  const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander("stick", []);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
+  assert.deepEqual(attackedIds(server), [2]);
+  assert.equal(result.swings, 1);
+});
+
 test("a stopped physics stream does not prevent hide cancellation", async () => {
   const { bot } = scene({ health: 20, groundY: null });
   bot.entity.onGround = false;
@@ -344,7 +402,6 @@ test("a stopped physics stream does not prevent hide cancellation", async () => 
       ...combatTestContext(bot),
       resolvedIds: new Set(),
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
   });
   abort.abort(new Error("hide cancelled"));
@@ -433,6 +490,72 @@ test("a sealed-in bot with nothing to eat and hunger below the regeneration bar 
   assert.match(result.error ?? "", /no food, and hunger 13 is below the regeneration bar/);
 });
 
+// The probe's state (fortress-crossfire-cover, 1 red in 24 at 20 tps): a fire lit in the feet cell while the shell closed around it.
+const BURNING_SHELL: Record<string, FakeCell> = { ...SEALED_BOX, "0,64,0": "fire" };
+
+for (const ticksPerSecond of [20, 10]) test(`a shell closed around a fire in the feet cell digs the fire out and recovers at ${ticksPerSecond} tps`, async () => {
+  // Health already at the floor (the fake does not regenerate here): the fire is what the hold must clear first.
+  // Stopgap (unverified on the real server): this scene's dig is the fake's client prediction, not the server clock; the
+  // server-clock dig at 20 and 10 tps, and a stopped server, are in recover.test.ts.
+  const { bot, clock } = scene({ health: 18, food: 20, server: { ticksPerSecond }, cells: BURNING_SHELL });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+
+  assert.equal(result.kind, "recovered");
+  assert.equal(result.enclosed, true, "the shell was closed before the fire was seen");
+  assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "air", "the fire in the feet cell is gone");
+});
+
+test("a shell around a fire that cannot be dug fails as exposed, and digs nothing", async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, food: 20, cells: BURNING_SHELL, overrides: { canDigBlock: () => false } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error, "The shelter became exposed or unsafe during recovery (fire).");
+  assert.equal(result.refusal?.cause, "exposed");
+  assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "fire");
+  // Status 0 starts a dig; the hide's own item release is status 5.
+  assert.equal(server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0), false, "no dig was started");
+});
+
+test("death while a construction hazard is observed does not report a refusal", async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 7 });
+  using _installed = clock.install();
+  const result = await clock.settle(hideInPlace(bot, {
+    threatContext: combatTestContext(bot), signal: new AbortController().signal, recoverTo: 18, maximumMs: 5_000,
+    unsafe: () => { bot.health = 0; return "danger"; },
+  }), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal, undefined);
+});
+
+test("recovery exposure records a projectile in flight", async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 7, cells: SEALED_BOX,
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal?.cause, "exposed");
+  assert.equal(result.refusal?.hazard, "projectile");
+  assert.deepEqual(result.refusal?.projectiles[0], { id: 61, name: "arrow",
+    position: { x: 0.5, y: 65, z: 0.1 }, velocity: { x: 0, y: 0, z: 0.3 } });
+});
+
+test("cancellation during exposure leaves no refusal and the next hide recovers", async () => {
+  const { bot, clock, entities } = scene({ mockedClock: true, health: 7, cells: SEALED_BOX,
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const abort = new AbortController();
+  const pending = hideInPlace(bot, { threatContext: combatTestContext(bot), signal: abort.signal, recoverTo: 18, maximumMs: 5_000 });
+  queueMicrotask(() => abort.abort(new Error("hide cancelled")));
+  const result = await clock.settle(pending, 6_000);
+  entities.remove(61);
+  bot.health = 20;
+  const next = await clock.settle(hide(bot), 6_000);
+  assert.equal(next.kind, "recovered");
+  assert.equal(result.kind === "recovered" ? undefined : result.refusal, undefined);
+});
+
 const LIQUID_BODIES = [
   ["water", "isInWater"],
   ["lava", "isInLava"],
@@ -444,7 +567,6 @@ function hideBounded(bot: FakeBot, options: { readonly signal?: AbortSignal; rea
       ...combatTestContext(bot),
       resolvedIds: new Set(),
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
     signal: options.signal ?? new AbortController().signal,
     recoverTo: 18,
@@ -456,6 +578,7 @@ for (const [liquid, flag] of LIQUID_BODIES) {
   test(`hideInPlace in ${liquid} fails at once with [SHELTER]`, async () => {
     let equips = 0;
     const { bot, clock } = scene({
+      mockedClock: true,
       health: 7,
       carried: { cobblestone: 32 },
       overrides: {
@@ -465,10 +588,13 @@ for (const [liquid, flag] of LIQUID_BODIES) {
         },
       },
     });
+    using _installed = clock.install();
     Reflect.set(bot.entity, flag, true);
     const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
     assert.equal(result.kind, "failed");
     assert.match(result.error ?? "", /^\[SHELTER\].*liquid/);
+    assert.equal(result.refusal?.cause, "liquid");
+    assert.ok(result.refusal?.shell.length);
     assert.equal(equips, 0, "nothing is dug or placed in a liquid");
     assert.equal(result.dug + result.walled, 0);
   });
@@ -601,4 +727,457 @@ test("a stopped physics stream bounds a wait by the monotonic deadline, though t
   assert.match(result.error ?? "", /The shelter was not finished within 3 s/);
   const tookMs = clock.now() - started;
   assert.ok(tookMs >= 3_000 && tookMs < 3_200, `the hide ended after ${tookMs} ms of clock, not at its 3000 ms deadline`);
+});
+
+/**
+ * The clock moves in slices shorter than a tick: a 0 ms timer (a bound already past) then fires before the next tick, as it
+ * does live (a slice of a whole tick delivers the tick first and hides a wait that ended early).
+ */
+const GUARD_SLICE_MS = 10;
+
+/** A bot with an iron sword and a shield beside a live wither skeleton in its cell column; the hide has `maximumMs` of construction. */
+function guardedHide(maximumMs: number) {
+  const harness = scene({
+    health: 20,
+    carried: { iron_sword: 1, shield: 1, cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton") },
+    mockedClock: true,
+  });
+  const { bot, server } = harness;
+  const equip = bot.equip;
+  // The tools equip as the game does; only the construction's block is refused, so the hide ends after the contact.
+  bot.equip = async (item, destination) => {
+    if (typeof item === "number") throw new Error("Fixture expects a resolved item.");
+    if (item.name === "cobblestone") throw new Error("construction boundary");
+    return equip(item, destination);
+  };
+  const ticks = { count: 0, shieldRaisedAt: undefined as number | undefined, attackedAt: undefined as number | undefined };
+  bot.on("physicsTick", () => void (ticks.count += 1));
+  server.onPacket("use_item", () => void (ticks.shieldRaisedAt ??= ticks.count));
+  onAttack(server, () => void (ticks.attackedAt ??= ticks.count));
+  return { ...harness, ticks, result: () => hide(bot, new Set(), maximumMs) };
+}
+
+test("past the construction deadline a shield is still held SHIELD_READY_TICKS before it counts, and the repel swing waits its cooldown", async () => {
+  // 1 ms of construction: the first pass starts inside it and the repel's waits all fall after it.
+  const { clock, ticks, result } = guardedHide(1);
+  using _installed = clock.install();
+  await clock.settle(result(), HIDE_LIMIT_MS, GUARD_SLICE_MS);
+  assert.ok(ticks.shieldRaisedAt !== undefined && ticks.attackedAt !== undefined, "the shield went up and the swing came");
+  assert.ok(ticks.attackedAt - ticks.shieldRaisedAt >= 5, `the swing came ${ticks.attackedAt - ticks.shieldRaisedAt} ticks after the shield went up`);
+  // The swing's own cooldown is held before the pass hands back (an iron sword recharges in 12.5 ticks).
+  assert.ok(ticks.count - ticks.attackedAt >= 12, `${ticks.count - ticks.attackedAt} ticks after the swing`);
+});
+
+test("a guard hold ends at its wall twin when physics stops, not at the construction deadline", async () => {
+  const { bot, clock, result } = guardedHide(1);
+  using _installed = clock.install();
+  bot.physicsEnabled = false; // the client runs no tick
+  const started = clock.now();
+  await clock.settle(result(), HIDE_LIMIT_MS, GUARD_SLICE_MS);
+  const tookMs = clock.now() - started;
+  // Unknown pace waits to each server-paced backstop: (5 + 20) * 150 + (13 + 20) * 150 = 8.7 s.
+  assert.equal(tookMs, 8_700, `the hide took ${tookMs} ms of clock with physics stopped`);
+});
+
+test("an abort mid-dig stops digging", async () => {
+  const abort = new AbortController();
+  const { bot, clock, server } = scene({ health: 20 });
+  const pending = hideInPlace(bot, {
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set() },
+    signal: abort.signal,
+    recoverTo: 18,
+    maximumMs: 60_000,
+  });
+  const rejected = assert.rejects(pending, /hide cancelled/);
+  await clock.advance(1_000);
+  assert.ok(bot.targetDigBlock, "the dig is under way (bare hand on stone takes seconds)");
+  abort.abort(new Error("hide cancelled"));
+  await rejected;
+  assert.equal(bot.targetDigBlock, null, "the pending dig ended");
+  assert.ok(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 1),
+    "the server was told the dig stopped",
+  );
+});
+
+test("an abort during the look before the dig starts no dig", async () => {
+  const abort = new AbortController();
+  const { bot, clock, server } = scene({
+    health: 20,
+    // Scripted: the cancel lands while the bot turns to the shaft cell (the first look of a hide with no intruder).
+    overrides: { lookAt: async () => abort.abort(new Error("hide cancelled")) },
+  });
+  const pending = hideInPlace(bot, {
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set() },
+    signal: abort.signal,
+    recoverTo: 18,
+    maximumMs: 60_000,
+  });
+  await clock.settle(assert.rejects(pending, /hide cancelled/), HIDE_LIMIT_MS);
+  assert.equal(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0),
+    false,
+    "no dig was started",
+  );
+});
+
+/** A shaft of `cells` (top first) under a bot standing at (0.5, 64, 0.5) on stone. */
+function shaftOf(...cells: FakeCell[]): Record<string, FakeCell> {
+  return Object.fromEntries(cells.map((cell, index) => [`0,${63 - index},0`, cell]));
+}
+
+test("a first shaft cell that digs slower than the time left fails the hide naming the block and both times", async () => {
+  const { bot, clock, server } = scene({ health: 20, cells: shaftOf("deepslate"), mockedClock: true });
+  using _installed = clock.install();
+  const slow = bot.blockAt(new Vec3(0, 63, 0))!;
+  assert.equal(slow.name, "deepslate");
+  const digMs = bot.digTime(slow);
+  assert.ok(digMs > 2_000, `by hand a deepslate cell takes ${digMs} ms, more than the 2 s left`);
+  const result = await clock.settle(hide(bot, new Set(), 2_000), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", new RegExp(`shaft cell deepslate digs in ${(digMs / 1000).toFixed(1)} s, [0-2]\\.\\d s left`));
+  assert.equal(result.dug, 0);
+  // Status 0 starts a dig; the hide's own item releases are status 5.
+  assert.equal(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0),
+    false,
+    "no dig was started",
+  );
+  assert.equal(bot.blockAt(new Vec3(0, 63, 0))!.name, "deepslate");
+});
+
+/** A region of `owner` holding the shaft cells from y 60 to 63 under the bot (plan 2026-11-07-p4-06a-threat T5b). */
+const shaftRegionOf = (owner: string, topY = 63): ProtectedRegion => ({
+  regionId: 4, dimension: "overworld", owner, label: "Tom's cellar", min: { x: -1, y: 58, z: -1 }, max: { x: 1, y: topY, z: 1 },
+});
+const digsStarted = (server: FakeServer) =>
+  server.packets.filter(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0).length;
+
+test("a foreign-region shaft cell fails the hide and the decision evades", async () => {
+  const { bot, clock, server } = scene({ health: 20, cells: shaftOf("dirt"), mockedClock: true });
+  setProtectedRegionsProvider(bot, () => [shaftRegionOf("Tom")]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.ok(result.error?.includes(regionRefusalText(shaftRegionOf("Tom"))), result.error);
+  assert.match(result.error ?? "", /\(0, 63, 0\)/u, "names the cell");
+  assert.equal(result.dug, 0);
+  assert.equal(digsStarted(server), 0, "no dig was started");
+  assert.equal(bot.blockAt(new Vec3(0, 63, 0))!.name, "dirt");
+  // The failed hide is on record (`blocked`): the wounded bot's next answer is to evade.
+  const wounded = scene({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, entities: { 7: { name: "zombie", kind: "Hostile mobs", metadata: [], position: new Vec3(3.5, 64, 0.5) } } }).bot;
+  const directive = observeHostileResponse(wounded, {
+    resolvedIds: new Set(), attackerIds: new Set([7]), blockedResponses: new Set(["hide"]),
+  });
+  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "outmatched");
+});
+
+test("a foreign-region third shaft cell leaves the dug part whole, names the region and the cells already dug", async () => {
+  const { bot, clock } = scene({ health: 20, cells: shaftOf("dirt", "dirt", "stone", "stone"), mockedClock: true, simulatePhysics: true });
+  setProtectedRegionsProvider(bot, () => [{ ...shaftRegionOf("Tom"), min: { x: -1, y: 58, z: -1 }, max: { x: 1, y: 61, z: 1 } }]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.dug, 2, "the two cells outside the region were dug");
+  assert.ok(result.error?.includes("inside protected region #4 'Tom's cellar' (owner Tom)"), result.error);
+  assert.match(result.error ?? "", /2 shaft cells already dug/);
+  assert.equal(bot.blockAt(new Vec3(0, 61, 0))!.name, "stone", "the foreign cell was left whole");
+});
+
+test("a shaft in the bot's own region is dug", async () => {
+  const { bot, clock } = scene({ health: 20, cells: shaftOf("dirt", "dirt", "dirt"), mockedClock: true, simulatePhysics: true });
+  setProtectedRegionsProvider(bot, () => [shaftRegionOf(bot.username)]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.ok(result.dug >= 1, `dug ${result.dug}: ${result.error ?? ""}`);
+});
+
+test("a slow third cell leaves the dug part and names it", async () => {
+  const { bot, clock } = scene({
+    health: 20,
+    cells: shaftOf("dirt", "dirt", "deepslate", "stone"),
+    mockedClock: true,
+    simulatePhysics: true,
+  });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, new Set(), 6_000), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.dug, 2, "the two quick cells were dug");
+  assert.match(result.error ?? "", /shaft cell deepslate digs in \d+\.\d s, \d\.\d s left/);
+  assert.match(result.error ?? "", /2 shaft cells already dug/);
+  assert.equal(bot.blockAt(new Vec3(0, 61, 0))!.name, "deepslate", "the slow cell was left whole");
+});
+
+// D33 (plan 2026-11-18-scenario-reds-part2-a3 T13g): the covered hold inside a finished shelter counts game time. The scenes
+// are sealed boxes with no regeneration model: health arrives at a chosen server tick.
+function sealedHold(options: { readonly ticksPerSecond: number; readonly maximumMs: number; readonly healthAtTick?: number; readonly simulatePhysics?: boolean }) {
+  const scene_ = scene({ mockedClock: true, health: 6, food: 20, cells: SEALED_BOX, server: { ticksPerSecond: options.ticksPerSecond },
+    simulatePhysics: options.simulatePhysics });
+  const { bot, server } = scene_;
+  const startTick = server.gameTime;
+  if (options.healthAtTick !== undefined) {
+    const release = server.onTick(() => { if (server.gameTime - startTick >= options.healthAtTick!) { bot.health = 18; release(); } });
+  }
+  return { ...scene_, hold: () => hide(bot, new Set(), options.maximumMs) };
+}
+
+test("a hold whose server and client physics are both stopped ends held unavailable within one physics-tick wall", async () => {
+  const { bot, clock, server, hold } = sealedHold({ ticksPerSecond: 20, maximumMs: 10_000 });
+  using _installed = clock.install();
+  server.stop();
+  bot.physicsEnabled = false;
+  const startMs = clock.now();
+  const result = await clock.settle(hold(), 5_000);
+  assert.equal(result.kind, "held");
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, "unavailable");
+  assert.match(result.error ?? "", /client physics stopped/);
+  assert.ok(clock.now() - startMs <= PHYSICS_TICK_WALL_MS + 100, `${clock.now() - startMs} ms`);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no physics listener");
+});
+
+test("a hold with physics running and the server stopped ends exhausted at its 33 000 ms wall", async () => {
+  const { bot, clock, server, hold } = sealedHold({ ticksPerSecond: 20, maximumMs: 10_000 });
+  using _installed = clock.install();
+  server.stop();
+  const startMs = clock.now();
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, "exhausted");
+  assert.ok(clock.now() - startMs >= 33_000 && clock.now() - startMs <= 33_200, `${clock.now() - startMs} ms`);
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+});
+
+// A real caller at 10 tps (16 000 ms of clock, past the old wall); the rate table of the hold itself is in `recover-hold-clock.test.ts`.
+test("hideInPlace with a 10 s hold recovers at 10 tps when health reaches 18 at tick 160", async () => {
+  const { clock, hold } = sealedHold({ ticksPerSecond: 10, maximumMs: 10_000, healthAtTick: 160 });
+  using _installed = clock.install();
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.kind, "recovered", JSON.stringify(result));
+  assert.equal(result.healthAfter, 18);
+});
+
+// The next action from the held states: a navigate out of the shell through its wall completes within its bound.
+for (const state of ["exhausted", "unavailable"] as const) test(`a one-block navigate out of a shell completes after a hold that ended ${state} at 10 tps`, async () => {
+  const { bot, clock, server, world, hold } = sealedHold({ ticksPerSecond: 10, maximumMs: 10_000, simulatePhysics: true });
+  using _installed = clock.install();
+  if (state === "unavailable") bot.physicsEnabled = false;
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, state);
+  bot.physicsEnabled = true;
+  const stop = server.onPacket("block_dig", (data) => {
+    const packet = data as { status: number; location: Vec3 };
+    if (packet.status === 2) server.answer(() => {
+      world.setCell(packet.location, "air");
+      bot._client.emit("block_change", { location: packet.location, type: 0 });
+    });
+  });
+  try {
+    await using navigation = createNavigationRuntime(bot);
+    const next = await clock.settle(navigation.navigate({
+      movements: createMovementPolicy(), goal: exactBlockGoal({ x: 1, y: 64, z: 0 }),
+    }), 60_000);
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally { stop(); }
+});
+
+// ---- D9b (plan 2026-11-18-scenario-reds-part2-a5 T13o): the shelter seals the cells its projectile margin box overlaps ----
+
+/** The three shots traced in `.agent/reports/2026-11-21-hide-exposed-projectile-analysis.md` (fixture frame y -60, here +124 as the bot's). */
+const TRACED_SHOTS = [
+  { position: new Vec3(18.03, 65.4, 0.4856), velocity: new Vec3(-0.27525, 0, -0.0085) },
+  { position: new Vec3(-12.226, 65.4, 0.680), velocity: new Vec3(0.82175, 0, 0.028) },
+  { position: new Vec3(13.38, 69.19, 0.653), velocity: new Vec3(-0.79825, -0.19575, 0.0239) },
+];
+const shotOf = (index: number): FakeEntitySpec => ({ name: "small_fireball", ...TRACED_SHOTS[index]! });
+const MARGIN_CELLS = ["-1,64,-1", "-1,64,1", "1,64,-1", "1,64,1", "-1,65,-1", "-1,65,1", "1,65,-1", "1,65,1",
+  "-1,66,0", "0,66,-1", "0,66,1", "1,66,0", "-1,66,-1", "-1,66,1", "1,66,-1", "1,66,1"];
+const cellAt = (text: string) => new Vec3(...(text.split(",").map(Number) as [number, number, number]));
+const blockPlacements = (server: FakeServer) => server.packets.filter(({ name }) => name === "block_place");
+
+for (const ticksPerSecond of [20, 10]) for (const index of [0, 1, 2])
+  test(`a shell with its margin cells sealed survives traced shot ${index + 1}, a bare shell does not (${ticksPerSecond} tps)`, async () => {
+    const bare = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, server: { ticksPerSecond }, entities: { 61: shotOf(index) } });
+    {
+      using _installed = bare.clock.install();
+      assert.equal(incomingShieldProjectiles(bare.bot).length, 1, "the traced shot meets the body box through the open margin");
+      const result = await bare.clock.settle(hide(bare.bot), HIDE_LIMIT_MS);
+      assert.equal(result.kind, "failed", "no spare shell is carried: the margin stays open and the recovery refuses");
+      assert.equal(result.refusal?.hazard, "projectile");
+    }
+    const sealed = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond }, entities: { 61: shotOf(index) } });
+    using _installed = sealed.clock.install();
+    const result = await sealed.clock.settle(hide(sealed.bot), HIDE_LIMIT_MS);
+    assert.equal(result.kind, "recovered", result.error ?? "");
+    assert.equal(result.margin.placed, 16);
+    assert.deepEqual(incomingShieldProjectiles(sealed.bot), []);
+  });
+
+test("a traced shot at a bot with no shell and no margin blocks is an incoming projectile", () => {
+  for (const index of [0, 1, 2]) {
+    const { bot } = scene({ health: 18, entities: { 61: shotOf(index) } });
+    assert.equal(incomingShieldProjectiles(bot).length, 1, `shot ${index + 1}`);
+  }
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide that finds the shell standing seals its margin: nothing dug or walled, 16 placed, one shell left (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered");
+  assert.equal(result.enclosed, true);
+  assert.equal(result.dug, 0);
+  assert.equal(result.walled, 0);
+  assert.equal(result.margin.placed, 16);
+  assert.deepEqual(result.margin.skipped, []);
+  assert.equal(countCapBlocks(bot), 10);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide that builds its shell then seals the margin while a spare shell is carried, and the next hide still closes (reserve, ${ticksPerSecond} tps)`, async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 18, carried: { cobblestone: 20 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const first = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(first.kind, "recovered", first.error ?? "");
+  assert.equal(first.margin.placed, 0, "the shell took 10 of 20: nothing is left over the reserve");
+  assert.deepEqual(first.margin.skipped.map(({ reason }) => reason), Array(first.margin.skipped.length).fill("reserve"));
+  assert.equal(countCapBlocks(bot), 10, "one shell is still carried");
+  bot.entity.position.set(4.5, 64, 4.5);
+  const second = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(second.kind, "recovered", second.error ?? "");
+  assert.equal(second.enclosed, false);
+  assert.ok(second.walled > 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`the dragon shelter's restricted cover seals its margin with the same blocks only (${ticksPerSecond} tps)`, async () => {
+  const options = { health: 18, mockedClock: true, cells: sealedBox("end_stone"), server: { ticksPerSecond } } as const;
+  const stone = scene({ ...options, carried: { end_stone: 26, cobblestone: 64 } });
+  {
+    using _installed = stone.clock.install();
+    const result = await stone.clock.settle(hideInPlace(stone.bot, { threatContext: combatTestContext(stone.bot), signal: new AbortController().signal,
+      recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS }), HIDE_LIMIT_MS);
+    assert.equal(result.kind, "recovered", result.error ?? "");
+    assert.equal(result.margin.placed, 16);
+    for (const cell of MARGIN_CELLS) assert.equal(stone.bot.blockAt(cellAt(cell))?.name, "end_stone", cell);
+    assert.equal(countCapBlocks(stone.bot, DRAGON_PROTECTION_BLOCKS), 10);
+  }
+  const cobble = scene({ ...options, carried: { cobblestone: 64 } });
+  using _installed = cobble.clock.install();
+  const result = await cobble.clock.settle(hideInPlace(cobble.bot, { threatContext: combatTestContext(cobble.bot), signal: new AbortController().signal,
+    recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS }), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(result.margin.placed, 0, "cobblestone is no dragon cover");
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a fire in the feet cell is dug out before the first margin placement (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: { ...SEALED_BOX, "0,64,0": "fire" }, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  let atFirstPlacement: string | undefined = "never placed";
+  const stop = server.onPacket("block_place", () => { if (atFirstPlacement === "never placed") atFirstPlacement = bot.blockAt(new Vec3(0, 64, 0))?.name; });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  stop();
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(atFirstPlacement, "air");
+  assert.equal(result.margin.placed, 16);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide whose deadline passed before the margin pass places nothing and still recovers (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, new Set(), 0), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(result.margin.placed, 0);
+  assert.deepEqual(result.margin.skipped.map(({ reason }) => reason), Array(16).fill("stopped: construction changed"));
+  // The result goes into the survival receipt, whose facts schema refuses a class instance (hostile.test.ts reads it back).
+  assert.equal(Object.getPrototypeOf(result.margin.skipped[0]!.cell), Object.prototype);
+  assert.equal(blockPlacements(server).length, 0);
+});
+
+// The pass's own refusal and server-stopped paths are asserted at the pass (`shelter-construction.test.ts`); the hide goes on to recovery after 0 placed (deadline test above).
+for (const ticksPerSecond of [20, 10]) test(`cancelling during a margin placement ends the hide with no refusal and no listener left (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const added = listenersAddedSince(bot);
+  const abort = new AbortController();
+  const stop = server.onPacket("block_place", () => abort.abort(new Error("hide cancelled")));
+  const pending = hideInPlace(bot, { threatContext: combatTestContext(bot), signal: abort.signal, recoverTo: 18, maximumMs: 5_000 });
+  await assert.rejects(clock.settle(pending, 6_000), /hide cancelled/);
+  stop();
+  assert.equal(blockPlacements(server).length, 1);
+  await clock.advance(60_000);
+  for (const event of ["time", "physicsTick", "entityUpdate", "death", "health"]) assert.equal(added(event), 0, event);
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a death during the margin pass settles the hide with no refusal (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  let placed = 0;
+  const stop = server.onPacket("block_place", () => { if (++placed === 2) bot.health = 0; });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  stop();
+  assert.equal(result.margin.placed, 2, "no placement after the death");
+  assert.equal(result.kind, "held", "a dead bot has no recovery to run: the hold ends, never a refusal");
+  assert.equal(result.refusal, undefined);
+});
+
+// ---- T13p: an exposed refusal names the open margin cells ----
+
+for (const ticksPerSecond of [20, 10]) test(`an exposed refusal with a whole shell names the open margin cells and the blocks left, and the next hide recovers (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, entities, inventory } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 10 },
+    server: { ticksPerSecond }, entities: { 61: shotOf(0) } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal?.cause, "exposed");
+  assert.equal(result.refusal?.hazard, "projectile");
+  assert.equal(result.margin.placed, 0, "the reserve: no margin cell was placed");
+  const margin = result.refusal!.margin;
+  assert.equal(margin.length, 25);
+  assert.deepEqual(margin.slice(0, 16).map(({ cell, block }) => `${cell.x},${cell.y},${cell.z}:${block}`), MARGIN_CELLS.map((cell) => `${cell}:air`));
+  assert.ok(margin.slice(16).every(({ cell, block }) => cell.y === 63 && block === "stone"), "the floor layer is stone");
+  assert.match(result.error ?? "", /during recovery \(projectile\); open margin cells: -1,64,-1; -1,64,1; /);
+  assert.match(result.error ?? "", /; 1,66,1 \(10 blocks left\)\.$/);
+  // Next action from the refusal: the shot gone and a spare shell carried, the same cell recovers with its margin sealed.
+  entities.remove(61);
+  const stack = bot.inventory.items().find((item) => item.name === "cobblestone")!;
+  inventory.updateSlot(stack.slot, itemOf(bot.registry, "cobblestone", 26));
+  const next = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(next.kind, "recovered", next.error ?? "");
+  assert.equal(next.margin.placed, 16);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`an exposed refusal with every margin cell sealed names none, and its record holds no open cell (${ticksPerSecond} tps)`, async () => {
+  const sealedMargin = Object.fromEntries(MARGIN_CELLS.map((cell) => [cell, "stone" as FakeCell]));
+  const { bot, clock } = scene({ mockedClock: true, health: 7, cells: { ...SEALED_BOX, ...sealedMargin }, server: { ticksPerSecond },
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error, "The shelter became exposed or unsafe during recovery (projectile).");
+  assert.equal(result.refusal?.margin.length, 25);
+  assert.ok(result.refusal!.margin.slice(0, 16).every(({ block }) => block === "stone"));
+});
+
+// A refusal of another cause carries the margin record too: the deadline refusal is asserted in `shelter-construction.test.ts`.
+
+// The next action from the new end state: out of a shelter that has margin blocks, through its wall, within the bound.
+for (const ticksPerSecond of [20, 10]) for (const carried of [26, 13]) test(`a navigate out of a shelter with margin blocks completes (${carried} carried, ${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server, world } = scene({ mockedClock: true, health: 18, food: 20, cells: SEALED_BOX, carried: { cobblestone: carried }, simulatePhysics: true, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.ok(result.margin.placed >= 1);
+  const stop = server.onPacket("block_dig", (data) => {
+    const packet = data as { status: number; location: Vec3 };
+    if (packet.status === 2) server.answer(() => {
+      world.setCell(packet.location, "air");
+      bot._client.emit("block_change", { location: packet.location, type: 0 });
+    });
+  });
+  try {
+    await using navigation = createNavigationRuntime(bot);
+    const next = await clock.settle(navigation.navigate({
+      movements: createMovementPolicy(), goal: exactBlockGoal({ x: 4, y: 64, z: 0 }),
+    }), 60_000);
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally { stop(); }
 });

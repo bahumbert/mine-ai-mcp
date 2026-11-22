@@ -1,18 +1,23 @@
 // One reflex's sensor, decision and claim lifecycle, as the driver ticks it.
 import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
-import { BodyAbort, type BodyAbortCause, type Continuation } from "../../session/abort.js";
+import { BodyAbort, type BodyAbortCause } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
 import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
-import type {
-  DangerObservation,
-  ReflexDefinition,
-  ReflexLimits,
-  ReflexName,
-  ReflexSnapshot,
-  SurvivalTransition,
+import {
+  type DangerObservation,
+  type HeldThreatEnd,
+  type ReflexDefinition,
+  type ReflexLimits,
+  type ReflexName,
+  type ReflexSnapshot,
+  type ResponseContinuation,
+  type SurvivalTransition,
 } from "./contract.js";
 import { observeBodyProgress, ReflexProgress } from "./reflex-progress.js";
+
+/** The longest a stand-down grows to by escalation: 6 000 world ticks (the 300 000 ms it was in wall time at 20 tps). */
+const STAND_DOWN_CAP_TICKS = 6_000;
 
 /** What a registered reflex needs from its driver: the shared runner, answers and the driver's world revision. */
 export interface RegistrationHost {
@@ -39,6 +44,7 @@ export interface RegisteredReflex {
 /** One claim in flight: what its settlement needs to tell a cancel, a limit and a failure apart. */
 interface ClaimRun<Response> {
   readonly response: Response;
+  readonly decisionFacts: Facts;
   readonly name: string;
   readonly world: number;
   readonly limits: ReflexLimits;
@@ -69,15 +75,32 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   #danger: Facts = null;
   #missing: string | null = null;
   #decision: Facts = null;
+  #decisionIdentity: Facts = null;
   #observedDanger: Facts = null;
   #observedAt: number | null = null;
   #observedWorld = -1;
   #ticks = 0;
+  #holding = false;
+  #heldResponse: Response | null = null;
+  #notEnded: string | null = null;
+  readonly #stopObservingHold: () => void;
+  readonly #limitsByScope = new Map<string, number>();
 
   constructor(
     private readonly definition: ReflexDefinition<Danger, Response, Outcome>,
     private readonly host: RegistrationHost,
-  ) {}
+  ) {
+    this.#stopObservingHold = host.runner.onHoldChange((transition) => {
+      if (transition.owner !== definition.name) return;
+      this.#holding = transition.outcome === "held";
+      if (transition.outcome !== "held" && transition.outcome !== "attached") this.#heldResponse = null;
+      host.publish({ kind: "phase", reflex: definition.name, evidence: {
+        phase: "hold", outcome: transition.outcome, worldAge: transition.worldAge, generation: transition.generation,
+        resumed: transition.resumed,
+        ...(transition.outcome === "released" && this.#notEnded !== null ? { notEnded: this.#notEnded } : {}),
+      } });
+    });
+  }
 
   get name(): ReflexName {
     return this.definition.name;
@@ -107,6 +130,8 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   stop(reason: BodyAbort): void {
+    // The runtime's later game listener resumes portal requests through the runner (P4-29 a6 review, 2026-11-17).
+    if (reason.detail.kind !== "dimension_changed") this.#releaseHold(reason.detail.kind);
     this.#active?.controller.abort(reason);
   }
 
@@ -115,8 +140,10 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   async close(): Promise<void> {
+    this.#releaseHold("closed");
     this.#lifetime.abort(new BodyAbort({ kind: "cancelled", by: "runtime" }, `${this.definition.name} closed.`));
     await this.#pending;
+    this.#stopObservingHold();
   }
 
   /** A throw in the reflex's sense, decision or facts never leaves the physics listener: it reads as a failed sensor. */
@@ -135,6 +162,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     if (this.#pending) return;
     if (sensed?.kind !== "observed") {
       this.#changeDecision(null);
+      this.#releaseHold(sensed?.kind ?? "none_observed", sensed === null ? this.#heldEnded(null, "none_observed") : null);
       return;
     }
     this.#chooseResponse(sensed.danger);
@@ -168,13 +196,14 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     if (this.#pending) return;
     this.#active = null;
     this.#changeDecision(null);
+    this.#releaseHold("sensor_failed");
   }
 
-  /** The remembered failure of a reflex that retries: it expires after `retryAfterFailureMs`, the facts may reopen it sooner. */
+  /** The remembered failure of a reflex that retries: it expires after `retryAfterFailureTicks` world ticks, the facts may reopen it sooner. */
   #retryTemporal(why: string): TemporalPremise | null {
-    const { retryAfterFailureMs } = this.definition;
-    if (retryAfterFailureMs === undefined) return null;
-    return { premise: "retry_after_failure", durationMs: retryAfterFailureMs, why };
+    const { retryAfterFailureTicks } = this.definition;
+    if (retryAfterFailureTicks === undefined) return null;
+    return { premise: "retry_after_failure", ticks: retryAfterFailureTicks, why };
   }
 
   /** Decide for an observed danger; claim the body unless the decision is not a response or the scope is answered. */
@@ -194,6 +223,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
             },
         inputs,
       );
+      this.#releaseHold(chosen.kind, this.#heldEnded(danger, chosen));
       return;
     }
     const scope = this.definition.facts(chosen.response);
@@ -206,14 +236,16 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         },
         inputs,
       );
+      this.#releaseHold("answered");
       return;
     }
-    this.#changeDecision({ kind: "respond", response: chosen.name, reason: chosen.reason }, inputs);
-    this.#startClaim(chosen.response, chosen.name, chosen.reason);
+    this.#changeDecision({ kind: "respond", response: chosen.name, reason: chosen.reason }, inputs, chosen.identity);
+    this.#startClaim(chosen.response, chosen.name, chosen.reason, inputs());
   }
 
-  #changeDecision(next: Facts, inputs: () => Facts = () => this.#danger): void {
-    if (isDeepStrictEqual(next, this.#decision)) return;
+  #changeDecision(next: Facts, inputs: () => Facts = () => this.#danger, identity: Facts = next): void {
+    if (isDeepStrictEqual(identity, this.#decisionIdentity)) return;
+    this.#decisionIdentity = identity;
     this.#decision = next;
     this.host.publish({
       kind: "decision",
@@ -222,7 +254,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     });
   }
 
-  #startClaim(response: Response, responseName: string, reason: string): void {
+  #startClaim(response: Response, responseName: string, reason: string, decisionFacts: Facts): void {
     const { definition, host } = this;
     const controller = new AbortController();
     const active: ActiveClaim = { name: responseName, startedAt: Date.now(), controller, signal: null };
@@ -231,6 +263,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     const progress = new ReflexProgress();
     const run: ClaimRun<Response> = {
       response,
+      decisionFacts,
       name: responseName,
       world: host.world(),
       limits,
@@ -249,15 +282,22 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         active.signal = signal;
         signal.throwIfAborted();
         const outcome = await definition.act(response, signal);
-        const continuation = definition.continuation(outcome);
-        return { value: outcome, continuation: this.#continuationAfter(signal, continuation) };
+        const continuation = this.#continuationAfter(signal, definition.continuation(outcome));
+        if (continuation.kind === "hold") this.#heldResponse = response;
+        return { value: outcome, continuation };
       },
       definition.releaseAfterAdmission,
-      { ceilingMs: limits.ceilingMs, noProgressMs: limits.noProgressMs, progressMarks: () => progress.marks },
+      {
+        ceilingTicks: limits.ceilingTicks,
+        noProgressTicks: limits.noProgressTicks,
+        progressMarks: () => progress.marks,
+        worldAge: () => host.bot.time?.age ?? null,
+      },
     );
     if (claim.kind !== "claimed") {
       detach();
       this.#active = null;
+      if (claim.kind === "closed") this.#releaseHold("closed");
       return;
     }
     run.interrupted = claim.interrupted;
@@ -278,7 +318,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
 
   /** The base probe and the reflex's own, both off when the claim ends (or never starts). */
   #watchProgress(response: Response, progress: ReflexProgress): () => void {
-    const base = observeBodyProgress(this.host.bot, progress.mark);
+    const base = observeBodyProgress(this.host.bot, progress.mark, this.definition.bodyTravel?.(response) ?? true);
     let own: (() => void) | undefined;
     try {
       own = this.definition.progress?.(response, progress.mark);
@@ -292,13 +332,33 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   /** A claim told to stop returns its request with the limit's text; any other abort cancels it with its cause. */
-  #continuationAfter(signal: AbortSignal, continuation: Continuation): Continuation {
+  #continuationAfter(signal: AbortSignal, continuation: ResponseContinuation): ResponseContinuation {
     if (!signal.aborted) return continuation;
     if (reflexLimitOf(signal.reason)) return { kind: "return", reason: (signal.reason as BodyAbort).message };
     return {
       kind: "cancel",
       cause: signal.reason instanceof BodyAbort ? signal.reason.detail : { kind: "cancelled", by: "runtime" },
     };
+  }
+
+  /** A non-response ends this reflex's waiting generation; a busy claim leaves it for the next tick. */
+  #releaseHold(decision: string, evidence: HeldThreatEnd | null = null): void {
+    if (!this.#holding) return;
+    this.#notEnded = evidence && "notEnded" in evidence ? evidence.notEnded : null;
+    try {
+      this.host.runner.releaseHold(this.definition.name, decision, evidence && "ended" in evidence ? evidence.ended : null,
+        evidence && "stalled" in evidence ? evidence.stalled : undefined);
+    } finally {
+      this.#notEnded = null;
+      this.#holding = false;
+      this.#heldResponse = null;
+    }
+  }
+
+  /** Consult only the response that offered the current waiting generation. */
+  #heldEnded(observed: Danger | null, decision: "none_observed" | Facts): HeldThreatEnd | null {
+    return this.#holding && this.#heldResponse !== null
+      ? this.definition.heldEnded?.(this.#heldResponse, observed, decision) ?? null : null;
   }
 
   /** A cancel (policy, death, dimension, close) is no attempt; a limit is, and stands the reflex down in time. */
@@ -328,6 +388,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       reflex: definition.name,
       evidence: {
         response: run.name,
+        decision: run.decisionFacts,
         cancelled,
         outcome: limit ? this.#limitOutcome(run, limit) : definition.describe(outcome),
         interrupted: run.interrupted ? { ...run.interrupted } : null,
@@ -348,6 +409,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         reflex: definition.name,
         evidence: {
           response: run.name,
+          decision: run.decisionFacts,
           cancelled: false,
           outcome: this.#limitOutcome(run, limit),
           interrupted: run.interrupted ? { ...run.interrupted } : null,
@@ -363,6 +425,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       reflex: definition.name,
       evidence: {
         response: run.name,
+        decision: run.decisionFacts,
         kind: run.signal?.aborted || run.world !== host.world() ? "cancelled" : "execution_failed",
         why,
       },
@@ -374,22 +437,28 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       kind: "limit",
       limit: limit.limit,
       elapsedMs: Math.round(limit.elapsedMs),
+      elapsedTicks: limit.elapsedTicks ?? null,
       lastProgress: run.progress.lastReason,
     };
   }
 
   /**
-   * After a limit the scope is answered for `standDownMs` whatever the facts do: the danger may be growing while the
+   * After a limit the scope is answered for `standDownTicks` whatever the facts do: the danger may be growing while the
    * scene stays equal, and a body held for good is worse than a pause. Only the time ends it (permissions still apply).
    */
   #standDown(run: ClaimRun<Response>, limit: ReflexLimitCause): void {
     const { definition, host } = this;
     const seconds = Math.round(limit.elapsedMs / 1000);
     const why = `${definition.name} hit its ${limit.limit} limit after ${seconds} s (last progress: ${run.progress.lastReason ?? "none"}).`;
+    const scope = definition.facts(run.response);
+    const key = JSON.stringify([scope.capability, scope.scope]);
+    const escalates = limit.limit === "no_progress" && definition.escalateStandDown?.(run.response) === true;
+    const count = escalates ? (this.#limitsByScope.get(key) ?? 0) + 1 : 1;
+    if (escalates) this.#limitsByScope.set(key, count);
     host.answered.remember(
-      { ...definition.facts(run.response), facts: () => null },
+      { ...scope, facts: () => null },
       { kind: "reflex_limit", why },
-      { premise: "reflex_limit", durationMs: run.limits.standDownMs, why },
+      { premise: "reflex_limit", ticks: Math.min(run.limits.standDownTicks * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
     );
   }
 }

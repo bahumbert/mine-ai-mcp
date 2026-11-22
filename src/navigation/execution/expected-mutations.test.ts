@@ -3,9 +3,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { flatWorld } from "../../test-support/navigation.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
+import { serverTickDeadline } from "../../world/world-age.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { blockKey, type BlockObservation, type BlockPosition } from "../world/world.js";
 
 const TOKEN = { runId: "r", planId: "p", stepId: "s", attempt: 1 };
+
+for (const rate of [5, 10]) for (const stopped of [false, true]) {
+  test(`an issued detached receipt at ${rate} tps ${stopped ? "expires across an unobserved stopped clock" : "confirms a late answer"}`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const fake = createFakeBot({ clock, server: { ticksPerSecond: rate } });
+    const world = flatWorld();
+    const ledger = new ExpectedMutationLedger();
+    const position = { x: 1, y: 63, z: 0 };
+    world.load(position, { stateId: 2 });
+    const before = world.blockAt(position.x, position.y, position.z);
+    const receipt = ledger.expect({
+      token: TOKEN, position, before: reads("solid", 2), after: reads("air", 0), operation: "break",
+      deadline: serverTickDeadline(() => fake.bot.time.age, 100, monotonicNow()),
+    });
+    receipt.markIssued();
+    receipt.detach();
+    const age = fake.bot.time.age;
+    if (stopped) fake.server.stop();
+    await clock.advance(stopped ? 30_000 : 75_000 / rate);
+    assert.equal(fake.bot.time.age - age, stopped ? 0 : 60);
+    if (stopped) { fake.server.resume(); await clock.advance(4_000); }
+    world.load(position, { stateId: 0 });
+    assert.equal(ledger.classify({ position, before, after: world.blockAt(position.x, position.y, position.z), worldRevision: world.revision },
+      new Set([blockKey(position)]), monotonicNow()), stopped ? "invalidating" : "expected");
+    assert.equal((await receipt.result).kind, stopped ? "expired" : "confirmed");
+  });
+}
 
 /** The predicate the ledger matches a cell against, named as its receipt reads. */
 function reads(description: string, stateId: number) {
@@ -24,7 +54,7 @@ test("expected mutation matching is distinct from route invalidation", async () 
     before: reads("solid", 2),
     after: reads("air", 0),
     operation: "break",
-    deadlineMs: monotonicNow() + 1000,
+    deadline: serverTickDeadline(() => null, 20, monotonicNow()),
   });
   expectation.markIssued();
   world.load(position, { stateId: 0 });
@@ -51,7 +81,7 @@ test("a placement is contradicted neither by a no-op update nor by its own dupli
       before: reads("air", 0),
       after: reads("placed", 10),
       operation: "place",
-      deadlineMs: monotonicNow() + 1_000,
+      deadline: serverTickDeadline(() => null, 20, monotonicNow()),
     });
 
   // A cell that did not change cannot contradict work that has not landed yet.
@@ -98,7 +128,7 @@ test("a break that brings a column down owns every change in that column", async
     after: reads("air", 0),
     operation: "break",
     owned: [head, above],
-    deadlineMs: monotonicNow() + 5_000,
+    deadline: serverTickDeadline(() => null, 100, monotonicNow()),
   });
   expectation.markIssued();
   const dependencies = new Set([blockKey(head), blockKey(above)]);
@@ -122,4 +152,22 @@ test("a break that brings a column down owns every change in that column", async
   // A cell outside the column is still the world's.
   const outside = { x: 2, y: 64, z: 0 };
   assert.equal(ledger.classify(change(outside, 2), new Set([blockKey(outside)]), monotonicNow()), "invalidating");
+});
+
+test("a change at a lava dependency invalidates only when lava is in it before or after", () => {
+  const world = flatWorld();
+  const ledger = new ExpectedMutationLedger();
+  const cell = { x: 1, y: 63, z: 1 };
+  const lavaDependencies = new Set([blockKey(cell)]);
+  const lava = { stateId: 10, traits: { empty: true, liquid: "lava", liquidLevel: 8, damaging: true } } as const;
+  const classify = (block: { stateId: number; traits?: typeof lava.traits }) => {
+    const before = world.blockAt(cell.x, cell.y, cell.z);
+    world.load(cell, block);
+    const after = world.blockAt(cell.x, cell.y, cell.z);
+    return ledger.classify({ position: cell, before, after, worldRevision: world.revision }, new Set(), monotonicNow(), lavaDependencies);
+  };
+  assert.equal(classify({ stateId: 2 }), "irrelevant", "a block placed there is not lava");
+  assert.equal(classify({ stateId: 0 }), "irrelevant", "a block removed there is not lava");
+  assert.equal(classify(lava), "invalidating", "lava flowing in");
+  assert.equal(classify({ stateId: 0 }), "invalidating", "lava receding is a change worth a look too");
 });

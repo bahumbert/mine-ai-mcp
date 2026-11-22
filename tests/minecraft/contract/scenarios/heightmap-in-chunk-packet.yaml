@@ -1,0 +1,40 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-heightmap-in-chunk-packet
+tags:
+  - contract
+  - exclusive
+description: Measures the chunk packet heightmaps against loaded columns.
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: heightmap-in-chunk-packet
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 0 -60 1 stone
+  - setblock 1 -59 1 stone
+  - setblock 2 -58 1 stone
+  - setblock 3 -57 1 stone
+  - setblock 4 -56 1 stone
+  - setblock 5 -55 1 stone
+  - setblock 0 -59 2 stone
+  - setblock 1 -57 2 stone
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

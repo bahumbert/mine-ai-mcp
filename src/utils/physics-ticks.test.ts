@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { PHYSICS_TICK_WALL_MS, PhysicsStoppedError, physicsTicksUntil, waitForPhysicsTicks } from "./physics-ticks.js";
+import { PHYSICS_TICK_WALL_MS, PhysicsStoppedError, physicsTicksUntil, waitForPhysicsTicks, waitForTicksOrCancel } from "./physics-ticks.js";
 
 test("physics waits count observed ticks and release their listener", async () => {
   const source = new EventEmitter();
@@ -89,4 +89,42 @@ test("a wait until a condition ends with its answer when the condition comes, th
   const aborted = physicsTicksUntil(source, () => false, 60, abort.signal);
   abort.abort(new Error("run stopped"));
   await assert.rejects(aborted, /run stopped/);
+});
+
+/** A bot as the helper sees it: Mineflayer's own wait (counted here) and the tick event. */
+function botWithOwnWait() {
+  const source = new EventEmitter();
+  const waits: number[] = [];
+  return Object.assign(source, {
+    waits,
+    waitForTicks: async (ticks: number) => void waits.push(ticks),
+  });
+}
+
+test("a tick wait with a signal is released by the abort when no tick comes, and leaves no listener", async () => {
+  const bot = botWithOwnWait();
+  const abort = new AbortController();
+  const waiting = waitForTicksOrCancel(bot, 1, abort.signal);
+  assert.equal(bot.listenerCount("physicsTick"), 1);
+  abort.abort(new Error("bot died"));
+  await assert.rejects(waiting, /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.deepEqual(bot.waits, [], "the signalled wait does not use Mineflayer's five-second wait");
+});
+
+test("a tick wait with a signal and no tick or abort still ends at Mineflayer's own bound, with PhysicsStoppedError", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const bot = botWithOwnWait();
+  const waiting = waitForTicksOrCancel(bot, 2, new AbortController().signal);
+  context.mock.timers.tick(2 * 50 + 5_000 - 1);
+  assert.equal(bot.listenerCount("physicsTick"), 1, "still waiting one ms before the bound");
+  context.mock.timers.tick(1);
+  await assert.rejects(waiting, (error: unknown) => error instanceof PhysicsStoppedError && /no physics tick for 5100 ms/.test(error.message));
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+});
+
+test("a tick wait with no signal keeps Mineflayer's own wait: nothing can cancel the action", async () => {
+  const bot = botWithOwnWait();
+  await waitForTicksOrCancel(bot, 3, undefined);
+  assert.deepEqual(bot.waits, [3]);
 });

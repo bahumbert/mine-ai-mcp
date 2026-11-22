@@ -15,12 +15,16 @@ import {
 import { snapshotInventory } from "../bot-data/bot-status.js";
 import type { SourceIdentity } from "../diagnostics/incident-recorder.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecraft-runtime.js";
+import { watchHeightHints } from "../world/height-hints.js";
+import { timeoutSignal } from "../utils/wall-timers.js";
 import type { HostOptions } from "./config.js";
 import { sendMessage } from "../actions/send-message/send-message.js";
 import { handleChatCommandRoute } from "./chat-commands-route.js";
 import { registerIncidentCaptureRoute } from "./incident-route.js";
 import { createMinecraftMcpServer } from "./mcp.js";
 import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
+import { watchServerTags } from "../world/server-tags.js";
+import { watchAirHistory } from "../world/air-supply.js";
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 /** `send_message` itself gives up on the echo after 5 s; this bounds a call that never settles at all. */
@@ -92,7 +96,7 @@ function mountChatCommandRoutes(app: Express, runtime: MinecraftRuntime, bot: Bo
     const answered = handleChatCommandRoute(request, response, {
       ring: runtime.chatCommands,
       whisper: async (to, message) => {
-        const result = await sendMessage(bot, { to, message }, { signal: AbortSignal.timeout(CHAT_COMMAND_WHISPER_TIMEOUT_MS) });
+        const result = await sendMessage(bot, { to, message }, { signal: timeoutSignal(CHAT_COMMAND_WHISPER_TIMEOUT_MS) });
         return result.status === "succeeded" ? { ok: true } : { ok: false, error: result.error };
       },
     });
@@ -100,10 +104,8 @@ function mountChatCommandRoutes(app: Express, runtime: MinecraftRuntime, bot: Bo
   });
 }
 
-async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
-  using resources = new DisposableStack();
-  const neoforgeComponents =
-    configuration.neoforgeComponents === null ? null : readNeoForgeComponents(configuration.neoforgeComponents);
+/** Attach tag capture before the connection reaches configuration state. */
+function createWatchedBot(configuration: HostOptions): Bot {
   const bot = mineflayer.createBot({
     host: configuration.minecraftHost,
     port: configuration.minecraftPort,
@@ -112,6 +114,17 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
     version: configuration.version,
     ...BOT_PHYSICS_OPTIONS,
   });
+  watchServerTags(bot);
+  watchAirHistory(bot);
+  watchHeightHints(bot);
+  return bot;
+}
+
+async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
+  using resources = new DisposableStack();
+  const neoforgeComponents =
+    configuration.neoforgeComponents === null ? null : readNeoForgeComponents(configuration.neoforgeComponents);
+  const bot = createWatchedBot(configuration);
   if (neoforgeComponents !== null) joinAsNeoForgeClient(bot, neoforgeComponents);
   // Survival perception, navigation, and diagnostics each keep a permanent
   // respawn and physicsTick listener; the steady-state count sits just past

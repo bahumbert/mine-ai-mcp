@@ -5,12 +5,16 @@ import { type NavigationRuntime } from "../../../navigation/index.js";
 import { entityMetadata } from "../../../world/end-fight.js";
 import { selectPolicyFood } from "../../perception/food.js";
 import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
+import { QuarryProgress } from "../../control/combat/quarry-progress.js";
+import { serverPacedWallMs } from "../../../world/world-age.js";
+import type { ProgressBudget } from "../../state/budgets.js";
 import type { CombatDecision, CombatOutcome, CombatResult, CombatStyle } from "../../control/combat/contract.js";
 import type { FightOutcome } from "../../control/combat/engagement.js";
 import { CombatExecution } from "../../control/combat/execution.js";
 import { CombatTactics } from "../../control/combat/tactics.js";
 import { observeCombatDecision } from "../../control/combat/observation.js";
-import type { CombatProgressChange } from "../../control/combat/progress.js";
+import { type CombatProgressChange } from "../../control/combat/progress.js";
 import { answeredResponses } from "../../control/combat/scopes/response.js";
 import { CombatPerception } from "../../perception/combat/observations.js";
 import { isThreat } from "../../perception/combat/threats.js";
@@ -19,6 +23,7 @@ import { decideFightBoundary, type FightBoundaryDecision } from "../../policy/co
 import { CombatPosition } from "../../positioning/combat/position.js";
 import { SurvivalPolicyState } from "../../state/survival-policy.js";
 import { type SurvivalResources } from "../../state/resources.js";
+import { TargetMotion } from "../../weapons/target-motion.js";
 import { FootingRecovery } from "../footing.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
 
@@ -37,17 +42,25 @@ export interface FightRequest {
   readonly signal: AbortSignal;
   readonly ownerSignal: AbortSignal;
   readonly minimumHealth: number;
+  /** The caller's own goal: once true, the fight ends `target_lost` at its next tactic boundary. */
+  readonly satisfied?: () => boolean;
 }
 /** The observed scene and evidence of one physical fight, shared by its tactics. */
 export class FightScene implements Disposable {
   readonly dragonDefense = new AbortController();
   readonly responseRequired = new AbortController();
+  readonly noProgress = new AbortController();
+  readonly quarryBudget: ProgressBudget;
+  quarryStopPending = false;
   recoveryTarget: number | null = null;
+  refusedStance: string | null = null;
   boundaryDecision: FightBoundaryDecision = { kind: "fight" };
   private boundaryKey: string | null = null;
   readonly dead = new Set<number>();
   readonly stylesUsed = new Set<CombatStyle>();
   readonly weaponsUsed = new Set<string>();
+  /** The observed movement of every target this fight has focused on, for the bow's lead. */
+  readonly targetMotion = new TargetMotion();
   readonly tactics: CombatTactics;
   get signal(): AbortSignal { return this.tactics.signal; }
   readonly position: CombatPosition;
@@ -68,9 +81,14 @@ export class FightScene implements Disposable {
     readonly environment: FightEnvironment,
     readonly request: FightRequest,
     readonly protectedProgress: ProtectedAttackProgress,
+    readonly endermanProgress: EndermanProgress,
+    // Engagements supply their retained clock; standalone scenes use the same policy-derived construction path.
+    readonly quarryProgress = new QuarryProgress(environment.survival.budgets, request.target.id,
+      environment.policy.combat.quarry_wait_ticks, () => environment.bot.time?.age),
   ) {
     this.#target = request.target;
-    this.tactics = new CombatTactics(AbortSignal.any([request.signal, this.dragonDefense.signal, this.responseRequired.signal]));
+    this.quarryBudget = quarryProgress.open();
+    this.tactics = new CombatTactics(AbortSignal.any([request.signal, this.dragonDefense.signal, this.responseRequired.signal, this.noProgress.signal]));
     this.responsiveness = new ExecutionScope({ bot: this.bot.username, operation: "combat", targetId: this.targetId });
     this.execution = new CombatExecution(this.responsiveness, (phase, completedEffects) =>
       this.reportDecision({ kind: "phase", targetId: this.targetId, phase, completedEffects }),
@@ -154,7 +172,6 @@ export class FightScene implements Disposable {
     const facts = observeCombatDecision(this.bot, {
       resolvedIds: this.perception.resolvedIds,
       attackerIds: this.perception.attackerIds,
-      unreachableIds: new Set(),
       perception: this.perception,
       policy: this.policy.combat,
       food: this.policy.food,
@@ -193,6 +210,11 @@ export class FightScene implements Disposable {
     if (decision.kind === "recover") this.recoveryTarget = decision.health;
     if (decision.kind === "respond") this.responseRequired.abort("The shared decision selected a different response.");
   };
+  /** One physics tick of the fight went by: count it and record where the focused target stands. */
+  countTick(): void {
+    this.elapsedTicks++;
+    this.targetMotion.observe(this.target, this.elapsedTicks);
+  }
   readonly settled = (): boolean => this.observed !== null || !this.requestedTarget.isValid;
   readonly reportProgress = (
     state: "started" | "ended" | CombatProgressChange,
@@ -208,11 +230,24 @@ export class FightScene implements Disposable {
       execution: this.execution.snapshot(this.attacks),
       outcome,
       observation,
+      quarryStopPending: this.quarryStopPending,
     });
   };
+  /** Exhaustion requests a stop; landing and blast clearance keep their physical owner until safe. */
+  observeQuarryStop(recovering: boolean): void {
+    this.quarryStopPending = this.quarryBudget.exhausted;
+    if (this.quarryStopPending && !this.parentSignal.aborted && !recovering &&
+      !this.footingRecovery.needed && !this.perception.creeperClearance.pending &&
+      this.execution.snapshot(this.attacks).phase !== "guard")
+      this.noProgress.abort("No confirmed quarry damage within the engagement bound.");
+  }
+  readonly noProgressLimit = (): CombatOutcome => ({
+    ...this.result("unreachable"), premise: "no_confirmed_damage",
+    observation: `No confirmed damage to ${this.requestedTarget.name}#${this.targetId} during ${this.quarryProgress.limit} server ticks of fighting or ${serverPacedWallMs(this.quarryProgress.limit) / 1000} s.`,
+  });
   readonly guardLimit = (): CombatOutcome => ({
     ...this.result("unreachable"),
-    observation: `Ranged guard did not observe a finished volley within ${this.policy.combat.volley_wait_ticks} ticks.`,
+    observation: `Ranged guard did not observe a finished volley within ${this.policy.combat.volley_wait_ticks} server ticks or ${serverPacedWallMs(this.policy.combat.volley_wait_ticks) / 1000} s.`,
   });
   readonly roofTargetHostile = () =>
     isThreat(this.bot, this.requestedTarget, this.perception) ||
@@ -221,6 +256,8 @@ export class FightScene implements Disposable {
       entityMetadata(this.bot, this.requestedTarget, "creepy") === true);
   [Symbol.dispose]() {
     this.protectedProgress.leave();
+    this.endermanProgress.leave();
+    this.quarryProgress.leave();
     this.responsiveness[Symbol.dispose]();
   }
 }

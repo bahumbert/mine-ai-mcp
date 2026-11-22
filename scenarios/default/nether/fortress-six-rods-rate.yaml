@@ -40,11 +40,9 @@ client:
   command: bun
   args: ["../../src/client-host.ts", "./fortress-twelve-rods.ts"]
 goal:
-  kind: all
+  kind: completion
+  who: FortressHunter
   # Eight minutes bounds stalled collection; six rods must average at least one per minute.
   timeout: 480
-  goals:
-    - { kind: hasItem, who: FortressHunter, item: blaze_rod, count: 6 }
-    - { kind: completion, who: FortressHunter }
 
-params: { drops: 6, minimumDropsPerMinute: 1 }
+params: { handBack: [-27.5, 82, 355.5], drops: 6, minimumDropsPerMinute: 1 }

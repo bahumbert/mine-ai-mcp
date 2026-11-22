@@ -1,0 +1,23 @@
+template: ../../templates/hostile-night.yaml
+
+name: death-is-read
+tags: [acceptance, exclusive]
+description: >-
+  An unarmed actor is killed by an instant-damage effect at night. The death reader must see one death and one respawn
+  (the first spawn after the death) within ten seconds: the reading the live runs' death metrics are built on.
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/death-is-read.ts
+
+params:
+  withinSeconds: 10
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: completion, who: Actor }

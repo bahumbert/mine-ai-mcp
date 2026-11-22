@@ -1,0 +1,60 @@
+name: hovering-blaze-contact
+tags: [regression, reliability]
+description: >-
+  A blaze hovers five blocks above a bot that carries a sword and a shield and no bow. The hunt must hold under
+  the shield while the blaze stays above reach, then finish once the blaze comes down. An approach that ends
+  unreachable while the blaze hovers is the failure.
+
+world:
+  type: flat
+  time: midnight
+  difficulty: normal
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    # Regeneration and carried food keep the bot above the fight's health bar while it holds (the blaze-build-materials lesson).
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -8 -60 -8 9 -50 8 air"
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hovering-blaze-contact.ts]
+
+players:
+  - name: HoveringContact
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: diamond_sword, count: 1 }
+      - { item: shield, count: 1 }
+      - { item: cooked_beef, count: 16 }
+
+tick:
+  - "gamemode spectator @a[name=!HoveringContact,gamemode=!spectator]"
+
+# The driver summons the blaze itself, at a lane-offset-aware point: NoAI keeps it from firing or moving, so its descent
+# is the driver's (S1, step 9). Positions are arena-local, read through arena/params.ts.
+params:
+  mob_name: blaze
+  drop_name: blaze_rod
+  count: 1
+  # One block off the bot and five above its feet: the measured hovers sit 4.7 to 6.4 blocks above (analysis section 2).
+  blaze: [1.5, -55, 0.5]
+  # Sixty server ticks (3 s) separate the old code's settled call (about 6 s after the first approach) from a hover that lasts 2 to 9 s.
+  heldTicks: 60
+  # The goal's timeout counts game ticks (900 at 20 per second, 45 s). Appearance (220 ticks at most) + hold (80) + the
+  # descent (5 blocks, 40 ticks each: 200) + this wait (360, rounded to 380) is 880 at most, inside the goal; the stall
+  # bound is DRIVER_CLOCK_STOPPED_MS.
+  settleTicks: 360
+
+goal:
+  kind: all
+  timeout: 45
+  goals:
+    - { kind: completion, who: HoveringContact }

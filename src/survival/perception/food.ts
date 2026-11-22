@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { isRawFood, selectReflexFood, type ReflexFood } from "../../world/food.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import type { FoodPolicy } from "../policy/contract.js";
 import { rawFoodPermitted, type RawFoodVerdict } from "../policy/food.js";
 
@@ -21,7 +22,7 @@ export interface PolicyFoodSelection {
 export function selectPolicyFood(bot: Bot, food: Readonly<FoodPolicy>): PolicyFoodSelection {
   const verdict = rawFoodPermitted(food.raw, { health: bot.health, hunger: bot.food });
   const best = selectReflexFood(bot, { allowRaw: true });
-  if (best === null || verdict.permitted || !isRawFood(best.name)) return { food: best, withheld: null, verdict };
+  if (best === null || verdict.permitted || !isRawFood(familyIndexOf(bot), best.name)) return { food: best, withheld: null, verdict };
   // The most filling meal is uncooked and held back; a lesser cooked meal still counts.
   const cooked = selectReflexFood(bot, { allowRaw: false });
   return { food: cooked, withheld: cooked === null ? best : null, verdict };

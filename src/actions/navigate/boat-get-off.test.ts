@@ -100,22 +100,6 @@ test("a death during the get-off ends it at once, shift released, nothing resume
   assert.equal(added("dismount") + added("death") + added("respawn") + added("forcedMove"), 0, "no listener is left");
 });
 
-// Backlog 76 (Cleo, run 16): a 1.21.4 server reads the shift from entity_action, never from player_input.
-test("a get-off on 1.21.4 holds entity_action shift until the server lets her off, and writes no player_input", async () => {
-  const harness = seaHarness();
-  using _installed = harness.clock.install();
-  await seat(harness);
-  assert.equal(serverSeated(harness), true);
-  const result = await getOffOver(harness, 3_000);
-  assert.deepEqual(shifts(harness), [true, false]);
-  assert.equal(harness.server.packets.some((packet) => packet.name === "player_input"), false);
-  assert.equal(serverSeated(harness), false, "the server read the held shift at one of its ticks");
-  assert.equal(result.answered, true);
-  // The server's answer, not the world age: it sends her the boat's passenger list without her and a position
-  // (contract check boat-get-off-by-shift, Mine Labs 2026-10-21).
-  assert.equal(result.ended, "answer");
-});
-
 test("a press and release read in one server tick do not let her off: the release waits for the world age", async () => {
   const harness = seaHarness();
   using _installed = harness.clock.install();
@@ -148,3 +132,31 @@ test("a world age that jumps 40 ticks in the first 250 ms after the press is not
   assert.equal(ageAfterDrain - ageBefore, 40, "the burst was in the age she saw by the end of the 250 ms");
   assert.equal(serverSeated(harness), false);
 });
+
+for (const abortAfterMs of [0, 50, 300]) {
+  test(`cancel at ${abortAfterMs} ms releases a get-off with no server ticks; the next get-off finishes`, async () => {
+    const harness = seaHarness();
+    using _installed = harness.clock.install();
+    await seat(harness);
+    harness.server.stop();
+    const abort = new AbortController();
+    const reason = new Error("get-off cancelled");
+    if (abortAfterMs === 0) abort.abort(reason);
+    const rejected = assert.rejects(getOff(harness.bot, abort.signal), (cause) => cause === reason);
+    await harness.clock.advance(abortAfterMs);
+    abort.abort(reason);
+    await harness.clock.advance(1);
+    await rejected;
+    assert.deepEqual(shifts(harness), abortAfterMs === 0 ? [] : [true, false]);
+    assert.equal(harness.bot.vehicle?.id, BOAT_ID, "an abort does not invent a dismount answer");
+    const shiftsBeforeRetry = shifts(harness).length;
+    harness.server.resume();
+    const next = await getOffOver(harness, 3_000);
+    assert.equal(next.answered, true);
+    assert.equal(next.ended, "answer");
+    assert.deepEqual(shifts(harness).slice(shiftsBeforeRetry), [true, false]);
+    assert.equal(harness.server.packets.some((packet) => packet.name === "player_input"), false);
+    assert.equal(serverSeated(harness), false);
+    assert.equal(harness.bot.vehicle, null);
+  });
+}

@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
+import { foreignRegionAt } from "../../world/protected-regions.js";
 
 /**
  * Break the cobwebs the body already stands in before a route is walked.
@@ -16,6 +17,8 @@ export async function clearBodyWebs(bot: Bot, signal?: AbortSignal): Promise<num
     const cell = new Vec3(base.x, base.y + dy, base.z);
     const block = bot.blockAt(cell);
     if (block?.name !== "cobweb" || !bot.canDigBlock(block)) continue;
+    // A web in another owner's region stays (ADR-012); the route's own failure says why the body cannot leave it.
+    if (foreignRegionAt(bot, cell) !== null) continue;
     signal?.throwIfAborted();
     const tool = selectHarvestTool(bot, block);
     if (tool !== null) await bot.equip(tool, "hand").catch(() => undefined);

@@ -4,13 +4,12 @@ import { observedEyeHeight } from "../../../world/block-visibility.js";
 import type { CombatPerception } from "../../perception/combat/observations.js";
 import { positionThreat } from "../../perception/combat/observations.js";
 import { type CombatPolicy } from "../../policy/combat/contract.js";
-import { permittedCombatItems } from "../../policy/combat/permissions.js";
 import { positionExposed } from "../../positioning/combat/exposure.js";
 import { positionWorld } from "../../positioning/combat/geometry.js";
 import { CombatPosition } from "../../positioning/combat/position.js";
 import type { Answered } from "../../state/answered.js";
 import { aimPoint, shieldAnswersThreats } from "../../weapons/aim.js";
-import { selectMeleeLoadout } from "../../weapons/equipment.js";
+import { permittedMeleeLoadout } from "../../weapons/equipment.js";
 import { canMeleeTarget, combatItemsForTarget } from "../../weapons/melee.js";
 type Entity = Parameters<Bot["attack"]>[0];
 export function combatResourceRefusal(
@@ -36,7 +35,7 @@ export function combatResourceRefusal(
             threat.id !== target.id && threat.attack === "projectile" && positionExposed(rays, bot.entity, threat),
         ),
     ];
-    const shield = selectMeleeLoadout(permittedCombatItems(combatItemsForTarget(bot, target), policy)).shield;
+    const shield = permittedMeleeLoadout(bot, combatItemsForTarget(bot, target), policy).shield;
     if (shieldAnswersThreats(bot, shield, shooters)) return null;
     const planned = position.planCover();
     // Missing material is an admission failure. Local geometry belongs to

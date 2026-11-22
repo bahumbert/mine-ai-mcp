@@ -4,6 +4,7 @@ import { stepSchema } from "../actions.ts";
 import { Body } from "../body.ts";
 import type { KnownFarm } from "../memory.ts";
 import { runStep, type SkillContext } from "../skills.ts";
+import { overlapsOf } from "../skills/protected-areas.ts";
 import { TillFacts } from "./site.ts";
 import { FakeRuntime } from "../testing.ts";
 
@@ -120,6 +121,75 @@ test("farming near a farm she knows tends it: ripe crops harvested and replanted
   assert.match(result.status === "done" ? result.detail : "", /tended your wheat_seeds farm around 4 63 6/u);
 });
 
+/** A known 3x3 wheat farm and the runtime's answer to its tend, for the growth tests. */
+function grownFarm(after: Record<string, unknown> | null): { runtime: FakeRuntime; farms: KnownFarm[]; remembered: KnownFarm[] } {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }]);
+  runtime.tendAfter = after;
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 3, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 9, ripe: 0, empty: 0 } }];
+  return { runtime, farms, remembered: [] };
+}
+
+test("a harvest tend measures pace from before, not the replanted after stage", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 0": 8 }, emptyFarmland: 0, ripeAge: { wheat: 7 } });
+  runtime.tendBefore = { "wheat age 4": 4, "wheat age 7 ripe": 2 };
+  farms[0] = { ...farms[0]!, state: { planted: 6, ripe: 0, empty: 2, stage: 1, ripeAge: 7 } };
+  const result = await runStep({ skill: "farm", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm), nearMinutes: () => ({ near: 40, unknown: 0, since: 40 }) }));
+  assert.equal(result.status, "done");
+  assert.equal(remembered[0]?.pace, 0.1);
+  assert.equal(remembered[0]?.state.stage, 0);
+  assert.equal(remembered[0]?.paceFresh, true);
+});
+
+test("a stopped tend makes the pace reading stale; the next quiet tend keeps its pace and refreshes it", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 2": 8 }, emptyFarmland: 0, ripeAge: { wheat: 7 } });
+  farms[0] = { ...farms[0]!, pace: 0.12, state: { ...farms[0]!.state, stage: 1, ripeAge: 7 } };
+  const controller = new AbortController();
+  runtime.succeedEffects.tend_crops = () => controller.abort();
+  const context = contextFor(runtime, { farms, signal: controller.signal, rememberFarm: (farm) => remembered.push(farm), nearMinutes: () => ({ near: 40, unknown: 0, since: 40 }) });
+  assert.deepEqual(await runStep({ skill: "farm", size: 3 }, context), { status: "stopped" });
+  assert.deepEqual(remembered[0], { ...farms[0]!, paceFresh: false });
+  runtime.succeedEffects.tend_crops = undefined;
+  runtime.tendBefore = { "wheat age 5": 8 };
+  const next = await runStep({ skill: "farm", size: 3 }, { ...context, farms: [remembered[0]!], signal: new AbortController().signal });
+  assert.equal(next.status, "done");
+  assert.equal(remembered[1]?.pace, 0.12);
+  assert.equal(remembered[1]?.paceFresh, true);
+});
+
+test("a tend saves its own crop's stage over loaded cells, plus dry farmland and dimension", async () => {
+  const cases = [
+    { crops: { "wheat age 3": 6, "wheat age 7 ripe": 2 }, empty: 1, dry: 2, want: { planted: 8, ripe: 2, empty: 1, stage: 4, ripeAge: 7, dry: 2 } },
+    { crops: { "wheat age 7 ripe": 2, "wheat age 1": 3 }, empty: 0, dry: 0, want: { planted: 5, ripe: 2, empty: 0, stage: 3.4, ripeAge: 7, dry: 0 } },
+    { crops: { "wheat age 2": 4, "carrots age 7 ripe": 4 }, empty: 0, dry: 0, want: { planted: 8, ripe: 4, empty: 0, stage: 2, ripeAge: 7, dry: 0 } },
+  ];
+  for (const row of cases) {
+    const { runtime, farms, remembered } = grownFarm({ crops: row.crops, emptyFarmland: row.empty, dryFarmland: row.dry, ripeAge: { wheat: 7, carrots: 7 }, water: 1 });
+    const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+    assert.equal(result.status, "done", JSON.stringify(result));
+    assert.deepEqual(remembered[0]!.state, row.want);
+    assert.equal(remembered[0]!.dimension, runtime.snapshot.dimension);
+    if (row.dry > 0) assert.match(result.status === "done" ? result.detail : "", /8 planted, 2 ripe, 1 farmland empty.*, at stage 4\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\)/u);
+  }
+});
+
+test("a failed crop lookup still tends and remembers", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 9 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7 }, water: 1 });
+  runtime.blockSources = async () => { throw new Error("view_block_drops is down"); };
+  const result = await runStep({ skill: "farm", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+  assert.deepEqual(remembered[0]!.state, { planted: 9, ripe: 0, empty: 0, dry: 0 });
+});
+
+test("a result without ripeAge still tends", async () => {
+  // An older runtime: no ripeAge, no dryFarmland reported.
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 9 }, emptyFarmland: 0, water: 1 });
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(remembered[0]!.state, { planted: 9, ripe: 0, empty: 0 });
+  assert.doesNotMatch(result.status === "done" ? result.detail : "", /stage|dry/u);
+});
+
 test("farmland left empty for want of seeds says so, naming the get_items step", async () => {
   // Live 2026-10-03: 4 of 24 cells stayed empty (20 seeds), the result only said "4 farmland empty", and the model
   // tended the farm three more times until the repeat guard failed the order.
@@ -166,12 +236,47 @@ test("a farm she knows, asked for another crop: the crop asked is planted on emp
   assert.equal(runtime.submitted[0]!.input.plant, "carrot");
 });
 
-test("a new farm whose plot overlaps a protected area names the nearest clear plot and protects nothing (live 2026-10-10: her own house undone)", async () => {
+test("a farm next to her house is placed beside it: the site search moves the plot off the protected area (live 2026-10-10: her own house undone)", async () => {
+  const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  const house = { regionId: 4, owner: "self", label: "small medieval house", min: { x: -3, y: 60, z: -3 }, max: { x: 3, y: 75, z: 3 } };
+  runtime.areas = [house];
+  const remembered: KnownFarm[] = [];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 9 }, contextFor(runtime, { self: "self", rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const farmArea = runtime.areas.find((area) => area.label === "farm wheat_seeds")!;
+  assert.deepEqual(overlapsOf([house], farmArea), []);
+  assert.equal(remembered.length, 1);
+});
+
+/** Lists no protected area at the first read (the site search), the house at the next (after the walk to the site). */
+class AreaAppearsLaterRuntime extends FakeRuntime {
+  reads = 0;
+  override async protectedRegions() {
+    this.reads += 1;
+    return this.reads === 1 ? [] : super.protectedRegions();
+  }
+}
+
+test("an area that appears between the site search and the making of the farm is still refused by makeFarm, nothing protected", async () => {
+  const runtime = new AreaAppearsLaterRuntime();
+  runtime.simulateInventory = true;
+  runtime.dropSources = { wheat_seeds: [{ block: "wheat", chance: 0.5, planted: true, seed: "wheat_seeds" }] };
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }] };
+  runtime.areas = [{ regionId: 4, owner: "Tom", label: "tom's hut", min: { x: -3, y: 60, z: 0 }, max: { x: 3, y: 75, z: 8 } }];
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /overlaps protected area #4 'tom's hut' \(owned by Tom\); the nearest plot clear of them/u);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "protect_region").length, 0);
+  assert.deepEqual(calls(runtime), []);
+});
+
+test("no clear plot near gives the nearest clear spot's coordinates and protects nothing (live 2026-10-10: her own house undone)", async () => {
   const runtime = farmRuntime([{ name: "stone_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "bucket", count: 1 }]);
-  runtime.areas = [{ regionId: 4, owner: "self", label: "small medieval house", min: { x: -3, y: 60, z: -3 }, max: { x: 3, y: 75, z: 3 } }];
+  // Wider than the site search (16) around the plot: only a spot beyond it, within the 32 of the nearest-spot search, is clear.
+  runtime.areas = [{ regionId: 4, owner: "self", label: "small medieval house", min: { x: -25, y: 60, z: -25 }, max: { x: 25, y: 75, z: 25 } }];
   const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 9 }, contextFor(runtime, { self: "self" }));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /overlaps protected area #4 'small medieval house' \(yours.*the nearest plot clear of them has its middle \d+ blocks .*, at -?\d+ 64 -?\d+: farm there/u);
+  assert.match(result.status === "failed" ? result.detail : "", /overlaps protected area #4 'small medieval house' \(yours.*the nearest plot clear of them has its middle \d+ blocks .*, at -?\d+ 64 -?\d+ \(clear of protected areas; its ground is checked when you farm there\): farm there/u);
   assert.equal(runtime.submitted.filter((call) => call.tool === "protect_region").length, 0);
   assert.deepEqual(calls(runtime), []);
 });

@@ -4,13 +4,42 @@ import { responseScope } from "../control/combat/scopes/response.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
 import type { AnsweredScope, Facts } from "../state/answered.js";
 import { incomingFireball } from "../perception/combat/fireball.js";
+import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { HOSTILE_OBSERVATION_RANGE, isHostile, observeHostileContact } from "../perception/combat/threats.js";
 import { combatDecisionEvidence, decideCombatResponse } from "../policy/combat/decision.js";
 import { recoveryHealth } from "../policy/combat/health.js";
 import type { HostileResponse } from "../policy/combat/response.js";
-import type { ResponseDecision } from "../control/contract.js";
+import type { HeldThreatEnd, ResponseDecision } from "../control/contract.js";
 import { decideHostileReflex } from "../policy/combat/reflex-decision.js";
-import { carriedShields, shieldInOffHand, type HostileScene } from "./hostile-scene.js";
+import { OFF_HAND_SLOT, shieldInOffHand } from "../weapons/equipment.js";
+import { carriedShields, type HostileScene } from "./hostile-scene.js";
+import { isBoatEntity } from "../../actions/navigate/boat-entities.js";
+import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
+import { atSeaFrom } from "../../actions/navigate/boat-at-sea.js";
+
+const seatObservations = new WeakMap<HostileScene, {
+  readonly seat: ReturnType<typeof currentVehicle>;
+  readonly response: HostileScene["activeResponse"];
+  readonly range: number;
+  readonly cell: string;
+  readonly atSea: boolean;
+}>();
+
+/** Shore scans run once per observed seat cell/response, never on foot or repeatedly at the same seat cell. */
+function seatedOutAtSea(scene: HostileScene): boolean {
+  const seat = currentVehicle(scene.bot);
+  if (!seat || !isBoatEntity(seat)) {
+    seatObservations.delete(scene);
+    return false;
+  }
+  const range = scene.policy.combat.evade_safe_range;
+  const cell = seat.position.floored().toString();
+  const previous = seatObservations.get(scene);
+  if (previous?.seat === seat && previous.cell === cell && previous.response === scene.activeResponse && previous.range === range) return previous.atSea;
+  const atSea = atSeaFrom(scene.bot, seat.position, range);
+  seatObservations.set(scene, { seat, response: scene.activeResponse, range, cell, atSea });
+  return atSea;
+}
 
 export type ShieldPreparation = { readonly kind: "prepare_shield" };
 
@@ -35,7 +64,7 @@ function observeEncounter(scene: HostileScene): void {
       encounterThreats.delete(id);
   }
   if (encounterThreats.size) policy.beginEncounter();
-  else if (policy.snapshot().encounter) {
+  else if (policy.encounter) {
     policy.constrain(null);
     scene.transition(policy.endEncounter());
   }
@@ -83,7 +112,9 @@ export function senseHostile(scene: HostileScene) {
   scene.transition(policy.refresh());
   observeEncounter(scene);
   // Aggression without attribution can require avoidance; it is not an attack authorization.
-  const facts = observeCombatDecision(bot, scene.context);
+  const observed = observeCombatDecision(bot, scene.context);
+  // A seated withdrawal rows; it cannot promise a shelter or protected recovery (P4-06c T10b, 2026-11-09).
+  const facts = { ...observed, hideAllowed: observed.hideAllowed && !seatedOutAtSea(scene) };
   const purpose = { kind: "automatic", quarry: policy.quarry } as const;
   const directive = decideCombatResponse(facts, purpose);
   const prepareShield = shieldWanted(scene);
@@ -109,6 +140,24 @@ export function senseHostile(scene: HostileScene) {
 }
 
 type HostileDanger = NonNullable<ReturnType<typeof senseHostile>>["danger"];
+
+/** Projectile-free stand-down can resume a held walk; evidence still names every live held target. */
+export function heldThreatEnded(scene: HostileScene, held: HostileResponse, observed: HostileDanger | null): HeldThreatEnd {
+  // A still-incoming projectile beyond the contact range must not buy a short resume between responses.
+  const fireball = incomingFireball(scene.bot, Infinity);
+  if (fireball) return { notEnded: `projectile ${fireball.name}#${fireball.id} incoming at ${fireball.position.distanceTo(scene.bot.entity.position).toFixed(1)}` };
+  const shieldProjectile = incomingShieldProjectiles(scene.bot)[0];
+  if (shieldProjectile) return { notEnded: `shield projectile ${shieldProjectile.name}#${shieldProjectile.id}` };
+  const targets = "targetId" in held ? [{ id: held.targetId,
+    name: held.threats.find((threat) => threat.id === held.targetId)?.name ?? scene.bot.entities[held.targetId]?.name ?? "entity" }]
+    : held.threats;
+  const alive = targets.filter(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid && held.kind !== "deflect");
+  if (alive.length) return { ended: ["no projectile in flight", ...alive.map(({ id, name }) =>
+    `target ${name}#${id} alive at ${scene.bot.entities[id]!.position.distanceTo(scene.bot.entity.position).toFixed(1)} blocks`)].join(", ") };
+  if (observed === null) return { ended: "no projectile in flight, no hostile tracked" };
+  return { ended: ["no projectile in flight", ...targets.map(({ id, name }) =>
+    `target ${name}#${id} ${scene.perception.resolvedIds.has(id) ? "dead" : scene.bot.entities[id]?.isValid ? "passed" : "gone"}`)].join(", ") };
+}
 
 export function hostileDecisionFacts({
   facts,
@@ -148,7 +197,7 @@ export function hostileScope(scene: HostileScene, response: HostileResponse | Sh
       response: "prepare_shield",
       scope: "off-hand",
       facts: () => ({
-        offHand: bot.inventory.slots[45]?.name ?? null,
+        offHand: bot.inventory.slots[OFF_HAND_SLOT]?.name ?? null,
         shields: carriedShields(bot).map((item) => item.slot),
       }),
       permissions: () => ({ shield: policy.combat.shield }),

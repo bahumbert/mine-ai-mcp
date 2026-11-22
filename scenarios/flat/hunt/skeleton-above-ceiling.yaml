@@ -38,4 +38,5 @@ goal:
   timeout: 60
   goals:
     - { kind: kill, who: CeilingHunter, target: skeleton }
+    - { kind: survive, who: CeilingHunter, seconds: 1 }
     - { kind: completion, who: CeilingHunter }

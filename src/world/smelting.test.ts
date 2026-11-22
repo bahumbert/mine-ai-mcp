@@ -49,9 +49,18 @@ test("every log that burns is a fuel and a nether stem is not", () => {
 });
 
 test("a version with no shipped item tags knows only the fuels named by item: a plank is no fuel there", () => {
-  assert.equal(fuelCapacity("coal", "1.20.1"), 8);
-  assert.equal(fuelCapacity("lava_bucket", "1.20.1"), 100);
-  assert.equal(fuelCapacity("oak_planks", "1.20.1"), 0);
+  assert.equal(fuelCapacity("coal", "1.8.9"), 8);
+  assert.equal(fuelCapacity("lava_bucket", "1.8.9"), 100);
+  assert.equal(fuelCapacity("oak_planks", "1.8.9"), 0);
+});
+
+test("1.20.4 beef smelts into cooked_beef, from its own recipe file", () => {
+  assert.deepEqual(recipesFor("cooked_beef", "1.20.4").map((recipe) => recipe.inputs), [["beef"]]);
+  assert.equal(smeltingData("1.20.4")?.version, "1.20.4");
+  assert.equal(smeltingData("1.21.1")?.version, "1.21.1");
+  assert.ok(recipesFor("iron_ingot", "1.19.4").some((recipe) => recipe.inputs.includes("raw_iron")));
+  // 1.20.1 ships item tags, so its planks burn (a version below 1.19.4 knows no plank fuel).
+  assert.equal(fuelCapacity("oak_planks", "1.20.1"), 1.5);
 });
 
 test("a fuel smelts more items when the recipe cooks faster, and the cook time is the recipe's", () => {

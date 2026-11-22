@@ -16,6 +16,12 @@ export const manifestSchema = z.strictObject({
   minecraft: z.strictObject({
     version: z.string().min(1),
     jar: z.strictObject({ url: httpsUrl, sha1 }),
+    /**
+     * The Paper server program (spec 2026-11-14 D1): one pinned build. A bump edits this object only (build, url, sha256, bytes,
+     * installedBytes measured again). `installedBytes`: `cache` + `libraries` + `versions` after Paperclip's first start
+     * (`1` until plan Task 1 F measures it); the disk check counts them beside the jar.
+     */
+    paper: z.strictObject({ build: positiveInt, url: httpsUrl, sha256, bytes: positiveInt, installedBytes: positiveInt }),
     /** Server heap in MB: `perRamGb` per GiB of the machine's RAM, clamped to `min`..`max`. */
     memoryMb: z.strictObject({ min: positiveInt, perRamGb: positiveInt, max: positiveInt }),
   }),

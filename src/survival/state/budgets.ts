@@ -18,6 +18,11 @@ interface BudgetScope {
   readonly measure: () => number;
   /** A resumed attempt retains its original starting measurement. */
   readonly startedAt?: number;
+  /**
+   * A second clock in milliseconds that ends the budget too, for a budget counted in ticks: ticks stop or crawl when
+   * the server lags, and the budget must still end. It renews with the budget and, like `startedAt`, may start earlier.
+   */
+  readonly wall?: { readonly limitMs: number; readonly measure: () => number; readonly startedAt?: number };
   readonly exhaustion: string;
 }
 
@@ -45,8 +50,11 @@ export class Budgets {
 
   private open(scope: BudgetScope, progress: string | null): ProgressBudget {
     let start = scope.startedAt ?? scope.measure();
+    const { wall } = scope;
+    let wallStart = wall ? (wall.startedAt ?? wall.measure()) : 0;
     const snapshot = (): BudgetSnapshot => {
       const spent = Math.max(0, scope.measure() - start);
+      const wallOver = wall !== undefined && Math.max(0, wall.measure() - wallStart) >= wall.limitMs;
       return {
         name: scope.name,
         scope: scope.scope,
@@ -54,7 +62,7 @@ export class Budgets {
         unit: scope.unit,
         limit: scope.limit,
         spent,
-        remaining: Math.max(0, scope.limit - spent),
+        remaining: wallOver ? 0 : Math.max(0, scope.limit - spent),
         exhaustion: scope.exhaustion,
         progress,
       };
@@ -68,7 +76,9 @@ export class Budgets {
         return snapshot().remaining;
       },
       observe: (evidence) => {
-        if (progress !== null && evidence === progress) start = scope.measure();
+        if (progress === null || evidence !== progress) return;
+        start = scope.measure();
+        if (wall) wallStart = wall.measure();
       },
       [Symbol.dispose]: () => {
         this.#active.delete(snapshot);

@@ -6,7 +6,7 @@
  * dependencies are the cells its steps rely on, so a lava change beside a route cell must be one too, or the route
  * walks on as "irrelevant" until the lava is in the body's cell.
  */
-import { type BlockPosition, type WorldView } from "./world.js";
+import { type BlockPosition, type WorldView, blockKey } from "./world.js";
 
 /** Lava this near the cell (blocks sideways) can reach it within a few flow steps. */
 const WATCH_REACH = 2;
@@ -36,8 +36,23 @@ function lavaNear(world: Pick<WorldView, "blockAt">, cell: BlockPosition): boole
  * terrain gains no dependency.
  */
 export function lavaWatchCells(world: Pick<WorldView, "blockAt">, cell: BlockPosition): BlockPosition[] {
-  if (!lavaNear(world, cell)) return [];
+  return lavaNear(world, cell) ? lavaWatchedCells(cell) : [];
+}
+
+/**
+ * The 9 cells lava could flow through into the feet cell `cell` or its head cell, with no look at what lies near: the
+ * route's `lavaDependencies`. A flow that begins farther than the near-lava scan reaches the cell beside the route one
+ * flow step before it fills the route cell, and a lava change there (not any change) is what invalidates the route.
+ */
+export function lavaWatchedCells(cell: BlockPosition): BlockPosition[] {
   const watched: BlockPosition[] = [{ x: cell.x, y: cell.y + 2, z: cell.z }];
   for (const rise of [0, 1]) for (const [dx, dz] of SIDES) watched.push({ x: cell.x + dx, y: cell.y + rise, z: cell.z + dz });
   return watched;
+}
+
+/** `RoutePlan.lavaDependencies`: the packed keys of `lavaWatchedCells` for every arrival cell of a route. */
+export function routeLavaDependencies(arrivals: readonly BlockPosition[]): Set<number> {
+  const keys = new Set<number>();
+  for (const arrival of arrivals) for (const cell of lavaWatchedCells(arrival)) keys.add(blockKey(cell));
+  return keys;
 }

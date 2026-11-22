@@ -531,18 +531,16 @@ function seedChunks(data: SqlBotData, dimension: string, chunks: Array<readonly 
 const PLUS = (centre: readonly [number, number]): Array<[number, number]> =>
   [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]].map(([dx, dz]) => [centre[0] + dx!, centre[1] + dz!]);
 
-function attachToSeeded(t: { after(fn: () => void): void }, seed: (data: SqlBotData) => void): { data: SqlBotData; frontier: ReturnType<typeof attachSessionFrontier>; attachMs: number } {
+function attachToSeeded(t: { after(fn: () => void): void }, seed: (data: SqlBotData) => void): { data: SqlBotData; frontier: ReturnType<typeof attachSessionFrontier> } {
   const { bot } = createFakeBot({ loadedColumns: [] });
   const data = temporaryBotData();
   seed(data);
-  const started = performance.now();
   const frontier = attachSessionFrontier(bot, data);
-  const attachMs = performance.now() - started;
   t.after(() => {
     frontier.close();
     data.close();
   });
-  return { data, frontier, attachMs };
+  return { data, frontier };
 }
 
 test("attaching rechecks the rows a database kept flagged frontier: a chunk with all four neighbours recorded is cleared, a true frontier and another dimension stay", async (t) => {
@@ -558,18 +556,25 @@ test("attaching rechecks the rows a database kept flagged frontier: a chunk with
   assert.equal(flagged("the_nether").length, 5, "another dimension is not rechecked");
 });
 
-test("the attach recheck of 10 000 recorded chunks, 2 000 flagged, takes under 200 ms", async (t) => {
+test("the attach recheck clears 2 000 flagged chunks in a 10 000 chunk grid", async (t) => {
   // A 100 x 100 block of chunks; the 2 000 flagged are inner chunks (each has its four neighbours), so all clear.
   const grid: Array<[number, number]> = [];
   for (let x = 0; x < 100; x += 1) for (let z = 0; z < 100; z += 1) grid.push([x, z]);
   const inner = grid.filter(([x, z]) => x >= 1 && x <= 98 && z >= 1 && z <= 98).slice(0, 2_000);
   const flagged = new Set(inner.map(([x, z]) => `${x},${z}`));
   assert.equal(flagged.size, 2_000);
-  const { data, frontier, attachMs } = attachToSeeded(t, (seeded) => seedChunks(seeded, "overworld", grid, ([x, z]) => flagged.has(`${x},${z}`)));
+  let prepares = 0;
+  const { data, frontier } = attachToSeeded(t, (seeded) => {
+    seedChunks(seeded, "overworld", grid, ([x, z]) => flagged.has(`${x},${z}`));
+    seeded.withWritableDatabase((database) => {
+      const prepare = database.prepare.bind(database);
+      database.prepare = (...args) => { prepares++; return prepare(...args); };
+    });
+  });
   await frontier.idle();
 
+  assert.equal(prepares, 3, "attach uses a bounded number of statements regardless of flagged rows");
   assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE is_frontier = 1")[0]?.count, 0);
-  assert.ok(attachMs < 200, `attach took ${attachMs.toFixed(1)} ms`);
 });
 
 test("a rescan clears the stuck flag of its own chunk and of the neighbours it completes", async (t) => {

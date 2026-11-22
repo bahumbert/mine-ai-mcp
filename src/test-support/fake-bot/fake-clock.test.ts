@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock, failIfFakeClockLeftInstalled, type FakeClock } from "./fake-clock.js";
+import { setTimeout as realDelay } from "node:timers/promises";
+import { createFakeClock, failIfFakeClockLeftInstalled, flush, type FakeClock } from "./fake-clock.js";
 import { installClockForTest } from "./fake-clock-installer-fixture.js";
+
+// The real timer functions, captured before any test installs a clock: the identity checks and the cleanups of the red tests.
+const realSetTimeout = globalThis.setTimeout;
+const realSetInterval = globalThis.setInterval;
+const realClearTimeout = globalThis.clearTimeout;
+const realClearInterval = globalThis.clearInterval;
 
 test("a mocked clock runs a 1000 ms setTimeout once and moves Date.now and performance.now by 1000", async () => {
   const clock = createFakeClock({ mode: "mocked", startMs: 5_000 });
@@ -18,15 +25,20 @@ test("a mocked clock runs a 1000 ms setTimeout once and moves Date.now and perfo
   assert.equal(performance.now() - monotonic, 2_000);
 });
 
-test("disposing a mocked clock restores the real performance.now and Date", () => {
+test("disposing a mocked clock restores the real performance.now, Date and the four timer functions", () => {
   const realPerformanceNow = performance.now;
   const clock = createFakeClock({ mode: "mocked" });
   {
     using _installed = clock.install();
     assert.notEqual(performance.now, realPerformanceNow);
+    assert.notEqual(globalThis.setTimeout, realSetTimeout);
     assert.equal(Date.now(), 0);
   }
   assert.equal(performance.now, realPerformanceNow);
+  assert.equal(globalThis.setTimeout, realSetTimeout);
+  assert.equal(globalThis.setInterval, realSetInterval);
+  assert.equal(globalThis.clearTimeout, realClearTimeout);
+  assert.equal(globalThis.clearInterval, realClearInterval);
   assert.ok(Date.now() > 1_000_000_000_000);
 });
 
@@ -96,6 +108,25 @@ test("an aborted sleep rejects with the signal's reason and leaves no timer", as
   during.abort(new Error("cancelled"));
   await assert.rejects(sleeping, /cancelled/);
   assert.equal(clock.pendingTimers(), 0);
+});
+
+test("pendingGlobalTimers counts the global timeouts and intervals of the code under test until each fires or is cleared", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  const cleared = setTimeout(() => undefined, 1_000);
+  const fired: number[] = [];
+  setTimeout((value: number) => { fired.push(value); }, 500, 7);
+  const interval = setInterval(() => undefined, 300);
+  assert.equal(clock.pendingGlobalTimers(), 3);
+  clearTimeout(cleared);
+  assert.equal(clock.pendingGlobalTimers(), 2);
+  await clock.advance(600);
+  assert.deepEqual(fired, [7], "a wrapped callback still gets its arguments");
+  assert.equal(clock.pendingGlobalTimers(), 1, "a fired timeout is no longer pending; an interval stays until cleared");
+  clearInterval(interval);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  assert.equal(clock.pendingTimers(), 0, "the clock's own timers are counted apart");
 });
 
 for (const [how, installFirst] of [["the test", (clock: FakeClock) => clock.install()], ["a shared helper for the test", installClockForTest]] as const) {
@@ -225,4 +256,112 @@ test("dispose undoes the step: the mock's own Date.now is back and no offset is 
   const second = createFakeClock({ mode: "mocked", startMs: 5_000 });
   using _installed = second.install();
   assert.equal(Date.now(), 5_000);
+});
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+// A real timer or interval made before install and cleared while installed: `clear` is the call under test, `cleanup` the real one.
+const realTimerKinds: { readonly name: string; readonly start: (fire: () => void) => TimerHandle; readonly clear: (handle: TimerHandle) => void; readonly cleanup: (handle: TimerHandle) => void }[] = [
+  // real wait: the subject is a real timer created before install.
+  { name: "timeout", start: (fire) => setTimeout(fire, 20), clear: (handle) => clearTimeout(handle), cleanup: (handle) => realClearTimeout(handle) },
+  { name: "interval", start: (fire) => setInterval(fire, 20), clear: (handle) => clearInterval(handle), cleanup: (handle) => realClearInterval(handle) },
+];
+
+for (const kind of realTimerKinds) {
+  test(`a real ${kind.name} created before install and cleared while installed never fires`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    let fired = 0;
+    const realTimer = kind.start(() => (fired += 1));
+    try {
+      {
+        using _installed = clock.install();
+        kind.clear(realTimer);
+      }
+      // real wait: the subject is a real timer created before install.
+      await realDelay(60);
+      assert.equal(fired, 0);
+    } finally {
+      kind.cleanup(realTimer);
+    }
+  });
+}
+
+test("a mocked timer cleared while installed never fires on tick", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  let fired = 0;
+  const mockedTimer = setTimeout(() => (fired += 1), 100);
+  clearTimeout(mockedTimer);
+  await clock.advance(200);
+  assert.equal(fired, 0);
+});
+
+/** The function the test-start preload calls (`scripts/test-clock-cleanup.ts`): restores a leftover clock and retires every pump still running. */
+const retireLeftoverClocks = (): void => (globalThis as { [key: symbol]: () => void })[Symbol.for("mine-ai.restore-leftover-fake-clock")]?.();
+
+/** Runs `body` with a counter of `unhandledRejection` events (a retired settle must leave its input's rejection handled). */
+async function countingUnhandledRejections(body: () => Promise<void>): Promise<number> {
+  let seen = 0;
+  const count = () => void (seen += 1);
+  process.on("unhandledRejection", count);
+  try {
+    await body();
+  } finally {
+    process.off("unhandledRejection", count);
+  }
+  return seen;
+}
+
+// maxMs 50 is one slice: the old code reaches its `did not settle` throw within the 6 flushes (T9: a retire case must fail on the old code).
+const retiredInputs: { readonly name: string; readonly input: () => Promise<unknown> }[] = [
+  { name: "fulfilled", input: () => Promise.resolve(1) },
+  { name: "rejected", input: () => Promise.reject(new Error("x")) },
+  { name: "pending", input: () => new Promise(() => undefined) },
+];
+
+for (const kind of retiredInputs) {
+  test(`a settle retired during its first flush never settles (${kind.name} input)`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    let settled = false;
+    const unhandled = await countingUnhandledRejections(async () => {
+      const outcome = clock.settle(kind.input(), 50);
+      outcome.then(() => void (settled = true), () => void (settled = true));
+      retireLeftoverClocks();
+      for (let turn = 0; turn < 6; turn += 1) await flush();
+    });
+    assert.equal(settled, false);
+    assert.equal(unhandled, 0);
+  });
+}
+
+test("a settle retired between its slices stops pumping, and the retired clock's new advance never settles and fires nothing", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  let slices = 0;
+  clock.onSlice("physics", () => void (slices += 1));
+  let settled = false;
+  const outcome = clock.settle(new Promise(() => undefined), 40_000);
+  outcome.then(() => void (settled = true), () => void (settled = true));
+  while (slices === 0) await flush();
+  let fired = 0;
+  clock.after(50, () => void (fired += 1));
+  retireLeftoverClocks();
+  const at = slices;
+  let advanced = false;
+  clock.advance(100).then(() => void (advanced = true));
+  for (let turn = 0; turn < 5; turn += 1) await flush();
+  assert.ok(slices - at <= 1, `${slices - at} slices ran after the retire`);
+  assert.equal(settled, false);
+  assert.equal(advanced, false);
+  assert.equal(fired, 0);
+});
+
+test("a clock disposed by using and advanced afterwards still advances", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  {
+    using _installed = clock.install();
+    await clock.advance(50);
+  }
+  const before = clock.now();
+  await clock.advance(50);
+  assert.equal(clock.now() - before, 50);
 });

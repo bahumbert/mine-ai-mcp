@@ -24,6 +24,9 @@ players:
         count: 1
       - item: shield
         count: 1
+      # An enderman hunt's admission asks for a roof it can build when none stands (preparation.ts).
+      - item: cobblestone
+        count: 64
 entities:
   - type: enderman
     pos:
@@ -44,7 +47,7 @@ client:
     - ../../src/hunter.ts
 goal:
   kind: all
-  timeout: 30
+  timeout: 90
   goals:
     - kind: kill
       who: RoofMaterials
@@ -57,5 +60,5 @@ goal:
 params:
   mob_name: enderman
   drop_name: ender_pearl
-  count: 1
-  defeat_count: 1
+  count: 2
+  defeat_count: 2

@@ -11,16 +11,15 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import {
   HOSTILE_CONTACT_RANGE,
-  isHostileSpecies,
   type CombatController,
   type CombatOutcome,
   type CombatStyle,
 } from "../../survival/index.js";
 import { Budgets } from "../../survival/state/budgets.js";
-import { readCombatItems } from "../../survival/weapons/equipment.js";
-import { clockStart, monotonicNow, waitForSignal, type ClockStart, type Position3 } from "../../utils/index.js";
+import { monotonicNow, waitForSignal, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
+import { hasItemFamily } from "../../world/item-families.js";
 import { mobNotItemAnswer, mobSourcesOf } from "../../world/mob-drops.js";
 import { similarNames } from "../../world/similar-names.js";
 import {
@@ -31,6 +30,7 @@ import {
   type ObservedItemEntity,
 } from "../../world/item-pickup.js";
 import { defineAction, type ActionContext } from "../action.js";
+import { shieldChecksOf } from "./shield-gate.js";
 import {
   huntMobAnnotations,
   huntMobOutcomes,
@@ -47,7 +47,7 @@ import {
 } from "./contract.js";
 import { observeHuntDrops } from "./drop-accounting.js";
 import { collectionTargetSafetyTier, compareCollectionTargets } from "./target-selection.js";
-import { closestLoadedSpawner, SpawnerCamp, spawnerCampGoal } from "./spawner-camp.js";
+import { closestLoadedSpawner, observationTicksOf, observationWindow, SpawnerCamp, spawnerCampGoal, waitInObservationWindow, type ObservationWindow } from "./spawner-camp.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -95,7 +95,12 @@ export interface HuntMobDependencies {
    * range; getting there is the navigation process's job.
    */
   readonly pursue: (pursuit: HuntPursuit) => Promise<HuntResult>;
-  readonly engageTarget: (target: Entity, context: ActionContext) => Promise<TargetEngagement>;
+  /** `satisfied`: the hunt's own quantity, read by the engagement at each of its decisions. */
+  readonly engageTarget: (
+    target: Entity,
+    context: ActionContext,
+    satisfied?: () => boolean,
+  ) => Promise<TargetEngagement>;
   readonly collectDropAfterDeath: (
     observation: HuntDropObservation,
     context: ActionContext,
@@ -173,7 +178,7 @@ export function huntMobDependencies(
         remove();
       }
     },
-    engageTarget: (target, context) => engageTarget(bot, combat, target, context),
+    engageTarget: (target, context, satisfied) => engageTarget(bot, combat, target, context, satisfied),
     collectDropAfterDeath: (observation, context) =>
       collectDropAfterDeath(bot, navigation, observation, context, discarded),
     sweepDropsAfterDeath: (observation, context) =>
@@ -201,6 +206,7 @@ export async function engageTarget(
   combat: CombatController,
   target: Entity,
   context: ActionContext,
+  satisfied?: () => boolean,
 ): Promise<TargetEngagement> {
   let deathPosition: Position3 | null = null;
   const onDeath = (entity: Entity) => {
@@ -210,7 +216,7 @@ export async function engageTarget(
   try {
     const signal = context.signal ?? new AbortController().signal;
     const targetId = target.id;
-    const outcome = await combat.engage(targetId, signal, "pursue");
+    const outcome = await combat.engage(targetId, signal, "pursue", satisfied && { satisfied });
     return { outcome, deathPosition: outcome.kind === "died" ? (deathPosition ?? positionOf(target)) : null };
   } finally {
     bot.removeListener("entityDead", onDeath);
@@ -376,6 +382,7 @@ interface HuntObservation {
   readonly drops: ReturnType<typeof observeHuntDrops>;
   readonly mob: string;
   readonly drop: string;
+  readonly arrowHunt: boolean;
   readonly requested: number;
   readonly inventoryBefore: number;
   inventoryAfter: number;
@@ -395,6 +402,7 @@ function huntEvidence(observation: HuntObservation): HuntEvidence {
   return {
     mob: observation.mob,
     drop: observation.drop,
+    ...(observation.arrowHunt && { arrowHunt: true }),
     requested: observation.requested,
     inventoryBefore: observation.inventoryBefore,
     inventoryAfter: observation.inventoryAfter,
@@ -491,31 +499,15 @@ function pursuitStop(request: HuntMobRequest, result: HuntResult, gained: number
   }
 }
 
-/**
- * Refuse a hostile hunt that has nothing to block with.
- *
- * The gate is the species rather than the fight that follows, because the cost
- * of learning it the other way is paid in the body: a skeleton opens at range
- * and a creeper only has to arrive. Hostility is the registry's own category,
- * so the mobs whose `type` misreads them - hoglins, phantoms, slimes, magma
- * cubes, ghasts - are covered by the same rule that covers skeletons, and a
- * chicken is never asked for a shield it does not need.
- *
- * Carrying one is the test, not wearing one: the loadout moves a carried shield
- * into the off-hand when the fight starts. A policy that forbids shields makes
- * a carried one ornamental, so that is refused on the same terms.
- */
-function shieldRefusal(bot: Bot, request: HuntMobRequest, dependencies: HuntMobDependencies): string | null {
-  if (request.allowWithoutShield || !isHostileSpecies(bot, request.mobName)) return null;
-  if (!readCombatItems(bot).some((item) => item.name === "shield"))
-    return huntMobOutcomes.shieldNotCarried(request.mobName);
-  return dependencies.shieldPermitted() ? null : huntMobOutcomes.shieldNotPermitted(request.mobName);
+/** Whether the requested drop's carried count meets the request: a read only, the observation is not written. */
+function quantityCarried(bot: Bot, drop: HuntDrop, observation: HuntObservation): boolean {
+  return bot.inventory.count(drop.id, null) - observation.inventoryBefore >= observation.requested;
 }
 
 /** Read the requested drop's count into the observation, and say whether the request is met. */
 function settleInventory(bot: Bot, drop: HuntDrop, observation: HuntObservation): boolean {
   observation.inventoryAfter = bot.inventory.count(drop.id, null);
-  return observation.inventoryAfter - observation.inventoryBefore >= observation.requested;
+  return quantityCarried(bot, drop, observation);
 }
 
 /** What one engagement in a hunt needs, held for the whole run. */
@@ -543,7 +535,10 @@ async function fightAndCollect(fight: HuntEngagement, targetId: number): Promise
   observation.targetsEngaged += 1;
   const dropEntityBaseline = snapshotEntityIds(bot);
   const dropInventoryBefore = observation.inventoryAfter;
-  const { outcome, deathPosition } = await dependencies.engageTarget(target, context);
+  // The engagement reads the hunt's own quantity at its decisions: a count met by another kill ends it at the next one.
+  const { outcome, deathPosition } = await dependencies.engageTarget(target, context, () =>
+    quantityCarried(bot, drop, observation),
+  );
   observation.attacks += outcome.attacks;
   observation.projectileGuards += outcome.projectileGuards;
   for (const style of outcome.stylesUsed) observation.combatStyles.add(style);
@@ -551,6 +546,8 @@ async function fightAndCollect(fight: HuntEngagement, targetId: number): Promise
   // Incidental pack kills can leave the requested item even when the selected
   // target survives or disappears. Gather that evidence before choosing another mob.
   if (outcome.kind === "target_lost" || outcome.kind === "unreachable") {
+    // A count already carried walks to no other loaded drop, under fire or not.
+    if (settleInventory(bot, drop, observation)) return { kind: "defeated" };
     await dependencies.gatherLoadedDrops(drop, context);
     if (settleInventory(bot, drop, observation)) return { kind: "defeated" };
   }
@@ -620,6 +617,35 @@ export async function huntMob(
   }
 }
 
+/** The hunt's evidence before its first step: nothing engaged, the drop count at the start. */
+function startHuntObservation(
+  bot: Bot,
+  request: HuntMobRequest,
+  lifetime: AbortSignal,
+  inventoryBefore: number,
+  mobEntityType: number | undefined,
+): HuntObservation {
+  return {
+    stopReason: "execution_failed",
+    drops: observeHuntDrops(bot, request.dropName, lifetime),
+    mob: request.mobName,
+    drop: request.dropName,
+    arrowHunt: hasItemFamily(bot, request.dropName, "arrow"),
+    requested: request.count,
+    inventoryBefore,
+    inventoryAfter: inventoryBefore,
+    targetsEngaged: 0,
+    selectedTargetId: null,
+    targetChanges: [],
+    targetDeathsObserved: 0,
+    attacks: 0,
+    combatStyles: new Set(),
+    projectileGuards: 0,
+    otherDropsCollected: 0,
+    loadedTargets: () => loadedTargets(bot, request.mobName, mobEntityType),
+  };
+}
+
 function beginHuntMob(
   bot: Bot,
   request: HuntMobRequest,
@@ -632,35 +658,20 @@ function beginHuntMob(
   const drop = bot.registry.itemsByName[request.dropName];
   const inventoryBefore = drop ? bot.inventory.count(drop.id, null) : 0;
   const camp = request.campSpawner ? dependencies.createCamp(request.observeForMs) : null;
-  const observation: HuntObservation = {
-    stopReason: "execution_failed",
-    drops: observeHuntDrops(bot, request.dropName, lifetime),
-    mob: request.mobName,
-    drop: request.dropName,
-    requested: request.count,
-    inventoryBefore,
-    inventoryAfter: inventoryBefore,
-    targetsEngaged: 0,
-    selectedTargetId: null,
-    targetChanges: [],
-    targetDeathsObserved: 0,
-    attacks: 0,
-    combatStyles: new Set(),
-    projectileGuards: 0,
-    otherDropsCollected: 0,
-    loadedTargets: () => loadedTargets(bot, request.mobName, mob?.id),
-  };
+  const observation = startHuntObservation(bot, request, lifetime, inventoryBefore, mob?.id);
   // Retain a terminal collection reason while a reflex interrupts its handoff.
   // Resumption finishes making the body safe; it does not restart the failed hunt.
   let phase: { kind: "collecting" | "observing" } | { kind: "finishing"; result: HuntAttemptResult } = {
     kind: "collecting",
   };
-  let observationStart: ClockStart | null = null; // `at` shows in the checkpoint, `began` times the budget
+  // The window (game time, kept across a reflex): its `start.at` shows in the checkpoint, its deadline ends the wait.
+  let quarryWindow: ObservationWindow | null = null;
   let handedOff = false;
   observe(() => {
     const current = drop ? bot.inventory.count(drop.id, null) : 0;
     return {
       baseline: { item: request.dropName, count: inventoryBefore },
+      goalMet: current - inventoryBefore >= request.count,
       checkpoint: {
         phase: phase.kind,
         selectedTargetId: observation.selectedTargetId,
@@ -669,8 +680,9 @@ function beginHuntMob(
         inventory: current,
         gained: current - inventoryBefore,
         requested: request.count,
-        observationStartedAt: observationStart?.at ?? null,
-        observationUntil: observationStart === null ? null : observationStart.at + request.observeForMs,
+        observationStartedAt: quarryWindow?.start.at ?? null,
+        observationUntil: quarryWindow === null ? null : quarryWindow.start.at + request.observeForMs,
+        observationTicks: observationTicksOf(quarryWindow),
         camp: camp?.snapshot ?? null,
       },
       completion: {
@@ -687,10 +699,14 @@ function beginHuntMob(
     if (!mob) return stoppedResult(huntMobOutcomes.unknownMob(request.mobName), observation, "invalid_request");
     // "wool" is a family: the ids carry a colour (white_wool ...), named back so the caller can pick one.
     if (!drop) return stoppedResult(huntMobOutcomes.unknownDrop(request.dropName, similarItemNames(bot, request.dropName), mobNotItemAnswer(request.dropName, bot.registry.entitiesByName, bot.version)), observation, "invalid_request");
+    const quarry: HuntDrop = { name: request.dropName, id: drop.id };
+    const settled = () => settleInventory(bot, quarry, observation);
+    // A quantity the caller already carries (a resumed run, a camp wait) ends the hunt before any admission refusal.
+    if (settled()) return { status: "succeeded", hunt: huntEvidence(observation), termination: "quantity_collected" };
     // Check admission, every target approach, and contact after drop collection.
     // One pursuit can fight several loaded targets before this function returns.
     let shieldRequired: string | null = null;
-    const checkShield = () => (shieldRequired = shieldRefusal(bot, request, dependencies));
+    const checkShield = shieldChecksOf(bot, request, dependencies.shieldPermitted, () => huntEvidence(observation).gained, (refusal) => (shieldRequired = refusal));
     const unshielded = checkShield();
     if (unshielded) return stoppedResult(unshielded, observation, "shield_required");
     const missingSpawner = camp?.unavailable();
@@ -698,9 +714,7 @@ function beginHuntMob(
 
     const dropChance = mobSourcesOf(request.dropName, bot.version).find((source) => source.mob === request.mobName)?.chance ?? null;
     const fruitlessKills = fruitlessKillLimit(dropChance);
-    const quarry: HuntDrop = { name: request.dropName, id: drop.id };
     const fight: HuntEngagement = { bot, request, drop: quarry, observation, dependencies, context };
-    const settled = () => settleInventory(bot, quarry, observation);
     const inventoryStop = () =>
       hasInventorySpaceFor(bot.inventory, new Set([quarry.name]))
         ? null
@@ -778,28 +792,23 @@ function beginHuntMob(
           break;
         }
         if (result.termination === "no_loaded_targets" && request.observeForMs > 0) {
-          observationStart ??= clockStart();
+          const window = (quarryWindow ??= observationWindow(bot, request.observeForMs));
           phase = { kind: "observing" };
-          using window = budgets.attempt({
+          // Evidence only: the window's game-time deadline decides (D32), as the evade's clock does.
+          using _budget = budgets.attempt({
             name: "quarry_observation",
-            scope: `request:${request.mobName}:${observationStart.at}`,
-            unit: "milliseconds",
-            limit: request.observeForMs,
-            measure: monotonicNow,
-            startedAt: observationStart.began,
+            scope: `request:${request.mobName}:${window.start.at}`,
+            unit: "ticks",
+            limit: window.ticks,
+            measure: () => window.elapsedTicks(monotonicNow()) ?? 0,
+            startedAt: 0,
+            wall: { limitMs: window.wallMs, measure: monotonicNow, startedAt: window.start.began },
             exhaustion:
               "Return partial inventory and observation_exhausted after a final observation and safe handoff.",
           });
-          // The original absolute window includes time spent suspended or fighting.
-          const remaining = window.remaining;
-          const appeared =
-            remaining > 0 &&
-            (await waitForSignal(() => available() || null, bot, ["entitySpawn", "entityUpdate", "physicsTick"], {
-              context,
-              timeoutMs: remaining,
-            }));
-          context.signal?.throwIfAborted();
-          if (appeared || available()) continue;
+          // The original window includes time spent suspended or fighting: a resume reads its end before any wait.
+          await waitInObservationWindow(bot, window, available, context.signal);
+          if (available()) continue;
           phase = {
             kind: "finishing",
             result: stoppedResult(
@@ -868,7 +877,7 @@ export function formatHuntMobResult(result: HuntMobResult): string {
     `- Collection outcome: ${result.termination}.`,
     `- Handoff: ${result.handoff.kind === "safe" ? `observed ${result.handoff.basis} at ${JSON.stringify(result.handoff.position)}` : `${result.handoff.kind}: ${result.handoff.reason}`}.`,
     `Observed **${hunt.drop} ${hunt.gained}/${hunt.requested}** while intentionally hunting loaded \`${hunt.mob}\`.`,
-    ...(hunt.drop === "arrow"
+    ...(hunt.arrowHunt
       ? ["- Bow policy: bow use was temporarily disabled for this arrow hunt, including defensive interruptions. The hunt restriction is released when the request ends; the survival policy's combat permissions apply again, including any existing bow prohibition."]
       : []),
     `- Inventory: ${hunt.inventoryBefore} → ${hunt.inventoryAfter}`,
@@ -924,7 +933,7 @@ export function createCollectMobDropAction(
     annotations: huntMobAnnotations,
     parse: parseHuntMobRequest,
     begin: (request, lifetime, observe) => {
-      if (request.dropName === "arrow") combat.policy.reserveArrows(lifetime);
+      if (hasItemFamily(bot, request.dropName, "arrow")) combat.policy.reserveArrows(lifetime);
       combat.policy.declareQuarry(lifetime, request.mobName);
       return beginHuntMob(bot, request, dependencies, lifetime, observe, budgets);
     },

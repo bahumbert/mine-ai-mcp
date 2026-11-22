@@ -11,7 +11,7 @@ world:
   gamerules:
     doDaylightCycle: true
     doMobSpawning: false
-    naturalRegeneration: false
+    naturalRegeneration: true
     randomTickSpeed: 0
 
 geometry:
@@ -22,8 +22,12 @@ players:
     pos: [0.5, -59, 0.5]
     # The driver uses /damage to establish low health before the measured window.
     op: true
+    # Hungry with food in the pack: the covered recovery can eat and heal to its target, so the hide hold ends
+    # recovered and the request resumes (without food and regeneration the 90-second hold exhausts at seven health).
+    food: 13
     inventory:
       - { item: cobblestone, count: 64 }
+      - { item: cooked_beef, count: 4 }
 
 # All mobs have normal AI. They activate after Mine Labs has prepared the player.
 entities:

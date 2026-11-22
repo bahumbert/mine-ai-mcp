@@ -49,6 +49,7 @@ tick:
 
 goal:
   kind: all
+  stillTicks: 680 # P4-29 a5 T2: longest passing still span 332 ticks (20 tps 329, 10 tps 332; n 5 and 3); 2x rounded up to 20.
   timeout: 60
   goals:
     - kind: entityCount

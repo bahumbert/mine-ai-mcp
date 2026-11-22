@@ -28,6 +28,7 @@ import {
   placeBlockResultSchema,
 } from "@aibengineering/mine-ai-mcp";
 
+import { starve } from "../../flat/survival/hunger.ts";
 import { standStill } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { scenarioBotData } from "../../src/scenario-bot-data.ts";
@@ -44,24 +45,10 @@ const paramsSchema = z.strictObject({
   craftedCount: z.number().int().positive(),
 });
 
-/** How long the hunger effect is given to bring the bar down, in ticks. */
-const STARVE_TIMEOUT_TICKS = 1_200;
-
-/**
- * Drain hunger with the hunger effect, from the client, so the bite has
- * somewhere to go. The fixture ops the bot for exactly this.
- */
-async function starve(context: MineAiScenarioContext, target: number): Promise<boolean> {
-  const { bot } = context;
-  bot.chat("/effect give @s minecraft:hunger 60 255 true");
-  for (let waited = 0; waited < STARVE_TIMEOUT_TICKS; waited += 1) {
-    context.signal.throwIfAborted();
-    if (bot.food <= target) break;
-    await bot.waitForTicks(1);
-  }
-  bot.chat("/effect clear @s minecraft:hunger");
-  return bot.food <= target;
-}
+// The hunger drain that lets the bite go somewhere (the fixture ops the bot for
+// it) is the shared server-tick helper, re-exported so its test reaches the
+// helper this driver calls.
+export { starve };
 
 /**
  * What every receipt in this scenario has to show: the count moved by exactly

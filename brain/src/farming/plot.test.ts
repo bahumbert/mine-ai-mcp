@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { farmPlot, plotBehind } from "./plot.ts";
+import { farmBox, farmPlot, plotBehind } from "./plot.ts";
+
+test("farmBox is the plot plus one ring from soil -1 to soil +2: the box a new farm protects", () => {
+  assert.deepEqual(farmBox(farmPlot({ x: 0, y: 63, z: 4 }, 5)), { min: { x: -3, y: 62, z: 1 }, max: { x: 3, y: 65, z: 7 } });
+  assert.deepEqual(farmBox(farmPlot({ x: -10, y: 70, z: 0 }, 3)), { min: { x: -12, y: 69, z: -2 }, max: { x: -8, y: 72, z: 2 } });
+});
 
 test("a farm is a square of soil around one water cell, every cell within 4 of the water", () => {
   const plot = farmPlot({ x: 10, y: 63, z: -5 }, 9);

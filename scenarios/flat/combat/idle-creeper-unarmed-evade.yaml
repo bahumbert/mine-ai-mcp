@@ -50,6 +50,7 @@ tick:
 
 goal:
   kind: all
+  stillTicks: 1760 # P4-29 a5 T2: longest passing still span 871 ticks (20 tps 794, 10 tps 871; n 5 and 3); 2x rounded up to 20.
   timeout: 90
   goals:
     - kind: health

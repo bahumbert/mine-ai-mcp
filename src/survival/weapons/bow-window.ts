@@ -9,18 +9,19 @@ export function assessBowWindow(
 ) {
   const requiredTicks = remainingDrawTicks + SHIELD_READY_TICKS + HEAD_TURN_LEAD_TICKS + 2;
   const threats = [
-    ...(defence?.projectiles.map(({ entity, impactInTicks }) => ({ id: entity.id,
-      // Fireballs accelerate; their current-speed quotient is not a safe deadline.
-      ticks: entity.name === "small_fireball" ? 0 : impactInTicks })) ?? []),
-    ...(defence?.windupForecasts.map(({ entity, impactInTicks }) => ({ id: entity.id, ticks: impactInTicks })) ?? []),
-  ].sort((a, b) => a.ticks - b.ticks);
-  const earliest = threats[0];
+    ...(defence?.projectiles ?? []), ...(defence?.windupForecasts ?? []),
+  ].map(({ entity, impactInTicks, earliestImpactInTicks }) => ({ id: entity.id,
+    ticks: impactInTicks === null ? null : Math.min(impactInTicks, earliestImpactInTicks ?? impactInTicks) }));
+  const unknown = threats.find(({ ticks }) => ticks === null);
+  const earliest = unknown ?? threats.reduce<typeof threats[number] | undefined>((first, threat) =>
+    !first || (threat.ticks !== null && first.ticks !== null && threat.ticks < first.ticks) ? threat : first, undefined);
   const held = (defence?.holdRemainingTicks ?? 0) > 0;
   return {
-    safe: !uncertainVolley && !held && (!earliest || earliest.ticks > requiredTicks),
+    safe: !uncertainVolley && !defence?.timingUncertain && !held && (!earliest || (earliest.ticks !== null && earliest.ticks > requiredTicks)),
     requiredTicks,
     impactInTicks: earliest?.ticks ?? null,
     threatId: earliest?.id ?? defence?.heldProjectileId ?? null,
-    reason: uncertainVolley ? "uncertain_volley" : held ? "held_impact" : earliest ? "predicted_impact" : "clear",
+    reason: uncertainVolley ? "uncertain_volley" : defence?.timingUncertain ? "uncertain_timing" : held ? "held_impact" : unknown ? "unknown_impact"
+      : earliest ? "predicted_impact" : "clear",
   };
 }

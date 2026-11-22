@@ -57,6 +57,27 @@ export async function waitForPhysicsTicks(
 }
 
 /**
+ * Wait for physics ticks so that the action's cancel ends the wait at once. A death turns Mineflayer's physics off
+ * (`physics.js:480`) and `bot.waitForTicks` then ends only at its own `ticks * 50 + 5000` ms timeout (`physics.js:462`),
+ * so a cancelled action would end with "Timeout waiting for 1 ticks after 5050ms" instead of the runtime's death cancel.
+ * Physics that stops with no cancel (a ride, an unloaded chunk) still ends the wait at Mineflayer's own bound, with
+ * `PhysicsStoppedError`: the limit is kept, not raised. Without a signal nothing can cancel the action, and
+ * Mineflayer's own wait stays.
+ */
+export async function waitForTicksOrCancel(
+  bot: PhysicsTickSource & { waitForTicks(ticks: number): Promise<void> },
+  ticks: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) return bot.waitForTicks(ticks);
+  await waitForPhysicsTicks(bot, ticks, signal, { wallMs: ticks * MINEFLAYER_TICK_WAIT_MS + MINEFLAYER_TICK_WAIT_SLACK_MS });
+}
+
+/** `bot.waitForTicks` gives up after `ticks * 50 + 5000` ms (`physics.js:462`): 50 ms per tick and 5 s of lag. */
+const MINEFLAYER_TICK_WAIT_MS = 50;
+const MINEFLAYER_TICK_WAIT_SLACK_MS = 5_000;
+
+/**
  * Wait tick by tick until `done()`, for at most `maxTicks` ticks, each within `wallMs`; answers whether `done()` holds.
  * Physics that stopped ends the wait with the answer as it stands, for a caller that checks it next; an abort still
  * rejects with the signal's reason.

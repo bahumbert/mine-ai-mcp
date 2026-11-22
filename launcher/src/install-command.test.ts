@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { iss } from "./build/iss-test-support.ts";
@@ -232,12 +232,52 @@ test("`install disk` prints its detail when there is no --json, and an unreadabl
 });
 
 test("--dir and --no-model reach the disk step, each absent by default; --dir is checked like the one of `install ollama`: absolute, trailing separator dropped", async () => {
-  const seen: [string | undefined, boolean | undefined][] = [];
-  const t = setup({ disk: async (_ctx, _accept, dir, noModel) => (seen.push([dir, noModel]), { ok: true, detail: "x", short: false, drives: [] }) });
-  await runInstallCommand(["disk", "--dir", "D:\\Jeux é\\", "--no-model", "--json", t.json], t.context, t.steps);
-  await runInstallCommand(["disk", "--json", t.json], t.context, t.steps);
-  assert.deepEqual(seen, [["D:\\Jeux é", true], [undefined, false]]);
+  const seen: unknown[] = [];
+  const t = setup({ disk: async (_ctx, _accept, dir, noModel, _models, program) => (seen.push([dir, noModel, program]), { ok: true, detail: "x", short: false, drives: [] }) });
+  const rows: [string[], unknown[]][] = [
+    [["--dir", "D:\\Jeux é\\", "--no-model", "--json", t.json], ["D:\\Jeux é", true, undefined]],
+    [["--json", t.json], [undefined, false, undefined]],
+    [["--server-program", "paper"], [undefined, false, "paper"]],
+    [["--server-program", "vanilla"], [undefined, false, "vanilla"]],
+  ];
+  for (const [args] of rows) assert.equal(await runInstallCommand(["disk", ...args], t.context, t.steps), 0);
+  assert.deepEqual(seen, rows.map(([, expected]) => expected));
   await assert.rejects(runInstallCommand(["disk", "--dir", "Ollama", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("absolute"));
+});
+
+test("unknown preview and server-program on every non-disk step are refused before execution", async () => {
+  const t = setup();
+  const rows = [["disk", "unknown", /paper.*vanilla/u], ...INSTALL_STEP_NAMES.filter((name) => name !== "disk").map((step) => [step, "paper", /install disk/u])] as [string, string, RegExp][];
+  for (const [step, program, message] of rows) {
+    await assert.rejects(runInstallCommand([step, "--server-program", program], t.context, t.steps), (error: Error) => error instanceof UsageError && message.test(error.message), step);
+  }
+  assert.deepEqual(t.calls, []);
+});
+
+test("disk preview is not saved and the next server step uses the original program", async () => {
+  const noFetch = Object.assign(async () => assert.fail("a prepared preview must not download"), { preconnect: () => assert.fail("a prepared preview must not connect") }) satisfies typeof fetch;
+  const deps: DiskReportDeps = {
+    disk: { platform: "linux", exists: () => true, statfs: async () => ({ bavail: 100n * 1024n ** 3n, bsize: 1n }), dev: () => "0" },
+    fetchImpl: noFetch, modelStoreDeps: { fetchImpl: noFetch, exists: () => true, readText: async () => "", listDir: async () => [] },
+    ollamaExe: () => null, modelOnDisk: () => false, modelStore: () => "", pinnedJreInstalled: async () => true, defaultOllamaFolder: "",
+  };
+  for (const saved of [false, true]) {
+    const t = setup();
+    const file = join(t.context.root, "settings.json");
+    const before = JSON.stringify({ server: { kind: "local", program: "vanilla", port: 25_570, memoryMb: 2048 }, note: "kept" });
+    if (saved) writeFileSync(file, before);
+    const steps = { ...t.steps, disk: diskStep(() => deps), server: async (ctx) => {
+      assert.equal(ctx.settings.server.kind, saved ? "local" : "none");
+      if (ctx.settings.server.kind === "local") assert.equal(ctx.settings.server.program, "vanilla");
+      return { ok: true as const, detail: "original server choice" };
+    } } satisfies InstallSteps;
+    assert.equal(await runInstallCommand(["disk", "--server-program", "paper", "--no-model", "--json", t.json], t.context, steps), 0);
+    const needs = (written(t.json).drives as { needs: { what: string; bytes: number }[] }[]).flatMap((drive) => drive.needs);
+    assert.deepEqual(needs.filter((need) => need.what === "Paper").map((need) => need.bytes), [0, 0]);
+    if (saved) assert.equal(readFileSync(file, "utf8"), before);
+    else assert.equal(existsSync(file), false);
+    assert.equal(await runInstallCommand(["server", "--accept-eula"], t.context, steps), 0);
+  }
 });
 
 test("the real disk step passes --dir and --no-model to the report: the Ollama folder's drive is listed, and not with --no-model", async () => {

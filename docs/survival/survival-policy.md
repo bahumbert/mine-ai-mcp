@@ -46,7 +46,7 @@ can always see what it has changed and why.
 | `navigation.hostile_avoidance_multiplier` | `1` | Finite, nonnegative multiplier on the capped hostile proximity route cost. `2` doubles it, `0.5` halves it, and `0` removes proximity cost. |
 | `navigation.bucket_fall_save` | `true` | Save damaging falls using carried water on loaded safe full-block floors, then verify source removal and a refilled bucket. |
 | `navigation.bucket_drops` | `true` | Allow planned water-bucket descents up to 80 blocks. Independent of scaffolding and emergency fall rescue; unavailable in the Nether. |
-| `navigation.dig_straight_down` | `true` | Allow routes to dig the block beneath the bot and descend in its own column. `false` leaves every route only staircase descents (one block over per block down). Target breaks are unaffected; read by each route search. |
+| `navigation.dig_straight_down` | `true` | Allow routes to dig the block beneath the bot and descend in its own column. `false` leaves every route only staircase descents (one block over per block down); a dig under a cell the route stands on is priced for the climb back, so a descent in uniform ground usually leaves a staircase it can walk back up; a replanned route can still buy an undercut, and the way back then needs a dig or a block. Target breaks are unaffected; read by each route search. |
 
 The scaffold list is read from the live policy whenever a consumer chooses a
 block. The first usable carried name wins over stack size; unsafe entries are
@@ -104,11 +104,14 @@ For example, use `set_survival_policy` with the current revision:
 | `combat.critical_health`                    | `8`                      | Below this health, observed nearby threats can trigger protection before contact; a stationary retreat guard stops below it.      |
 | `combat.recover_to_health`                  | `18`                     | Recovery target; hostile pursuit uses at least `engage_min_health`.                                                               |
 | `combat.protected_wait_ticks`               | `300`                    | Protected waiting without confirmed quarry damage before rejecting the position.                                                  |
+| `combat.quarry_wait_ticks`                  | `600`                    | Server ticks without confirmed quarry damage across the engagement. Recovery and the guard execution phase pause this clock. |
 | `combat.enderman_wait_ticks`                | `300`                    | Enderman lure or roof waiting window; commands and incidental damage do not renew it.                                             |
 | `combat.volley_wait_ticks`                  | `100`                    | Window for an observed ranged volley to finish.                                                                                   |
-| `combat.recovery_timeout_ms`                | `90000`                  | One protected recovery hold, including movement and eating.                                                                       |
-| `combat.evade_timeout_ms`                   | `15000`                  | One withdrawal attempt, including replacement routes and projectile guards.                                                       |
+| `combat.recovery_timeout_ms`                | `90000`                  | One protected recovery hold, including movement and eating. Game time at 20 ticks a second (1800 world ticks at any server speed, wall backstop 3 x (ticks + 20) x 50 ms); the shelter built before it still counts real ms. |
+| `combat.evade_timeout_ms`                   | `15000`                  | One withdrawal attempt, including replacement routes and projectile guards. On foot it is game time at 20 ticks a second (300 world ticks at any server speed, wall backstop 3x); the seated evade and the End's withdrawal still count real ms. |
 | `combat.evade_safe_range`                   | `36`                     | Required observed separation from every threat.                                                                                   |
+| `combat.evade_clear_range`                  | `16`                     | Distance for a threat that stopped advancing; evade uses the smaller of this and `evade_safe_range`.                              |
+| `combat.evade_cover_range`                  | `8`                      | Distance for a hidden bot from a shooter that stopped advancing; evade uses the smaller of this and `evade_safe_range`.           |
 
 Health values are Minecraft health points (0–20), tick and duration limits are
 positive integers, and separation is a positive block distance. Raising pursuit
@@ -214,10 +217,37 @@ marked unreachable, the reflex returns no directive and the hunt decides by its
 own stop counts. A hunt that walked toward a skeleton while a reflex fled the
 same skeleton took turns owning the body until the request timed out.
 
-Every `[HOSTILE_CONTACT]` interruption names the response, each threat's cell
-and distance at the decision, and, for evade, hide and deflect, the decision's
-reason in parentheses, so a caller can tell a
+Every `[HOSTILE_CONTACT]` interruption names the response, each threat's name and
+id, its cell and distance at the decision, and, for evade, hide and deflect, the
+decision's reason in parentheses, so a caller can tell a
 withdrawal to accept from one to change with a policy edit or another request.
+
+A resumable request stays suspended after an exhausted evade or an unreflected
+deflection while the hostile reflex makes its next decision. A further response
+keeps the request suspended until that response decides whether to resume or
+return it. A stand-down, no-contact decision or absence of a sensed hostile
+resumes the request when no incoming projectile remains. The receipt says the
+reflex stood down and names every live held target with its current distance;
+resuming does not mean those targets died or disappeared. An incoming projectile,
+an existing combat owner or a settling policy returns it with the last receipt
+and that decision. A response by another reflex cannot resume
+the hostile-held request. `[HOSTILE_SETTLED]` receipts name the response chain,
+including when its last response permits the request to resume.
+
+A fight is kept going by progress: its target or the bot closing in by a block,
+a hit on the bot or the target, or a target dying or leaving. A target pacing
+back and forth, a shield block or the bot shuffling about does not count. A melee
+target that stays out of reach ends the fight only after 20 physics ticks (about
+a second), so a knockback does not end it; a ranged attacker is not a melee
+contact, and a creeper that must be cleared can defer the end. A fight the bot
+could not reach its target in is not chosen again against that same target for
+30 seconds, whichever cell either of them stands on; a reachable, exposed contact
+with that target clears it sooner, and changed weapons or permissions do too. A
+fight with no progress pauses 10 seconds, then 20, doubling per target up to five
+minutes. Waits counted in game ticks also end after twice their span in real time,
+so a stopped game clock cannot hold them; footing recovery stops at about 30
+seconds. A bot seated in a boat at sea answers a hostile from the seat and keeps
+its boat; near shore it gets off first.
 
 Requested pursuit names its authorized target and minimum health. Recovery asks
 for permitted healing toward `max(recover_to_health, engage_min_health)`. Handoff asks for observed
@@ -226,8 +256,10 @@ must not be inferred from an action name or reduced to automatic contact rules.
 
 By default, evade uses a single 15-second attempt across replacement routes and
 projectile guards. It aims eight blocks beyond the configured separation to allow
-for pursuing threats. Recovery defaults to a fixed 90-second hold. Repeated moves
-or healing cannot renew those attempts. Relevant edits settle the current owner
+for pursuing threats. A threat that stopped advancing can be considered unable to
+reach the bot at the clear range, or at the cover range for a shooter without sight
+of the bot; each range is capped by the safe range. Recovery defaults to a fixed
+90-second hold. Repeated moves or healing cannot renew those attempts. Relevant edits settle the current owner
 and reobserve; they never silently extend an active budget.
 
 ## Transfer and request continuation

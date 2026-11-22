@@ -36,7 +36,7 @@ const SPREAD_NEIGHBOURS: readonly (readonly [number, number, number])[] = [[-1, 
  * Lava or air under it, or a block lava replaces, lets lava pour on: false.
  * A cell not loaded is not known: undefined, which `lavaSpreadsFrom` reads as a floor.
  */
-function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
+export function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
   const below = world.blockAt(x, y - 1, z);
   if (below.kind !== "loaded") return undefined;
   if (below.collisionShapes.length > 0 || below.traits.liquid === "water") return true;
@@ -47,7 +47,8 @@ function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z
 /**
  * Could lava beside or above the feet cell (x, y, z) or the head cell over it flow into one of them on its next update?
  * The route planner's reading of `advancingLavaAt`, on its world view: a solid cell or one holding water takes no lava.
- * Flowing lava over a cell that lets it pour on (`restsOnFloor`) does not spread sideways, so the cell beside it stays open.
+ * Flowing lava over a cell that lets it pour on (`restsOnFloor`) does not spread sideways, so the cell beside it stays open; a column it
+ * pours down reaches the feet cell one lava step after it stands beside the feet, where this rule sees it (contract check `lava-beside-head`).
  */
 export function lavaSpreadsIntoBody(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number, dimension: string): boolean {
   for (let rise = 0; rise <= 1; rise += 1) {
@@ -57,10 +58,13 @@ export function lavaSpreadsIntoBody(world: Pick<WorldView, "blockAt">, x: number
       const neighbour = world.blockAt(x + dx, y + rise + dy, z + dz);
       if (neighbour.kind !== "loaded" || neighbour.traits.liquid !== "lava") continue;
       const level = neighbour.traits.liquidLevel ?? 0;
-      // Flowing or source lava beside the head cell alone is the state a settled stream leaves (step-up-turn-beside-lava-stream):
-      // it reaches the body through the feet row. A falling column that lands beside the head still pours in.
-      if (rise === 1 && dy === 0 && level < 8) continue;
-      if (lavaSpreadsFrom(level, dy === 1, dimension, restsOnFloor(world, x + dx, y + rise + dy, z + dz))) return true;
+      const floorBelow = restsOnFloor(world, x + dx, y + rise + dy, z + dz);
+      // Flowing or source lava on a floor beside the head cell alone is the state a settled stream leaves (step-up-turn-beside-lava-stream):
+      // it reaches the body through the feet row. A falling column that lands beside the head still pours in, and so does lava that
+      // is known to stand over an open cell: a source there fills the head cell (contract check `lava-beside-head`), a flowing level
+      // pours down and lava's own rule answers it (`lavaSpreadsFrom`).
+      if (rise === 1 && dy === 0 && level < 8 && floorBelow !== false) continue;
+      if (lavaSpreadsFrom(level, dy === 1, dimension, floorBelow)) return true;
     }
   }
   return false;

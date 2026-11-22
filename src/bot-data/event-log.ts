@@ -53,6 +53,41 @@ const playerMessageEventInputSchema = z.strictObject({
   payload: playerMessagePayloadSchema,
 });
 
+/**
+ * The state a death happened in (P4-01 spec D3), read when the server's cause packet arrives: the real server clears the
+ * inventory before the `death` event (`knowledge/facts/live-testing.md` "Gear at death"). Optional on the payload so
+ * rows written before it still parse.
+ */
+const playerDeathContextSchema = z.strictObject({
+  /** The last reading with health above 0 and how long before the death it came; null when none was seen. */
+  lastAlive: z
+    .strictObject({ health: z.number(), food: z.number(), saturation: z.number(), msBefore: z.number().nonnegative() })
+    .nullable(),
+  food: z.number(),
+  held: z.string().nullable(),
+  armour: z.strictObject({
+    head: z.string().nullable(),
+    chest: z.string().nullable(),
+    legs: z.string().nullable(),
+    feet: z.string().nullable(),
+  }),
+  carriesWeapon: z.boolean(),
+  bestMelee: z.string().nullable(),
+  enclosed: z.boolean(),
+  /** A known bed, else the last wake, else world spawn; `distance` is null across dimensions. */
+  respawn: z
+    .strictObject({
+      kind: z.enum(["bed", "last_wake", "world_spawn"]),
+      dimension: z.string().min(1),
+      x: z.number(),
+      y: z.number(),
+      z: z.number(),
+      distance: z.number().nullable(),
+    })
+    .nullable(),
+});
+export type PlayerDeathContext = z.infer<typeof playerDeathContextSchema>;
+
 const playerDeathPayloadSchema = z.strictObject({
   dimension: z.string().min(1),
   position: z.strictObject({
@@ -62,6 +97,7 @@ const playerDeathPayloadSchema = z.strictObject({
   }),
   /** The server's own account of what killed the bot, as the chat line reads; null when none arrived. */
   cause: z.string().nullable(),
+  context: playerDeathContextSchema.optional(),
 });
 
 const playerDeathEventInputSchema = z.strictObject({
@@ -393,7 +429,8 @@ export function readNotificationSummary(data: SqlBotData, botId: string): Notifi
     recentPreview: unread
       .reverse()
       .map((row) => {
-        const summary = String(row.summary);
+        // First line only: a death's summary carries a second "State at death" line that read_recent_events prints in full.
+        const summary = String(row.summary).split("\n")[0] ?? "";
         // Reflex previews need enough room for the interruption and observed vitals.
         const limit = row.event_type === "survival_outcome" ? 200 : 40;
         return summary.length <= limit ? summary : `${summary.slice(0, limit)}...`;

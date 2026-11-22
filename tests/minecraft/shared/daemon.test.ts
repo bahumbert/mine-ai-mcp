@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,8 @@ import { ScriptedClients } from "./scripted-clients.ts";
 import { BUILD_KEY, TemplateBuildRig } from "./template-build-rig.ts";
 import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
+// scheduler-trial.ts reaches this test at depth 3, past IMPORTER_DEPTH 2; the others are listed so each selects it by name (2026-11-15).
+// check-reads: tests/minecraft/shared/protocol.ts, tests/minecraft/shared/submission-handler.ts, tests/minecraft/shared/scheduler-types.ts, tests/minecraft/shared/scheduler-trial.ts, tests/minecraft/shared/scheduler.ts, tests/minecraft/shared/result-class.ts, tests/minecraft/shared/trial.ts
 
 const ONE_FILE = fileURLToPath(new URL("../contract/scenarios/air-supply-under-water.yaml", import.meta.url));
 
@@ -55,9 +58,9 @@ async function withDaemon(
   }
 }
 
-async function submitAndCollect(socketPath: string, paths: string[]): Promise<DaemonMessage[]> {
+async function submitAndCollect(socketPath: string, paths: string[], onMessage: (message: DaemonMessage) => void = () => {}): Promise<DaemonMessage[]> {
   const messages: DaemonMessage[] = [];
-  const session = await exchange(socketPath, { type: "submit", paths, out: "/tmp/daemon-test-out", repeat: 1, lanes: null, lock: false, env: {} }, message => messages.push(message));
+  const session = await exchange(socketPath, { type: "submit", paths, out: "/tmp/daemon-test-out", repeat: 1, lanes: null, lock: false, env: {} }, message => { messages.push(message); onMessage(message); });
   await session.closed;
   return messages;
 }
@@ -73,10 +76,24 @@ test("a submit over the socket streams a result and a done, and the daemon keeps
   });
 });
 
+test("a featured socket submission runs a canary before its batch and sends no internal canary result", async () => {
+  let calls = 0;
+  await withDaemon(async ({ socketPath, dir }) => {
+    const messages: DaemonMessage[] = [];
+    const session = await exchange(socketPath, { type: "submit", paths: [ONE_FILE], out: dir, repeat: 2, lanes: null, lock: false,
+      env: { MINE_AI_SUBMIT_FEATURES: "classes,canary", MINE_AI_SUBMIT_CANARY: ONE_FILE } }, message => messages.push(message));
+    await session.closed;
+    assert.equal(calls, 3);
+    assert.equal(messages.filter(message => message.type === "result").length, 2);
+    assert.ok(messages.some(message => message.type === "info" && message.text.startsWith("bench canary passed in")));
+    assert.deepEqual(messages.at(-1), { type: "done", runs: 2, passed: 2, failed: 0, cancelled: 0, infra: 0 });
+  }, { runTrial: async input => { calls++; return passing(input); } });
+});
+
 test("a second daemon on a live socket refuses to start", async () => {
-  await withDaemon(async ({ socketPath }) => {
+  await withDaemon(async ({ socketPath, dir }) => {
     const second = startDaemon({
-      socketPath, config: loadScenarioServerConfig({}), stateDir: "/tmp/never", portBlock: { first: 25_400, last: 25_559 }, log: () => {},
+      socketPath, config: loadScenarioServerConfig({}), stateDir: join(dir, "never"), portBlock: { first: 25_400, last: 25_559 }, log: () => {},
       factory: new FakeFactory(), runTrial: passing, machine: { read: async () => ({ cpuBusy: 0, memAvailableMb: 1, threads: 1 }) },
       residentMbOf: async () => 0,
     });
@@ -213,7 +230,7 @@ test("a daemon given clients ahead boots one for the scenario it runs and kills 
 /** A mirror that records what the daemon asks of it, in order. */
 function recordingMirror(calls: string[]): DaemonMirror {
   return {
-    acquire: async () => ({ kind: "snapshot", root: "/repo", dir: "/snapshots/g1", generation: 1, syncMs: 5, startedAt: "2026-10-31T10:00:00.000Z", release: () => { calls.push("release"); } }),
+    acquire: async () => ({ kind: "snapshot", root: "/repo", dir: "/snapshots/g1", generation: 1, syncMs: 5, startedAt: "2026-10-31T10:00:00.000Z", sourceHead: null, release: () => { calls.push("release"); } }),
     prune: async () => { calls.push("prune"); },
     settled: async () => { calls.push("settled"); },
   };
@@ -330,8 +347,9 @@ test("the daemon builds a missing template at the first idle sample, never besid
       release();
       await first;
       await until(() => builds.calls.length === 1, "the build");
-      const second = submitAndCollect(socketPath, [ONE_FILE]);
-      await pause(200);
+      let waitSeen = false;
+      const second = submitAndCollect(socketPath, [ONE_FILE], message => { if (message.type === "wait") waitSeen = true; });
+      await until(() => waitSeen, "the first wait message");
       assert.equal(started, 1, "the second submission's trial waits for the build");
       builds.calls[0]!.finish({ ok: true, dir: join(builds.storeDir, BUILD_KEY) });
       const messages = await second;
@@ -409,5 +427,94 @@ test("a daemon asked to stop starts no build, even one whose key is being comput
     }, { templateBuilds: builds.builds });
   } finally {
     builds.dispose();
+  }
+});
+
+interface RamDaemon { readonly daemon: Daemon; readonly logs: string[]; readonly ramDir: string }
+
+/** A daemon with the real server factory (it starts no server: no trial is submitted) over a temp RAM dir, its template builds a rig's. */
+async function withRamDaemon(env: Record<string, string>, body: (daemon: RamDaemon) => Promise<void>, seed: (ramDir: string) => void = () => {}): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "daemon-ram-"));
+  const ramDir = join(dir, "ram");
+  const builds = new TemplateBuildRig();
+  const logs: string[] = [];
+  const socketPath = join(dir, "a.sock");
+  seed(ramDir); // what other daemons left, before this one starts
+  const config = loadScenarioServerConfig({ MINE_AI_SCENARIO_SOCKET_PATH: socketPath, MINE_AI_SCENARIO_WORLD_RAM_DIR: ramDir, ...env });
+  const daemon = await startDaemon({
+    socketPath, config, stateDir: join(dir, "state"), portBlock: { first: 25_400, last: 25_559 }, log: line => logs.push(line), runTrial: passing, templateBuilds: builds.builds,
+    machine: { read: async () => ({ cpuBusy: 0.1, memAvailableMb: 20_000, threads: 24 }) }, residentMbOf: async () => 900,
+    runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
+  });
+  try {
+    await body({ daemon, logs, ramDir });
+  } finally {
+    await daemon.stop();
+    builds.dispose();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const ramDirsOf = (ramDir: string): string[] => (existsSync(ramDir) ? readdirSync(ramDir).sort() : []);
+
+test("a daemon with the real factory makes its RAM dir, logs where, and removes it at stop", async () => {
+  await withRamDaemon({}, async ({ daemon, logs, ramDir }) => {
+    const [name] = ramDirsOf(ramDir);
+    assert.match(name ?? "", /^mine-ai-worlds-[0-9a-f]{8}$/u);
+    assert.equal(JSON.parse(readFileSync(join(ramDir, name!, "owner.json"), "utf8")).pid, process.pid);
+    assert.ok(logs.includes(`worlds in RAM under ${join(ramDir, name!)}`), logs.join("\n"));
+    await daemon.stop();
+    assert.deepEqual(ramDirsOf(ramDir), [], "the dir is gone, so /dev/shm holds nothing of this daemon");
+  });
+});
+
+for (const [name, env, line] of [
+  ["MINE_AI_SCENARIO_WORLD_RAM=0", { MINE_AI_SCENARIO_WORLD_RAM: "0" }, "worlds on disk (WORLD_RAM=0)"],
+  ["MINE_AI_SCENARIO_WORLD_TEMPLATE=0 (no template world to copy)", { MINE_AI_SCENARIO_WORLD_TEMPLATE: "0" }, "worlds on disk (WORLD_TEMPLATE=0: no template world to copy)"],
+] as const) {
+  test(`${name} makes no RAM dir and says the worlds are on disk`, async () => {
+    await withRamDaemon(env, async ({ logs, ramDir }) => {
+      assert.deepEqual(ramDirsOf(ramDir), []);
+      assert.ok(logs.includes(line), logs.join("\n"));
+    });
+  });
+}
+
+test("a daemon given its own factory (the unit tests') makes no RAM dir and sweeps none", async () => {
+  const ramDir = await mkdtemp(join(tmpdir(), "daemon-ram-factory-"));
+  const deadDir = join(ramDir, "mine-ai-worlds-dead00aa");
+  mkdirSync(deadDir);
+  writeFileSync(join(deadDir, "owner.json"), JSON.stringify({ socketPath: "/tmp/x", pid: 2_147_483_000 }));
+  try {
+    await withDaemon(async ({ logs }) => {
+      assert.deepEqual(ramDirsOf(ramDir), ["mine-ai-worlds-dead00aa"]);
+      assert.deepEqual(logs.filter(line => line.includes("RAM") || line.includes("worlds on disk")), []);
+    }, { env: { MINE_AI_SCENARIO_WORLD_RAM_DIR: ramDir } });
+  } finally {
+    await rm(ramDir, { recursive: true, force: true });
+  }
+});
+
+// The other daemons are processes of their own: a living `bun` child stands for one on another socket and the same port block (two daemons in one test process
+// hang when the second one stopped is stopped; seen with a fake factory and WORLD_RAM=0 too).
+test("at start a dir whose owner.json pid is dead is removed and one whose pid is a living bun process (another daemon) is kept, now and after this daemon's stop", async () => {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  assert.ok(child.pid !== undefined, "the stand-in daemon started");
+  const owners = { dead: "mine-ai-worlds-dead00aa", live: "mine-ai-worlds-live00bb" };
+  try {
+    await withRamDaemon({}, async ({ daemon, ramDir }) => {
+      assert.equal(existsSync(join(ramDir, owners.dead)), false);
+      assert.equal(existsSync(join(ramDir, owners.live, "s1-1")), true, `the child's comm is ${readFileSync(`/proc/${child.pid}/comm`, "utf8").trim()}: a living daemon's server root is untouched`);
+      assert.equal(ramDirsOf(ramDir).length, 2, "the live dir and this daemon's own");
+      await daemon.stop();
+      assert.deepEqual(ramDirsOf(ramDir), [owners.live], "this daemon's stop removed only its own dir");
+    }, ramDir => {
+      for (const [name, pid] of [[owners.dead, 2_147_483_000], [owners.live, child.pid!]] as const) {
+        mkdirSync(join(ramDir, name, "s1-1"), { recursive: true });
+        writeFileSync(join(ramDir, name, "owner.json"), JSON.stringify({ socketPath: "/tmp/other.sock", pid }));
+      }
+    });
+  } finally {
+    child.kill();
   }
 });

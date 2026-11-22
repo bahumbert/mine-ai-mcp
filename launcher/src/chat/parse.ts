@@ -8,8 +8,12 @@ export type ChatCommand = { kind: "list" } | { kind: "start"; name: string } | {
 /** No persona name is this long; a longer command line is not read (spec D1). */
 const MAX_COMMAND_LINE_LENGTH = 100;
 
-/** Sender and text of a signed or unsigned player chat line; anchored at the logger prefix so text cannot fake a sender (spec D3). */
-const CONSOLE_CHAT_LINE = /^\[[^\]]*\] \[Server thread\/INFO\]: (?:\[Not Secure\] )?<([A-Za-z0-9_]{1,16})> (.*)$/u;
+/**
+ * Sender and text of a signed or unsigned player chat line; anchored at the logger prefix so text cannot fake a sender (spec D3).
+ * Two prefixes, each measured: vanilla's stdout `[hh:mm:ss] [Server thread/INFO]: ` and Paper's stdout `[hh:mm:ss INFO]: `
+ * (Paper 1.21.4 build 232, file and pipe form; `.agent/knowledge/facts/paper-server.md` "Log lines").
+ */
+const CONSOLE_CHAT_LINE = /^(?:\[[^\]]*\] \[Server thread\/INFO\]|\[[^\]\s]* INFO\]): (?:\[Not Secure\] )?<([A-Za-z0-9_]{1,16})> (.*)$/u;
 
 const escapeForRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 

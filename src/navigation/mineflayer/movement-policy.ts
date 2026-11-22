@@ -1,6 +1,6 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
-import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
+import { protectedRegionAt, readProtectedRegions, regionRefusalText, sameOwner } from "../../world/protected-regions.js";
 import { sealedPitRefusal } from "./sealed-pit-refusal.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
@@ -20,7 +20,8 @@ import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
-import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
+import { MAXIMUM_BUCKET_DROP, TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
+export { MAXIMUM_BUCKET_DROP } from "../world/block-geometry.js";
 import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
   packKey,
@@ -101,6 +102,11 @@ const AVOID_BLOCKS = ["fire", "soul_fire", "lava", "bubble_column"] as const;
 type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
 
+/** Packed cell keys read through `has` only; a `ReadonlySet<number>` is one. */
+export interface CellKeys {
+  has(key: number): boolean;
+}
+
 export interface MineflayerMovementPolicyOptions {
   readonly protectedBlockNames?: readonly string[];
   readonly protectedScaffoldNames?: readonly string[];
@@ -124,7 +130,7 @@ export interface MineflayerMovementPolicyOptions {
   /** What one break costs beyond its dig time. Defaults to `TERRAIN_BREAK_PENALTY`. */
   readonly breakPenalty?: number;
   /** Cells a route may never dig, as packed keys: the blocks of a structure being built. */
-  readonly protectedCells?: ReadonlySet<number>;
+  readonly protectedCells?: CellKeys;
   /**
    * The owner whose protected regions this caller may dig and scaffold in: a build working on its own house (ADR-012).
    * Every other region refuses both.
@@ -392,9 +398,6 @@ export const TERRAIN_BREAK_PENALTY = 25;
  */
 export const DEFAULT_MAXIMUM_DROP = 3;
 
-/** The longest planned water-bucket drop, matching the survival policy's own description of `bucket_drops`. */
-export const MAXIMUM_BUCKET_DROP = 80;
-
 /** The step decisions, shared: search asks about every cell it could stand in, and the answer names no cell. */
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };
 const DEEP_WATER_STEP: PolicyDecision = { kind: "prohibited", reason: DEEP_WATER_REASON };
@@ -504,7 +507,7 @@ export function createMineflayerMovementPolicy(
     const regions = readProtectedRegions(bot);
     if (regions.length === 0) return null;
     const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy ?? (ownRegionsOpen ? bot.username : undefined));
-    return region === null ? null : { kind: "prohibited", reason: `inside ${describeProtectedRegion(region)}` };
+    return region === null ? null : { kind: "prohibited", reason: regionRefusalText(region) };
   };
 
   // Whether a route may stand in or on a cell: damaging, lava, or a block to

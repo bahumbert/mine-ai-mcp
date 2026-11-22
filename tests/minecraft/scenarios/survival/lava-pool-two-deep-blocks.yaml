@@ -1,0 +1,53 @@
+template: ../../templates/flat-single-action.yaml
+
+name: lava-pool-two-deep-blocks
+tags: [regression]
+description: >-
+  The lava-pool-two-deep scene with eight cobblestone in the inventory. A lava step can only be placed beside a body at
+  the pool's surface row, never on its floor: the fire reflex swims up first, then either climbs the bank or places a
+  step, and the bot ends on the bank within ten seconds with the reflex holding the body the whole time it is in lava.
+  Peaceful, regeneration on and absorption as a margin: only the escape is checked, a death after it does not fail.
+
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -12 12 -40 12 air"
+
+geometry:
+  - fill: { block: stone, from: [-9, -63, -9], to: [9, -61, 9] }
+  - fill: { block: lava, from: [-1, -62, -1], to: [1, -61, 1] }
+
+players:
+  - name: Actor
+    pos: [4.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: cobblestone, count: 8 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/lava-pool-escape.ts
+
+params:
+  poolFloor: [0.5, -62, 0.5]
+  bankRise: 2
+  deadlineMs: 10000
+  absorptionAmplifier: 4
+
+goal:
+  kind: all
+  timeout: 40
+  goals:
+    - { kind: completion, who: Actor }

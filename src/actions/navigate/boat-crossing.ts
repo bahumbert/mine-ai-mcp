@@ -22,7 +22,10 @@ import { getOff } from "./boat-get-off.js";
 import { type BoatLeft, boatLeftAfter, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import { MOUNT_WALL_MS, mountBoat } from "./boat-mount.js";
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
+import { foreignRegionAt, regionChangeRefusal } from "../../world/protected-regions.js";
 import { currentVehicle, ridersOf } from "./vehicle-sync.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "../../world/world-age.js";
+import { BoatLegProgress, waitForBoatStep, type BoatStepCredit } from "./boat-server-progress.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
 const BOAT_STEP = 0.35;
@@ -69,7 +72,7 @@ const SURFACE_DEPTH = 48;
  * The water surface in this column, the first thing under `around` (water with air above), or null when the column's
  * top is dry ground or it is unloaded.
  */
-function waterSurface(bot: Bot, x: number, z: number, around: number): number | null {
+export function waterSurface(bot: Bot, x: number, z: number, around: number): number | null {
   for (let y = around + 4; y >= around - SURFACE_DEPTH; y -= 1) {
     const block = bot.blockAt(new Vec3(x, y, z));
     if (block === null) return null;
@@ -118,9 +121,9 @@ const SHORE_SEARCH = 12;
  * surface at most), beside surface water, around where the deep water starts; null when there is none near. From a
  * cliff the water is out of reach (live 2026-10-04: 19 blocks below).
  */
-export function launchSpot(bot: Bot, water: Vec3): Vec3 | null {
+export function launchSpot(bot: Bot, water: Vec3, searchRange = SHORE_SEARCH, acceptSpot: (spot: Vec3) => boolean = () => true): Vec3 | null {
   const surface = water.y;
-  for (let ring = 0; ring <= SHORE_SEARCH; ring += 1) {
+  for (let ring = 0; ring <= searchRange; ring += 1) {
     const spots: Vec3[] = [];
     for (let dx = -ring; dx <= ring; dx += 1) {
       for (let dz = -ring; dz <= ring; dz += 1) {
@@ -134,7 +137,8 @@ export function launchSpot(bot: Bot, water: Vec3): Vec3 | null {
           // would put there is refused (live 2026-10-04: no angle placed one, not even on land, from a grassy shore).
           if (below?.boundingBox !== "block" || !isAir(feet?.name) || !isAir(head?.name)) continue;
           const besideWater = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ox, oz]) => waterSurface(bot, x + ox!, z + oz!, surface + 1) === surface);
-          if (besideWater) spots.push(new Vec3(x, ground + 1, z));
+          const spot = new Vec3(x, ground + 1, z);
+          if (besideWater && acceptSpot(spot)) spots.push(spot);
         }
       }
     }
@@ -149,7 +153,7 @@ export function carriesBoat(bot: Bot): boolean {
 
 export interface CrossingResult {
   readonly status: "crossed" | "failed";
-  /** Blocks ridden. */
+  /** Net blocks gained along the requested direction, after server corrections. */
   readonly blocks: number;
   readonly detail: string;
   /** Still in the boat, out at sea where the ride stopped for want of land: no get-off, no ride back (owner, run 13). */
@@ -182,7 +186,7 @@ export async function crossByBoat(bot: Bot, heading: { readonly x: number; reado
     return { status: "failed", blocks: 0, detail: "could not get into the boat" };
   }
 
-  const ride = new BoatRide(bot, boat, heading, origin, signal);
+  const ride = new BoatRide(bot, boat, heading, origin, signal, riding === null ? boat.position : origin);
   try {
     return await rideAndLand(bot, ride, signal, maxBlocks, timing);
   } finally {
@@ -202,7 +206,7 @@ async function rideAndLand(bot: Bot, ride: BoatRide, signal: AbortSignal | undef
   // start; the target is where the model's next order starts from). Any other stop that is not ashore and is out on deep
   // water (the water ahead not loaded, a bank step that could not be cut) goes back the way it came, to where the boat
   // went in, rather than stranded there.
-  const staysAtSea = across.noLand && ride.deepUnder();
+  const staysAtSea = (across.noLand || ride.stalled) && ride.deepUnder();
   if (!staysAtSea && stoppedBy !== "" && stoppedBy !== "stopped" && !interrupted() && ride.deepUnder()) {
     await ride.back();
     stoppedBy += "; rode back to where the boat went in";
@@ -211,6 +215,7 @@ async function rideAndLand(bot: Bot, ride: BoatRide, signal: AbortSignal | undef
   // it (the next movement gets off and takes the boat back), and a boat she left in a death is nobody's to stop.
   if (interrupted()) return interruptedRide(ride, signal);
   const { x, y, z } = await ride.end();
+  if (interrupted()) return interruptedRide(ride, signal);
   const ridden = Math.round(ride.ridden);
   if (staysAtSea) {
     return { status: "failed", blocks: ridden, atSea: true, detail: `rode ${ridden} blocks by boat and stays at sea in its boat at ${Math.floor(x)} ${Math.floor(z)} (${stoppedBy})` };
@@ -231,6 +236,7 @@ async function interruptedRide(ride: BoatRide, signal: AbortSignal | undefined):
   const blocks = Math.round(ride.ridden);
   if (ride.died) return { status: "failed", blocks, detail: `rode ${blocks} blocks by boat and died during the ride` };
   const { x, z } = await ride.end();
+  if (ride.died) return { status: "failed", blocks, detail: `rode ${blocks} blocks by boat and died during the ride` };
   const reason = signal?.reason instanceof Error ? signal.reason.message : String(signal?.reason);
   const detail = `rode ${blocks} blocks by boat and was stopped (${reason}); still seated in its boat at ${Math.floor(x)} ${Math.floor(z)}, the next movement gets off and takes the boat back`;
   return { status: "failed", blocks, atSea: ride.deepUnder(), interrupted: true, detail };
@@ -247,11 +253,13 @@ export interface CrossingTiming {
  * blocks out or more (closer, it would touch the shore), the way on first, then turning away from it as the shore
  * allows (live 2026-10-04: straight on was the shore bend).
  */
-async function launchBoat(bot: Bot, item: Item, heading: { readonly x: number; readonly z: number }): Promise<Entity | null> {
+export async function launchBoat(bot: Bot, item: Item, heading: { readonly x: number; readonly z: number }): Promise<Entity | null> {
   await bot.equip(item, "hand");
   // A plant at the feet or the head stops the server look ray: cleared first.
   for (const dy of [0, 1]) {
     const plant = bot.blockAt(bot.entity.position.floored().offset(0, dy, 0));
+    // A plant in another owner's region stays (ADR-012): the launch looks for another heading, as with any plant left.
+    if (plant !== null && foreignRegionAt(bot, plant.position) !== null) continue;
     if (plant !== null && !isAir(plant.name) && plant.name !== "water" && plant.boundingBox === "empty") await bot.dig(plant, true).catch(() => undefined);
   }
   await bot.equip(item, "hand");
@@ -300,7 +308,7 @@ const yawOf = (way: { readonly x: number; readonly z: number }) => (Math.atan2(-
 /**
  * One ride in a boat she is in: the moves are sent here (`vehicle_move`), at a boat speed, at the water surface the
  * boat floats on. The server puts the boat back when a move runs it into something (live 2026-10-04: three "moved
- * wrongly" at a bank): taken as where the boat is, and the leg under way ends there.
+ * wrongly" at a bank): the position is resynchronised, and only observed terrain ends the water leg.
  */
 export class BoatRide {
   readonly #bot: Bot;
@@ -312,8 +320,10 @@ export class BoatRide {
   /** She died in the ride: the boat is hers no more, and nothing more is sent for it. */
   died = false;
   #corrected = false;
-  /** Counted from where she stood, not from where the boat went in (2.5 to 4 blocks out). */
-  ridden: number;
+  #stalled = false;
+  readonly #origin: Vec3;
+  readonly #credit: BoatStepCredit = { age: undefined, steps: 0 };
+  #ending: Promise<{ readonly x: number; readonly y: number; readonly z: number }> | undefined;
   readonly #onDeath = () => {
     this.died = true;
   };
@@ -322,20 +332,29 @@ export class BoatRide {
     this.#position.y = packet.y;
     this.#position.z = packet.z;
     this.#corrected = true;
+    this.#bot.entity.position = new Vec3(packet.x, packet.y + 0.5, packet.z);
   };
 
-  constructor(bot: Bot, boat: Entity, heading: { readonly x: number; readonly z: number }, origin: Vec3, signal: AbortSignal | undefined) {
+  constructor(bot: Bot, boat: Entity, heading: { readonly x: number; readonly z: number }, origin: Vec3, signal: AbortSignal | undefined, start = boat.position) {
     this.#bot = bot;
     this.#heading = heading;
     this.#signal = signal;
-    this.#position = { x: boat.position.x, y: boat.position.y, z: boat.position.z };
-    this.#launch = { x: boat.position.x, z: boat.position.z };
+    this.#position = { x: start.x, y: boat.position.y, z: start.z };
+    this.#launch = { x: start.x, z: start.z };
     // The water the boat floats on (a boat sits lower than its surface block: floor(y) was a block under it, live).
-    this.#surfaceLevel = waterSurface(bot, Math.floor(boat.position.x), Math.floor(boat.position.z), Math.floor(boat.position.y) + 1) ?? Math.floor(boat.position.y);
-    this.ridden = Math.hypot(boat.position.x - origin.x, boat.position.z - origin.z);
+    this.#surfaceLevel = waterSurface(bot, Math.floor(start.x), Math.floor(start.z), Math.floor(boat.position.y) + 1) ?? Math.floor(boat.position.y);
+    this.#origin = origin.clone();
     bot._client.on("vehicle_move", this.#onCorrection);
     bot.on("death", this.#onDeath);
   }
+
+  /** Net displacement along the requested direction, after server corrections, never attempted steps. */
+  get ridden(): number {
+    return Math.max(0, (this.#position.x - this.#origin.x) * this.#heading.x + (this.#position.z - this.#origin.z) * this.#heading.z);
+  }
+
+  /** No new ground was gained within the monotonic progress window. */
+  get stalled(): boolean { return this.#stalled; }
 
   /** The ride's listeners removed; every exit of a crossing ends here ({@link end} does it too). */
   close(): void {
@@ -345,18 +364,22 @@ export class BoatRide {
 
   /** Straight on until the shore is close ahead, the distance asked for is ridden, or she is stopped. */
   async across(maxBlocks: number): Promise<{ readonly stoppedBy: string; readonly noLand: boolean }> {
+    const progress = new BoatLegProgress();
     while (true) {
       // No land by the distance asked for: never out on open sea with no end (live 2026-10-04: Vex, exploring 64 blocks,
       // rode 518 blocks of ocean and was stranded at its far side).
       if (this.ridden >= maxBlocks) return { stoppedBy: `no land within ${Math.round(this.ridden)} blocks that way`, noLand: true };
       if (this.#signal?.aborted || this.died) return { stoppedBy: "stopped", noLand: false };
+      if (this.#stalled || progress.stalled(this.ridden)) {
+        this.#stalled = true;
+        return { stoppedBy: "the boat made no progress; try another direction when the server responds", noLand: false };
+      }
       const open = this.#waterAhead(SHORE_LOOKAHEAD);
       if (open === null) return { stoppedBy: "the water ahead is not loaded", noLand: false };
       if (!open) return { stoppedBy: "", noLand: false };
       this.#corrected = false;
       await this.#step(this.#heading);
-      // The server put the boat back (a bank, a rock): the leg ends there, as `#steer` does.
-      if (this.#corrected) return { stoppedBy: "", noLand: false };
+      // A correction is a position, not a shore (P4 level-1 Task 12, 2026-11-09).
     }
   }
 
@@ -384,7 +407,7 @@ export class BoatRide {
   async row(blocks: number): Promise<string> {
     await this.#steer(this.#heading, (gone) => gone < blocks && this.waterAheadOpen() && currentVehicle(this.#bot) !== null);
     if (this.died) return "she died";
-    return this.#signal?.aborted ? "stopped" : this.#corrected ? "the server put the boat back (a bank)" : this.waterAheadOpen() ? "" : "a shore ahead";
+    return this.#signal?.aborted ? "stopped" : this.#stalled ? "the boat made no progress; try another direction when the server responds" : this.waterAheadOpen() ? "" : "a shore ahead";
   }
 
   /** Back the way it came, to where the boat went in. */
@@ -397,14 +420,26 @@ export class BoatRide {
    * The ride over: brought to a stop, the same place sent a few ticks (let go moving, it drifts off: live 2026-10-04,
    * its item 16 blocks out from where she got off). Returns where the boat is.
    */
-  async end(): Promise<{ readonly x: number; readonly y: number; readonly z: number }> {
-    this.close();
-    const { x, y, z } = this.#position;
-    for (let tick = 0; tick < 4; tick += 1) {
-      this.#bot._client.write("vehicle_move", { x, y, z, yaw: yawOf(this.#heading), pitch: 0, onGround: false });
-      await sleep(50);
+  end(): Promise<{ readonly x: number; readonly y: number; readonly z: number }> {
+    return this.#ending ??= this.#stop();
+  }
+
+  /** Keep correction and death listeners until the stop has a bounded server answer. */
+  async #stop(): Promise<{ readonly x: number; readonly y: number; readonly z: number }> {
+    try {
+      this.#corrected = false;
+      for (let tick = 0; tick < 4 && !this.died; tick += 1) {
+        this.#bot._client.write("vehicle_move", { ...this.#position, yaw: yawOf(this.#heading), pitch: 0, onGround: false });
+        await sleep(50);
+      }
+      const answer = await waitForServerAnswer(this.#bot, this.#bot.time?.age, {
+        wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, until: () => this.#corrected || this.died,
+      });
+      if (answer === "stalled") throw new Error("[BOAT_STOP_UNCONFIRMED] The server did not answer the boat stop. The rider remains seated; retry movement when the server responds.");
+      return { ...this.#position };
+    } finally {
+      this.close();
     }
-    return { x, y, z };
   }
 
   /** Deep open water under the boat. */
@@ -419,20 +454,30 @@ export class BoatRide {
     return waterSurface(this.#bot, ahead.x, ahead.z, this.#surfaceLevel) !== null;
   }
 
-  /** One leg toward `way`, a boat step a tick while `more(blocks gone)`, until the server puts the boat back or she is stopped. */
+  /** One leg toward `way`, while corrected progress is needed and the server keeps answering. */
   async #steer(way: { readonly x: number; readonly z: number }, more: (gone: number) => boolean): Promise<void> {
     this.#corrected = false;
-    for (let gone = 0; more(gone) && !this.#corrected && !this.#signal?.aborted && !this.died; gone += BOAT_STEP) await this.#step(way);
+    const start = { ...this.#position };
+    const progress = new BoatLegProgress();
+    const gone = () => (this.#position.x - start.x) * way.x + (this.#position.z - start.z) * way.z;
+    while (more(gone()) && !this.#signal?.aborted && !this.died) {
+      if (this.#stalled || progress.stalled(gone())) { this.#stalled = true; break; }
+      if (this.#corrected && !this.waterAheadOpen()) break;
+      await this.#step(way);
+    }
   }
 
   async #step(way: { readonly x: number; readonly z: number }): Promise<void> {
+    if (!(await waitForBoatStep(this.#bot, this.#credit, () => this.#signal?.aborted === true || this.died))) {
+      this.#stalled = true;
+      return;
+    }
     const position = this.#position;
     position.x += way.x * BOAT_STEP;
     position.z += way.z * BOAT_STEP;
     this.#bot._client.write("vehicle_move", { x: position.x, y: position.y, z: position.z, yaw: yawOf(way), pitch: 0, onGround: false });
     // Mineflayer does not move a passenger with its vehicle: kept where the boat is.
     this.#bot.entity.position = new Vec3(position.x, position.y + 0.5, position.z);
-    this.ridden += BOAT_STEP;
     await sleep(50);
   }
 }
@@ -519,12 +564,14 @@ function climbable(bot: Bot, x: number, z: number, surface: number): boolean {
  * so its top is a step up. A ledge over the water (nothing under it at the water's level, live 2026-10-04: grass over a
  * gap) is dug open and the column behind it is the bank. "" when done or nothing was needed, else why not.
  */
-async function cutStep(bot: Bot, from: { readonly x: number; readonly z: number }, heading: { readonly x: number; readonly z: number }, surface: number): Promise<string> {
+export async function cutStep(bot: Bot, from: { readonly x: number; readonly z: number }, heading: { readonly x: number; readonly z: number }, surface: number): Promise<string> {
   const dig = async (x: number, z: number): Promise<string> => {
     for (const y of [surface + 2, surface + 3]) {
       const block = bot.blockAt(new Vec3(x, y, z));
       if (block === null || block.boundingBox === "empty") continue;
       if (!bot.canDigBlock(block)) return `the bank ahead (${block.name}) cannot be dug from the boat`;
+      const refusal = regionChangeRefusal(bot, block.position, "dig");
+      if (refusal !== null) return `the bank ahead (${block.name}) cannot be cut: ${refusal}`;
       try {
         await bot.dig(block, true);
       } catch (error) {

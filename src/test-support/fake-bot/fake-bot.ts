@@ -10,20 +10,27 @@ import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { type FakeChatOptions, attachFakeChat } from "./fake-bot-chat.js";
+import { attachHeldShooterCommands } from "./fake-held-shooter-command.js";
+import { attachHealCommand } from "./fake-heal-command.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
+import { attachServerDigging } from "./fake-server-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
 import { attachFakeLavaFlow } from "./fake-bot-lava-flow.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
 import { type PlaceBlockWithOptions, attachFakePlacement } from "./fake-bot-placement.js";
+import { type FakeSignsOptions, attachFakeSigns } from "./fake-bot-signs.js";
 import { attachFakePlugins, offlineUuidOf } from "./fake-bot-plugins.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
 import { type FakeCombat, attachFakeCombat } from "./fake-bot-combat.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
+import { attachFakeFire } from "./fake-bot-fire.js";
+import { attachFakeArmour } from "./fake-bot-armour.js";
 import { attachFakeSwing } from "./fake-bot-swing.js";
 import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
+import { type FakeTagGroup, emitFakeTags } from "./fake-bot-tags.js";
 import { attachFakeWindows } from "./fake-bot-windows.js";
 import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeClock, createFakeClock } from "./fake-clock.js";
@@ -59,6 +66,8 @@ export interface FakeBotOptions {
   readonly username?: string;
   /** The feet; defaults to (0.5, 64, 0.5). */
   readonly position?: Point;
+  /** Where the server puts her after a death, unless she slept in a bed (`FakeServer.respawnPoint`); her feet when omitted. */
+  readonly spawn?: Point;
   readonly dimension?: string;
   readonly gameMode?: string;
   readonly health?: number;
@@ -84,6 +93,8 @@ export interface FakeBotOptions {
   readonly server?: Omit<FakeServerOptions, "lagMs">;
   /** How the server answers a whisper (`fake-bot-chat.ts`). */
   readonly chat?: FakeChatOptions;
+  /** Control the fake sign editor's answer. */
+  readonly signs?: FakeSignsOptions;
   /** Move the body by Mineflayer's own physics engine each tick (gravity, water, jumping); off by default. */
   readonly simulatePhysics?: boolean;
   /** Methods a test replaces (a scripted `tossStack` failure). */
@@ -103,6 +114,8 @@ export interface FakeHarness {
   readonly windows: FakeWindows;
   /** What other actors do to the bot and the creatures around her: hurt, swing, kill, health, a blast. */
   readonly combat: FakeCombat;
+  /** The server sends its `tags` packet (login, or a `/reload`); shape: contract check `server-tags`. */
+  emitTags(groups: readonly FakeTagGroup[]): void;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -185,6 +198,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const loginRegistry = registry as unknown as LoginRegistry;
   loadLoginRegistries(loginRegistry, version);
   const server = createFakeServer(clock, { ...options.server, lagMs: options.lagMs });
+  server.setRespawnPoint(options.spawn === undefined ? feet : new Vec3(options.spawn.x, options.spawn.y, options.spawn.z));
   const inventory = createFakeInventory(registry, { slots: options.slots, carried: options.carried });
   const EntityClass = (require("prismarine-entity") as (registry: Bot["registry"]) => new (id: number) => Entity)(registry);
   const entities = createFakeEntities(registry, EntityClass, FIRST_SPAWNED_ENTITY_ID);
@@ -203,7 +217,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
     players: { ...playersOf(world, entities, feet, options.players), [username]: { username, uuid: offlineUuidOf(username), ping: 0, gamemode: 0, displayName: undefined, entity: self } },
     inventory,
     blockAt: (point: Vec3) => world.blockAt(point),
-    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumns: world.getColumns },
+    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumnAt: world.getColumnAt, getColumns: world.getColumns },
     supportFeature: registry.supportFeature,
   });
   world.getBlockStateId(feet); // the first read checks every named cell against the dimension's heights, now the bot's `game` exists
@@ -213,24 +227,30 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   server.onPosition(({ x, y, z }) => client.emit("position", { x, y, z, yaw: 0, pitch: 0, flags: {}, teleportId: 0 }));
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
+  attachServerDigging(bot, server, world);
   const serverEntities = attachFakeEntities(bot, { server, inventory, entities });
   attachFakeVehicle(bot, { server, seatPositionLeadTicks: options.server?.seatPositionLeadTicks ?? 0 });
+  attachFakeArmour(bot, { server, inventory });
   const swing = attachFakeSwing({ server, inventory });
   attachFakeBoatDamage(bot, { server, entities: serverEntities, inventory, swing });
   seatPassengersOfSpecs(bot, server, entities, options.entities ?? {});
   const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {}, spawn: serverEntities.spawn });
   attachFakeUse(bot, { server, world, inventory, entities });
   attachFakeItems(bot, { server, world, inventory, spawn: serverEntities.spawn });
-  attachFakePlacement(bot, { clock, server, world, inventory, windows });
+  const signs = attachFakeSigns(bot, server, world, options.signs);
+  attachFakePlacement(bot, { clock, server, world, inventory, windows, signs });
   const combat = attachFakeCombat(bot, { server, inventory, entities: serverEntities, swing });
   attachFakeLavaFlow({ server, world });
+  attachFakeFire(bot, server, combat.burn);
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { server });
-  attachFakeSleep(bot, { server, world });
+  attachFakeSleep(bot, { server, world, combat });
   attachFakeChat(bot, { server, options: options.chat });
+  attachHeldShooterCommands(bot, server);
+  attachHealCommand(bot, server, combat);
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat, emitTags: (groups) => emitFakeTags(bot, groups) };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

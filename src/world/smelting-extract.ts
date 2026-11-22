@@ -8,6 +8,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { inflateRawSync } from "node:zlib";
+import { INGREDIENT_TAG_KIND, RECIPE_FILE, tagFilePaths } from "./jar-layout.js";
 import type { SmeltingRecipe } from "./smelting.js";
 
 const END_OF_DIRECTORY = 0x06054b50;
@@ -44,8 +45,6 @@ export function readZipEntries(bytes: Uint8Array): Map<string, () => string> {
   return entries;
 }
 
-const RECIPES = /^data\/minecraft\/recipe\/[^/]+\.json$/u;
-
 /** `minecraft:sand` → `sand`; other namespaces keep theirs. */
 function shortId(id: string): string {
   return id.startsWith("minecraft:") ? id.slice("minecraft:".length) : id;
@@ -57,8 +56,8 @@ export function extractSmeltingRecipes(jar: Uint8Array): SmeltingRecipe[] {
   const json = (name: string): unknown => JSON.parse(entries.get(name)!());
   const tag = (id: string, seen: ReadonlySet<string> = new Set()): string[] => {
     const [namespace, path] = id.includes(":") ? id.split(":", 2) as [string, string] : ["minecraft", id];
-    const file = `data/${namespace}/tags/item/${path}.json`;
-    if (!entries.has(file)) throw new Error(`Item tag #${namespace}:${path} is not in the jar.`);
+    const file = tagFilePaths(INGREDIENT_TAG_KIND, namespace, path).find((name) => entries.has(name));
+    if (file === undefined) throw new Error(`Item tag #${namespace}:${path} is not in the jar.`);
     if (seen.has(file)) return [];
     const values = (json(file) as { values: readonly (string | { id: string })[] }).values;
     return values.flatMap((value) => {
@@ -77,7 +76,7 @@ export function extractSmeltingRecipes(jar: Uint8Array): SmeltingRecipe[] {
   };
   const recipes: SmeltingRecipe[] = [];
   for (const name of entries.keys()) {
-    if (!RECIPES.test(name)) continue;
+    if (!RECIPE_FILE.test(name)) continue;
     const recipe = json(name) as { type: string; cookingtime?: number; ingredient: unknown; result: { id?: string; item?: string; count?: number } | string };
     if (recipe.type !== "minecraft:smelting") continue;
     const result = typeof recipe.result === "string" ? { id: recipe.result } : recipe.result;

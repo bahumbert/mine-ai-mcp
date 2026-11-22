@@ -1,6 +1,7 @@
 // The phases a trial reports: the six measured apart, the restore wait, the settle before a client booted ahead joins.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.js";
 import type { ClientProvider } from "mine-labs";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
 import { executeTrial, type TrialRunner } from "./trial.ts";
@@ -93,6 +94,8 @@ function providedClient(): ClientProvider {
 }
 
 test("a runner that asks for its client after the settle delay gets a settle phase, and join runs from that ask to prepared", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const lines: string[] = [];
   const asking: TrialRunner = async input => {
     await input.onArranged();
@@ -103,10 +106,11 @@ test("a runner that asks for its client after the settle delay gets a settle pha
     input.deferReset(async () => {});
     return result("pass");
   };
-  const end = await executeTrial({ runTrial: asking, config }, job({ log: line => lines.push(line), scenario: scenario(60), clientProvider: providedClient() }));
+  const running = executeTrial({ runTrial: asking, config }, job({ log: line => lines.push(line), scenario: scenario(60), clientProvider: providedClient() }));
+  const end = await clock.settle(running, 100, 1);
   const phases = end.phases!;
-  assert.ok((phases.settleMs ?? 0) >= 35, `settle ${phases.settleMs}`);
-  assert.ok(phases.joinMs >= 20 && phases.joinMs < 38, `join ${phases.joinMs}: the 40 ms before the ask are not in it`);
+  assert.equal(phases.settleMs, 40);
+  assert.equal(phases.joinMs, 25);
   assert.match(lines.find(text => text.startsWith("phases: "))!, /^phases: mutexWait=\d+ arrange=\d+ settle=\d+ join=\d+ trial=\d+ restoreWait=\d+ restore=\d+$/u);
 });
 

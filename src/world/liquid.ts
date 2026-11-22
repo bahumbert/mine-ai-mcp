@@ -12,6 +12,7 @@ import { Vec3 } from "vec3";
 import { isLiquid, isReplaceableForPlacement } from "./block-classification.js";
 import { STANDING_EYE_HEIGHT } from "./block-visibility.js";
 import type { WorldBlock } from "./placement.js";
+import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, waitForWorldAge, type WorldAgeOptions } from "./world-age.js";
 
 /** The game's two fluids: the one list the bucket action's input, its items and its source checks all read. */
 export const LIQUIDS = ["water", "lava"] as const;
@@ -21,7 +22,6 @@ export type LiquidName = (typeof LIQUIDS)[number];
 const FORMATION_RADIUS = 10;
 /** How long a pour is given to finish spreading before its formations are counted. */
 const SPREAD_TIMEOUT_TICKS = 100;
-const SPREAD_SETTLED_TICKS = 10;
 /**
  * How far a fill will trace a flow back to the source feeding it. A model that
  * names a cell it saw water in is usually a few blocks downstream of the
@@ -191,6 +191,10 @@ export interface FormationWatch {
   readonly cells: readonly Vec3[];
   /** Indexes into `cells` of the ones seen holding liquid so far. */
   readonly wet: Set<number>;
+  /** Per index of `cells`, the state id read last. */
+  readonly stateIds: number[];
+  /** Per index of `cells`, the block name the cell counted at that read (null: none). */
+  readonly counted: (string | null)[];
 }
 
 /** The cells within the formation radius of `around` (a sphere, walked as one flat index over its bounding cube). */
@@ -210,25 +214,49 @@ function cellsAround(around: Vec3): Vec3[] {
 export function watchFormations(bot: Bot, around: Vec3): FormationWatch {
   const cells: Vec3[] = [];
   const wet = new Set<number>();
+  const stateIds: number[] = [];
+  const counted: (string | null)[] = [];
   for (const cell of cellsAround(around)) {
     const block = bot.blockAt(cell);
     if (block === null || block.boundingBox === "block") continue;
     if (isLiquid(block)) wet.add(cells.length);
     cells.push(cell);
+    stateIds.push(bot.world.getBlockStateId(cell));
+    counted.push(null);
   }
-  return { cells, wet };
+  return { cells, wet, stateIds, counted };
 }
 
-/** The solid blocks the watched cells that held liquid hold now, counted by name. Unloaded cells say nothing. */
+/**
+ * The solid blocks the watched cells that held liquid hold now, counted by name. Unloaded cells say nothing.
+ *
+ * A cell's name, box and liquid-ness all derive from its state id, so a cell whose id is unchanged since the last read
+ * keeps what it counted then, and only a changed id is read as a block (spec D2). `wet` changes only at a liquid read:
+ * a cell that held liquid at any read stays wet. Unloaded cells and air are both id 0 and count nothing.
+ */
 export function observeFormations(bot: Bot, watch: FormationWatch): Formed {
   const formed: Record<string, number> = {};
   watch.cells.forEach((cell, index) => {
-    const block = bot.blockAt(cell);
-    if (block === null) return;
-    if (isLiquid(block)) watch.wet.add(index);
-    else if (block.boundingBox === "block" && watch.wet.has(index)) formed[block.name] = (formed[block.name] ?? 0) + 1;
+    const id = bot.world.getBlockStateId(cell);
+    if (id !== watch.stateIds[index]) {
+      watch.counted[index] = countedName(bot, watch, cell, index);
+      watch.stateIds[index] = id;
+    }
+    const name = watch.counted[index];
+    if (name !== null) formed[name] = (formed[name] ?? 0) + 1;
   });
   return formed;
+}
+
+/** The name a watched cell counts as now: its block's name when it is solid and held liquid before; null otherwise. */
+function countedName(bot: Bot, watch: FormationWatch, cell: Vec3, index: number): string | null {
+  const block = bot.blockAt(cell);
+  if (block === null) return null;
+  if (isLiquid(block)) {
+    watch.wet.add(index);
+    return null;
+  }
+  return block.boundingBox === "block" && watch.wet.has(index) ? block.name : null;
 }
 
 function sameFormed(left: Formed, right: Formed): boolean {
@@ -236,20 +264,37 @@ function sameFormed(left: Formed, right: Formed): boolean {
   return names.length === Object.keys(right).length && names.every((name) => left[name] === right[name]);
 }
 
-/** Wait for a pour to stop changing the world, then count what it made. */
-export async function settledFormations(
+/** Count until 40 quiet server ticks, 100 total ticks, or a stopped server clock (T11b, 2026-11-15). */
+export async function settleFormations(
   bot: Bot,
   watch: FormationWatch,
   signal: AbortSignal | undefined,
-): Promise<Formed> {
+  clock: Pick<WorldAgeOptions, "now" | "sleep"> = {},
+): Promise<{ readonly formed: Formed; readonly ended: "quiet" | "timeout" | "stalled" }> {
+  signal?.throwIfAborted();
+  let startAge = bot.time?.age;
   let last = observeFormations(bot, watch);
-  let stableTicks = 0;
-  for (let tick = 0; tick < SPREAD_TIMEOUT_TICKS && stableTicks < SPREAD_SETTLED_TICKS; tick += 1) {
-    await bot.waitForTicks(1);
-    signal?.throwIfAborted();
-    const next = observeFormations(bot, watch);
-    stableTicks = sameFormed(next, last) ? stableTicks + 1 : 0;
-    last = next;
+  const elapsedTicks = () => startAge == null ? 0 : (bot.time?.age ?? startAge) - startAge;
+  for (;;) {
+    const remaining = SPREAD_TIMEOUT_TICKS - elapsedTicks();
+    if (remaining <= 0) return { formed: last, ended: "timeout" };
+    const ended = await waitForWorldAge(bot, Math.min(SERVER_ANSWER_TICKS, remaining), {
+      ...clock, signal, wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, pollMs: 50,
+      until: () => {
+        startAge ??= bot.time?.age;
+        const next = observeFormations(bot, watch);
+        const changed = !sameFormed(next, last);
+        last = next;
+        return changed;
+      },
+    });
+    if (ended === "stalled") return { formed: last, ended: "stalled" };
+    if (elapsedTicks() >= SPREAD_TIMEOUT_TICKS) return { formed: last, ended: "timeout" };
+    if (ended === "moved") return { formed: last, ended: "quiet" };
   }
-  return last;
+}
+
+/** The bucket action needs only the formations; mining also needs whether the server answered. */
+export async function settledFormations(bot: Bot, watch: FormationWatch, signal: AbortSignal | undefined): Promise<Formed> {
+  return (await settleFormations(bot, watch, signal)).formed;
 }

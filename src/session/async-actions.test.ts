@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getEventListeners } from "node:events";
-import { setTimeout as pause } from "node:timers/promises";
+import { setTimeout as realDelay } from "node:timers/promises";
 import { z } from "zod";
 import { defineAction, actionResultSchema } from "../actions/action.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
@@ -45,7 +45,6 @@ test("submission deduplicates, timed waits preserve execution, and final retriev
   abort.abort(new Error("Stop only this wait"));
   await assert.rejects(waiting, /Stop only this wait/);
   assert.equal(f.runner.status().busy, true);
-  await pause(5);
   f.finish();
   await f.service.settled();
   const refused = f.service.submit(f.action, {}, { submission_id: "second" }, 5);
@@ -74,7 +73,7 @@ test("targeted cancellation leaves a reflex alive, waits for release, and never 
   const f = fixture();
   const accepted = f.service.submit(f.action, {}, { submission_id: "first" }, 1);
   assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
-  await pause(0);
+  await realDelay(0);
   let release!: () => void;
   let reflexSignal: AbortSignal | null = null;
   const claim = f.runner.claim("hostile", "defend", async (signal) => {
@@ -82,7 +81,7 @@ test("targeted cancellation leaves a reflex alive, waits for release, and never 
     await new Promise<void>((resolve) => { release = resolve; });
     return { value: null, continuation: { kind: "resume" } };
   });
-  await pause(0);
+  await realDelay(0);
   f.service.cancel(accepted.actionId, "Choose a different objective");
   assert.equal((reflexSignal as AbortSignal | null)?.aborted, false);
   assert.equal((await f.service.wait(accepted.actionId, 0)).state, "pending");
@@ -141,7 +140,7 @@ test("storage failure retains the result gate without repeating physical work", 
     await new Promise<void>((resolve) => { release = resolve; });
     return { value: null, continuation: { kind: "resume" as const } };
   });
-  await pause(0);
+  await realDelay(0);
   assert.equal(service.submit(f.action, {}, { submission_id: "next" }, 2).state, "refused");
   assert.equal(store.load()[0]?.resultRetrieved, true);
   release();
@@ -196,7 +195,7 @@ test("progress marks absent physics samples and retains regressing inventory evi
 
 test("each waiter sees only tool changes since its own progress baseline", () => {
   let durabilityLeft = 9;
-  const p = new RequestProgress(null, () => ({ tools: [{ class: "pickaxe", tier: "iron", item: "iron_pickaxe", slot: 36,
+  const p = new RequestProgress(null, () => ({ tools: [{ class: "pickaxe", rank: 3, item: "iron_pickaxe", slot: 36,
     durabilityLeft, maximumDurability: 250 }], armour: [] }));
   const first = p.snapshot();
   durabilityLeft = 4;
@@ -375,28 +374,25 @@ function unstorableService(t: { after(fn: () => void): void }, result: unknown) 
   return { service, action };
 }
 
-test("an output that cannot be cloned settles the execution and frees the body", async (t) => {
-  const { service, action } = unstorableService(t, { status: "succeeded", count: () => 1 });
-  const accepted = service.submit(action, {}, { submission_id: "function" }, 1);
-  assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
-  const settled = await service.wait(accepted.actionId, 1000);
-  assert.equal(settled.state, "settled"); if (settled.state !== "settled") return;
-  assert.match("error" in settled.output.result ? settled.output.result.error : "", /^\[EXECUTION_OUTPUT_UNSTORABLE\] /);
-  assert.equal(service.submit(action, {}, { submission_id: "after" }, 2).state, "accepted");
-});
-
-test("an output the store cannot write as JSON settles as unstorable instead of blocking the gate", async (t) => {
+test("outputs that cannot be cloned or written as JSON settle and free the body", async (t) => {
   const circular: Record<string, unknown> = { status: "succeeded", count: 1 };
   circular.self = circular;
-  const { service, action } = unstorableService(t, circular);
-  const accepted = service.submit(action, {}, { submission_id: "circular" }, 1);
-  assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
-  const settled = await service.wait(accepted.actionId, 1000);
-  assert.equal(settled.state, "settled"); if (settled.state !== "settled") return;
-  assert.match("error" in settled.output.result ? settled.output.result.error : "", /EXECUTION_OUTPUT_UNSTORABLE/);
+  for (const result of [{ status: "succeeded", count: () => 1 }, circular]) {
+    const { service, action } = unstorableService(t, result);
+    const accepted = service.submit(action, {}, { submission_id: "unstorable" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const settled = await service.wait(accepted.actionId, 1000);
+    assert.equal(settled.state, "settled"); if (settled.state !== "settled") return;
+    assert.match("error" in settled.output.result ? settled.output.result.error : "", /^\[EXECUTION_OUTPUT_UNSTORABLE\] /);
+    const successor = service.submit(action, {}, { submission_id: "after" }, 2);
+    assert.equal(successor.state, "accepted");
+    if (successor.state === "accepted") await service.wait(successor.actionId, 1000);
+  }
 });
 
 test("a waiter listener that throws does not keep the others waiting", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const f = fixture();
   const accepted = f.service.submit(f.action, {}, { submission_id: "listeners" }, 1);
   assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
@@ -404,12 +400,103 @@ test("a waiter listener that throws does not keep the others waiting", async () 
   const first = f.service.wait(accepted.actionId, 5000, broken);
   const second = f.service.wait(accepted.actionId, 5000);
   f.finish();
-  const bounded = <T>(promise: Promise<T>) => Promise.race([promise, pause(2000).then(() => "still waiting" as const)]);
-  const secondOutcome = await bounded(second);
-  assert.equal(typeof secondOutcome === "string" ? secondOutcome : secondOutcome.state, "settled");
-  assert.notEqual(await bounded(first), "still waiting");
+  const secondOutcome = await clock.settle(second, 2000);
+  assert.equal(secondOutcome.state, "settled");
+  await clock.settle(first, 2000);
   assert.equal(f.service.status().active, null);
   assert.equal(f.runner.status().busy, false);
+});
+
+/** A caller signal whose cleanup throws, with dispatch retained for the abort path. */
+function brokenWaitSignal() {
+  let removeCalls = 0;
+  let listener: (() => void) | undefined;
+  const reason = new Error("Stop only this wait");
+  const signal = {
+    aborted: false, reason, throwIfAborted() {},
+    addEventListener(_event: string, callback: () => void) { listener = callback; },
+    removeEventListener() { removeCalls++; throw new Error("listener broke"); },
+  } as unknown as AbortSignal;
+  return { signal, reason, removeCalls: () => removeCalls, abort: () => listener?.() };
+}
+
+test("a wait whose timeout fires while the signal's cleanup throws returns pending and lets no error out", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "timeout-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const outcome = await clock.settle(f.service.wait(accepted.actionId, 20, broken.signal), 30, 10);
+    assert.equal(outcome.state, "pending");
+    if (outcome.state === "pending") assert.equal(outcome.wakeReason, "timeout");
+    await clock.advance(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+    f.finish();
+    assert.equal((await f.service.wait(accepted.actionId, 1000)).state, "settled");
+    assert.equal(f.service.status().awaitingResult, null);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
+});
+
+test("a completion after a clock change runs the cleanup once and nothing fires later", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "clock-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const waiting = f.service.wait(accepted.actionId, 50, broken.signal);
+    clock.stepWallClock(1_000);
+    f.finish();
+    assert.equal((await waiting).state, "settled");
+    await clock.advance(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
+});
+
+test("an abort while the signal's cleanup throws rejects with the reason and lets no error out", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "abort-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const waiting = f.service.wait(accepted.actionId, 50, broken.signal);
+    const rejected = assert.rejects(waiting, (error: unknown) => error === broken.reason);
+    assert.doesNotThrow(() => broken.abort());
+    await rejected;
+    f.finish();
+    assert.equal((await f.service.wait(accepted.actionId, 1000)).state, "settled");
+    await clock.advance(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
 });
 
 test("a lookup whose store read throws answers EXECUTION_LOOKUP_FAILED and leaves the execution unchanged", async (t) => {
@@ -434,4 +521,22 @@ test("a lookup whose store read throws answers EXECUTION_LOOKUP_FAILED and leave
   assert.equal(f.attempts(), 0);
   broken = false;
   assert.equal((await service.wait("action-1", 0)).state, "settled");
+});
+
+test("wait accepts a timeout from 0 to 120000 ms and refuses others", async () => {
+  const f = fixture();
+  const accepted = f.service.submit(f.action, {}, { submission_id: "first" }, 1);
+  assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+  f.finish();
+  await f.service.settled();
+  const settled = await f.service.wait(accepted.actionId, 120000);
+  assert.equal(settled.state, "settled");
+  for (const timeoutMs of [120001, -1, 1.5]) {
+    const refusal = await f.service.wait(accepted.actionId, timeoutMs);
+    assert.equal(refusal.state, "refused");
+    if (refusal.state === "refused") {
+      assert.equal(refusal.code, "INVALID_ARGUMENTS");
+      assert.equal(refusal.error, "timeout_ms must be an integer from 0 to 120000.");
+    }
+  }
 });

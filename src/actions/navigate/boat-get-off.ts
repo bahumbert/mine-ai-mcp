@@ -1,10 +1,8 @@
 /**
  * Getting off a boat: shift held until the server answers, then physics back on.
  *
- * A vanilla 1.21.4 server lets a passenger off on the shift it reads from `entity_action` (never from `player_input`,
- * which it reads for minecart steering only: backlog 76, Cleo, run 16) and tells her nothing: no position, and its
- * passenger list goes only to the other players. Every get-off that seemed to work before was the boat being broken
- * after it, which ejects its rider.
+ * A vanilla 1.21.4 server reads shift from `entity_action`, then answers with a position and passenger list
+ * (contract `boat-get-off-by-shift`, 2026-10-21). Mineflayer keeps its vehicle until our observer clears it.
  */
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -39,8 +37,12 @@ export interface GetOffResult {
  * riding), or until another server answers (her boat's passenger list without her, the boat gone, a position); the
  * 40 server ticks that end it are counted from the world age seen {@link SHIFT_DRAIN_MS} after the press. Then the vehicle
  * is forgotten and physics resumed, unless a position did it (run 14b: eight bots froze after a get-off without this).
+ * A cancel releases shift and listeners, retaining the vehicle until a server answer or the next get-off.
  */
-export async function getOff(bot: Bot, options: { readonly wallMs?: number } = {}): Promise<GetOffResult> {
+export async function getOff(bot: Bot, signalOrOptions: AbortSignal | { readonly wallMs?: number; readonly signal?: AbortSignal } = {}): Promise<GetOffResult> {
+  const options = "aborted" in signalOrOptions ? { signal: signalOrOptions } : signalOrOptions;
+  const { signal } = options;
+  signal?.throwIfAborted();
   const vehicle = currentVehicle(bot);
   const wallMs = options.wallMs ?? DISMOUNT_WALL_MS;
   let repositioned = false;
@@ -73,8 +75,8 @@ export async function getOff(bot: Bot, options: { readonly wallMs?: number } = {
     const pressedAt = performance.now();
     writeShiftKey(bot, true);
     const over = () => answered || died || currentVehicle(bot) === null;
-    const drained = await waitForWorldAge(bot, Number.POSITIVE_INFINITY, { wallMs: Math.min(SHIFT_DRAIN_MS, wallMs), until: over });
-    waited = drained === "until" ? drained : await waitForWorldAge(bot, DISMOUNT_SERVER_TICKS, { wallMs: wallMs - (performance.now() - pressedAt), until: over });
+    const drained = await waitForWorldAge(bot, Number.POSITIVE_INFINITY, { wallMs: Math.min(SHIFT_DRAIN_MS, wallMs), until: over, signal });
+    waited = drained === "until" ? drained : await waitForWorldAge(bot, DISMOUNT_SERVER_TICKS, { wallMs: wallMs - (performance.now() - pressedAt), until: over, signal });
   } finally {
     bot.off("dismount", done);
     bot.off("forcedMove", onPosition);

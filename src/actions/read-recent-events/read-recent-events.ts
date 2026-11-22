@@ -7,6 +7,7 @@ import {
   type BotEvent,
   type SqlBotData,
 } from "../../bot-data/index.js";
+import { describeDeathContext } from "../../bot-data/death-context-text.js";
 import { formatSurvivalStatus } from "../../survival/evidence/format.js";
 import { markdownCodeBlock } from "../markdown.js";
 import { defineSqlAction, sqlActionSource, type SqlAction } from "../sql-action.js";
@@ -41,7 +42,7 @@ export const unreadEventsPageQuery = defineSqlQuery({
     LIMIT ?
   `,
   parseRow: (row) => {
-    const payload: unknown = withNavigationDefaults(JSON.parse(String(row.payload_json)));
+    const payload: unknown = withRecordedPolicyRanges(withNavigationDefaults(JSON.parse(String(row.payload_json))), String(row.event_type));
     return botEventSchema.parse({
       eventId: row.event_id,
       botId: row.bot_id,
@@ -58,6 +59,26 @@ export const unreadEventsPageQuery = defineSqlQuery({
     });
   },
 });
+
+/** Fill ranges absent from historical snapshots before validating durable events. */
+function withRecordedPolicyRanges(payload: unknown, eventType: string): unknown {
+  if (payload === null || typeof payload !== "object") return payload;
+  const record = payload as Record<string, unknown>;
+  const status = record.status as { policy?: unknown } | undefined;
+  const snapshot = eventType === "combat_policy" || eventType === "survival_policy" ? record : status?.policy;
+  if (snapshot === null || typeof snapshot !== "object") return payload;
+  for (const key of ["defaults", "effective"]) {
+    const group = (snapshot as Record<string, unknown>)[key];
+    if (group === null || typeof group !== "object") continue;
+    const combat = eventType === "combat_policy" ? group : (group as Record<string, unknown>).combat;
+    if (combat === null || typeof combat !== "object") continue;
+    const policy = combat as Record<string, unknown>;
+    for (const field of ["evade_clear_range", "evade_cover_range"]) {
+      if (!(field in policy)) policy[field] = policy.evade_safe_range;
+    }
+  }
+  return payload;
+}
 
 /**
  * A status recorded before `dig_straight_down` existed reads back with its default (live 2026-10-04: Tom's old events
@@ -144,6 +165,21 @@ export function formatReadRecentEventsResult(result: ReadRecentEventsResult): st
   return sections.join("\n\n");
 }
 
+function formatPlayerDeath(
+  eventId: number,
+  observedAt: string,
+  payload: Extract<BotEvent, { type: "player_death" }>["payload"],
+): string {
+  return [
+    `### Event ${eventId}: player death`,
+    `- Observed: ${observedAt}`,
+    `- Dimension: \`${payload.dimension}\``,
+    `- Position: \`${payload.position.x}, ${payload.position.y}, ${payload.position.z}\``,
+    `- Cause: ${payload.cause ?? "not reported"}`,
+    ...(payload.context ? [`- State at death: ${describeDeathContext(payload.context)}`] : []),
+  ].join("\n");
+}
+
 function formatEvent(event: BotEvent): string {
   switch (event.type) {
     case "equipment_low_durability":
@@ -211,13 +247,7 @@ Constraint: ${event.payload.constraint ?? "none"}`;
         markdownCodeBlock(event.payload.message),
       ].join("\n");
     case "player_death":
-      return [
-        `### Event ${event.eventId}: player death`,
-        `- Observed: ${event.observedAt}`,
-        `- Dimension: \`${event.payload.dimension}\``,
-        `- Position: \`${event.payload.position.x}, ${event.payload.position.y}, ${event.payload.position.z}\``,
-        `- Cause: ${event.payload.cause ?? "not reported"}`,
-      ].join("\n");
+      return formatPlayerDeath(event.eventId, event.observedAt, event.payload);
     case "player_dimension_change":
       return [
         `### Event ${event.eventId}: dimension change`,

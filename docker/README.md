@@ -36,9 +36,18 @@ docker compose build
 
 This builds from your checkout, including uncommitted changes, which is what you
 want while developing. The build context is an allow-list ([.dockerignore](../.dockerignore)): only `src/`,
-`docker/`, the package manifest and lockfile, the tsconfigs, `README.md` and `LICENSE` reach the image, so a new
-top-level path the image needs must be added there. To build from a published commit instead, so a run can be
-rebuilt from source by anyone, use the beat-the-game Compose file:
+`docker/`, the package manifest and lockfile, the dependency patches of `patches/`, the tsconfigs, `README.md`, `LICENSE` and four files of the Paper server
+(`packaging/manifest.json`, `packaging/paper-settings.json`, `launcher/src/install/paper-settings.ts` and
+`launcher/src/install/paper-settings-cli.ts`) reach the image, so a new top-level path the image needs must be added
+there.
+
+The image runs Paper 1.21.4 (the pinned build of `packaging/manifest.json`) by default. `--build-arg
+MINECRAFT_SERVER=vanilla` builds it with Mojang's server instead; `/opt/server-source.json` in the image names the
+program. At each start the entrypoint copies Mojang's jar into `/data/minecraft/cache/` when it is absent (Paperclip
+then downloads nothing), applies `packaging/paper-settings.json` to `/data/minecraft`, and refuses a vanilla image on a
+`/data/minecraft` that already has `world_nether/` (a world Paper has run: vanilla would start a new Nether and End).
+To build from a published commit instead, so a run can be rebuilt from source by anyone, use the beat-the-game Compose
+file (its default ref predates Paper: its download ignores `MINECRAFT_SERVER` and installs vanilla, as the run used):
 
 ```sh
 docker compose -f compose.yaml -f compose.beatthegame.yaml build

@@ -4,18 +4,23 @@ minecraft: { version: "1.21.4" }
 world:
   type: flat
   dimension: the_nether
-  difficulty: normal
-  gamerules: { doMobSpawning: false, naturalRegeneration: true }
+  difficulty: peaceful
+  gamerules: { doMobSpawning: false, naturalRegeneration: true, doTileDrops: false }
 # The overworld fixture's pool, carved into Nether terrain at the same layout.
 geometry:
+  - run: "gamerule doTileDrops false"
   - fill: { block: air, from: [-9, 97, -9], to: [9, 105, 9] }
   - fill: { block: netherrack, from: [-9, 97, -9], to: [9, 97, 9] }
   - fill: { block: lava, from: [-6, 98, -6], to: [6, 98, 6] }
   - fill: { block: netherrack, from: [7, 98, -9], to: [9, 98, 9] }
+setup:
+  - "kill @e[type=minecraft:item,x=0,y=98,z=0,distance=..20]"
 players:
   - name: LavaSurvivor
     pos: [8.5, 99, 0.5]
     op: true
+    # Same margin as tests/minecraft/drivers/lava-pool-escape.ts, before the arrangement teleport.
+    effects: [{ effect: absorption, seconds: 120, amplifier: 4 }]
     inventory:
       - { item: cobblestone, count: 8 }
       - { item: water_bucket, count: 1 }

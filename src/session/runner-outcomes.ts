@@ -12,8 +12,8 @@ export const outcomes = {
   executionError: message,
   physicsStalled: (action: string, stalledMs: number) =>
     `[RUNTIME_PHYSICS_STALLED] ${action} owned the body for ${Math.round(stalledMs / 1000)} s with no physics tick; it was stopped, physics restarted where it stands, and the body released.`,
-  reflexLimit: (reflex: string, limit: Exclude<ReflexLimitKind, "physics_stalled">, elapsedMs: number) =>
-    `[REFLEX_LIMIT] ${reflex} held the body ${limit === "ceiling" ? `for ${Math.round(elapsedMs / 1000)} s, its limit` : `${Math.round(elapsedMs / 1000)} s without progress`}; it was stopped and the body released. Look at the surroundings, then start your action again or choose another.`,
+  reflexLimit: (reflex: string, limit: Exclude<ReflexLimitKind, "physics_stalled">, elapsedMs: number, elapsedTicks: number | null = null) =>
+    `[REFLEX_LIMIT] ${reflex} held the body ${limit === "ceiling" ? `for ${Math.round(elapsedMs / 1000)} s, its limit` : `${Math.round(elapsedMs / 1000)} s without progress`}${elapsedTicks === null ? "" : ` (${elapsedTicks} game ticks)`}; it was stopped and the body released. Look at the surroundings, then start your action again or choose another.`,
   cancelledWithoutTicks: (action: string, reason: string) =>
     `${reason} (${action} did not stop: no physics tick since the cancel; the body was released and the next action may start)`,
 } as const;

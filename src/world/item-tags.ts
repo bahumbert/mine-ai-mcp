@@ -3,17 +3,28 @@
  * tags, generated from its server jar by `item-tags-extract.ts` (see `data/item-tags/`). The game keys its fuels on
  * these tags, so "is this a wooden slab" is answered for every wood without a list of names.
  */
+import tags_1_19_4 from "./data/item-tags/1.19.4.json" with { type: "json" };
+import tags_1_20_1 from "./data/item-tags/1.20.1.json" with { type: "json" };
+import tags_1_20_4 from "./data/item-tags/1.20.4.json" with { type: "json" };
+import tags_1_20_6 from "./data/item-tags/1.20.6.json" with { type: "json" };
+import tags_1_21_1 from "./data/item-tags/1.21.1.json" with { type: "json" };
 import tags_1_21_4 from "./data/item-tags/1.21.4.json" with { type: "json" };
+import { nearestShipped } from "./shipped-data.js";
 import { tagLookup, type TagsData } from "./tag-index.js";
 
 /** Shipped data files, by version. Add a file with `item-tags-extract.ts`, then list it here. */
-const SHIPPED: readonly TagsData[] = [tags_1_21_4];
+const SHIPPED: readonly TagsData[] = [tags_1_19_4, tags_1_20_1, tags_1_20_4, tags_1_20_6, tags_1_21_1, tags_1_21_4];
 
 const lookup = tagLookup(SHIPPED);
 
 /** Every item tag `item` belongs to in `version` (its own data, else the nearest older shipped one), sorted; none when unknown. */
 export function itemTagsOf(item: string, version: string): readonly string[] {
   return lookup(item, version);
+}
+
+/** The version of the shipped file that answers for `version`, or null when none does (the family source line reports it). */
+export function shippedItemTagsVersion(version: string): string | null {
+  return nearestShipped(version, SHIPPED)?.version ?? null;
 }
 
 /** The game's tag of what a bow or crossbow shoots (`arrow`, `spectral_arrow`, `tipped_arrow`). */

@@ -1,11 +1,10 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { familyIndexOf } from "./item-families.js";
 
-const CHESTS = new Set(["chest", "trapped_chest", "ender_chest"]);
-
-/** A chest lid cannot open beneath an opaque full cube. Glass and slabs leave it usable. */
+/** A chest lid (block family `chest`) cannot open beneath an opaque full cube. Glass and slabs leave it usable. */
 export function chestOpeningObstruction(bot: Bot, name: string, position: Vec3): string | null {
-  if (!CHESTS.has(name)) return null;
+  if (!familyIndexOf(bot).blockFamilies(name).includes("chest")) return null;
   const above = bot.blockAt(position.offset(0, 1, 0));
   if (!above) return `[CHEST_CLEARANCE_UNLOADED] The cell above ${name} at ${position} is not loaded.`;
   if (

@@ -4,6 +4,9 @@ import type { HostileResponse, HostileThreat } from "../../policy/combat/respons
 import type { deflectFireball } from "../../responses/deflect.js";
 import type { HideResult } from "../../responses/hide.js";
 import type { CombatOutcome, CombatStyle } from "./contract.js";
+import type { ReachBasis } from "../../responses/evade-reach.js";
+import type { ChainFacts } from "../../state/threat-chains.js";
+import type { StallFacts } from "../../state/request-stall.js";
 export interface EncounterEvidence {
   readonly reason: string;
   readonly threats: readonly HostileThreat[];
@@ -27,11 +30,31 @@ export type FightResponseResult = EncounterEvidence & {
   readonly response: "fight";
   readonly result: CombatOutcome | { readonly kind: "contact_ended" };
 };
+export interface EvadeThreatEnd {
+  readonly id: number;
+  readonly name: string;
+  readonly firstDistance: number;
+  readonly firstSeen: "decision" | "joined";
+  readonly distance: number;
+  readonly gained: number;
+  readonly basis: ReachBasis | null;
+  readonly advancing: boolean | null;
+}
 export type EvadeResponseResult = EncounterEvidence & {
   readonly response: "evade";
+  readonly elapsedMs: number;
+  /** Server ticks the on-foot evade spent (its budget is 300); null before any world age was heard and for the seated evade. */
+  readonly elapsedTicks: number | null;
+  readonly startPosition: Position3;
+  readonly goalRefreshes: number;
+  readonly ends: readonly EvadeThreatEnd[];
   readonly result: { readonly kind: "separated" } | { readonly kind: "exhausted" | "failed"; readonly reason: string };
 };
-export type HideResponseResult = EncounterEvidence & { readonly response: "hide"; readonly result: HideResult };
+export type HideResponseResult = EncounterEvidence & {
+  readonly response: "hide";
+  readonly result: HideResult;
+  readonly followUp: FightResponseResult | EvadeResponseResult | null;
+};
 export type DeflectResponseResult = EncounterEvidence & {
   readonly response: "deflect";
   readonly result: Awaited<ReturnType<typeof deflectFireball>>;
@@ -39,9 +62,13 @@ export type DeflectResponseResult = EncounterEvidence & {
 export type HostileResponseResult =
   FightResponseResult | EvadeResponseResult | HideResponseResult | DeflectResponseResult;
 export type HostileSettlement = {
+  readonly chain: ChainFacts | null;
+  readonly stall: StallFacts | null;
   readonly response: HostileResponse["kind"];
   readonly evidence: EncounterEvidence;
   readonly physical: HostileResponseResult | null;
+  /** The fight was ended by the request it continued (its goal met, or its stall limit), not by the target. */
+  readonly released?: "goal_met" | "stalled";
 } & (
   | { readonly kind: "completed"; readonly physical: HostileResponseResult }
   | { readonly kind: "cancelled" | "bot_died" | "failed"; readonly reason: string }

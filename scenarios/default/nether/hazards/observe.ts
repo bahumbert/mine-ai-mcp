@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../../src/utils/monotonic-clock.ts";
 import type { Bot } from "mineflayer";
 import { z } from "zod";
 import { droppedItemName } from "../../../../src/world/item-pickup.ts";
@@ -13,9 +14,9 @@ export function isAngry(bot: Bot, entity: Bot["entity"]): boolean {
 
 /** Passive native evidence begins before any gaze stimulus and lives through recovery. */
 export function watch(bot: Bot, site: Site, owner: () => string | undefined) {
-  const start = Date.now();
+  const start = monotonicNow();
   const snapshot = () => ({
-    ms: Date.now() - start,
+    ms: monotonicNow() - start,
     position: bot.entity.position.clone(),
     velocity: bot.entity.velocity.clone(),
     health: bot.health,
@@ -74,7 +75,7 @@ export function watch(bot: Bot, site: Site, owner: () => string | undefined) {
   const onDamage = (raw: unknown) => {
     const packet = damageSchema.parse(raw);
     damage.push({
-      ms: Date.now() - start,
+      ms: monotonicNow() - start,
       ...packet,
       attackerId: packet.sourceCauseId - 1,
       directId: packet.sourceDirectId - 1,

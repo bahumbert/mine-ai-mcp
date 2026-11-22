@@ -19,7 +19,8 @@ import { Vec3 } from "vec3";
 import { packKey, TERRAIN_BREAK_PENALTY, type StepField, type StepFieldProvider } from "../../../navigation/index.js";
 import { observedEyeHeight, type BlockRaycaster } from "../../../world/block-visibility.js";
 import { entityDimensions } from "../../../world/entity-dimensions.js";
-import { exposedBodyFrom, type EntityBody } from "../../../world/entity-geometry.js";
+import { exposedBodyFrom, shooterSeesBody, type EntityBody } from "../../../world/entity-geometry.js";
+import type { CoverObligation } from "../../state/cover-obligation.js";
 import type { HostileContext } from "../../control/combat/context.js";
 import {
   HOSTILE_CONTACT_RANGE,
@@ -199,6 +200,17 @@ interface Sight {
 }
 
 /**
+ * The shooters a resumed request owes cover from (`cover-obligation.ts`), and the live world their sight is read over.
+ * Unlike `Sight` it holds at any health: the cover was taken by an evade, and the request is to stay in it.
+ */
+interface CoverSight {
+  readonly obligations: readonly CoverObligation[];
+  readonly world: BlockRaycaster;
+  /** The size of the body that stands in a cell. */
+  readonly size: { readonly width: number; readonly height: number };
+}
+
+/**
  * Where in a cell the bot's eye may be: the centre and the four corners.
  *
  * A body sprinting through a cell is anywhere in it, not at its centre, and
@@ -260,6 +272,23 @@ function beyondBody(world: BlockRaycaster, x: number, y: number, z: number): Blo
 }
 
 /**
+ * The world as a shooter's ray meets a body standing in a cell: the body's own two cells never hide it. A ray whose first
+ * block is one of them goes on from where it leaves them, so a cell inside the rock a route would dig is judged by what
+ * stands between it and the shooter, as `beyondBody` does for sight from the body.
+ */
+function ignoringBody(world: BlockRaycaster, x: number, y: number, z: number): BlockRaycaster {
+  return {
+    raycast(from, direction, range) {
+      const hit = world.raycast(from, direction, range);
+      const cell = hit && ("position" in hit ? hit.position : hit);
+      if (!cell || cell.x !== x || cell.z !== z || (cell.y !== y && cell.y !== y + 1)) return hit;
+      const exit = bodyExit(from, direction, x, y, z) + BEYOND_BODY;
+      return exit >= range ? null : world.raycast(from.plus(direction.scaled(exit)), direction, range - exit);
+    },
+  };
+}
+
+/**
  * The frozen snapshot: a distance test and an add per threat, per cell.
  *
  * The search calls this once per candidate cell, tens of thousands of times,
@@ -272,8 +301,22 @@ function beyondBody(world: BlockRaycaster, x: number, y: number, z: number): Blo
  * asked only under the hide bar, only for cells inside observation range of a
  * threat, and once per cell for the life of the snapshot.
  */
-function fieldOver(threats: readonly FieldThreat[], sight: Sight | null, multiplier: number): StepField {
+function fieldOver(threats: readonly FieldThreat[], sight: Sight | null, cover: CoverSight | null, multiplier: number): StepField {
   const seen = new Map<number, boolean>();
+  const covered = new Map<number, boolean>();
+  /** Whether an obligation's shooter, within its range, sees a body standing in the cell. */
+  const owedExposedAt = (x: number, y: number, z: number, owed: CoverSight): boolean => {
+    const key = packKey(x, y, z);
+    let exposed = covered.get(key);
+    if (exposed === undefined) {
+      const body: EntityBody = { position: new Vec3(x + 0.5, y, z + 0.5), ...owed.size };
+      exposed = owed.obligations.some((obligation) =>
+        body.position.distanceTo(obligation.body.position) <= obligation.safeRange
+        && shooterSeesBody(ignoringBody(owed.world, x, y, z), obligation.body, body));
+      covered.set(key, exposed);
+    }
+    return exposed;
+  };
   const exposedAt = (x: number, y: number, z: number, from: Sight): boolean => {
     const key = packKey(x, y, z);
     let exposed = seen.get(key);
@@ -319,7 +362,9 @@ function fieldOver(threats: readonly FieldThreat[], sight: Sight | null, multipl
       const proximity = Math.min(total, cap) * multiplier;
       // Exposure sits outside the proximity cap: the cap exists because
       // proximity cannot test sight, and this term does.
-      return sight && exposedAt(x, y, z, sight) ? proximity + HIDE_EXPOSURE_PENALTY : proximity;
+      // A cell both terms see is one exposure, not two: it is the same sight.
+      return (sight && exposedAt(x, y, z, sight)) || (cover && owedExposedAt(x, y, z, cover))
+        ? proximity + HIDE_EXPOSURE_PENALTY : proximity;
     },
     // Which hostiles, and which blocks they stand in. Positions are rounded to
     // blocks because the cost is, so a mob shuffling inside one cell does not
@@ -327,7 +372,11 @@ function fieldOver(threats: readonly FieldThreat[], sight: Sight | null, multipl
     // sight is priced and the policy multiplier are part of the identity too.
     fingerprint:
       threats.map((threat) => `${threat.id}@${threat.x},${threat.y},${threat.z}`).join(";") +
-      `|avoidance:${multiplier}` + (sight ? "|sight" : ""),
+      `|avoidance:${multiplier}` + (sight ? "|sight" : "") +
+      (cover?.obligations ?? []).map((obligation) => {
+        const { x, y, z } = obligation.body.position;
+        return `|cover:${obligation.threatId}@${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+      }).join(""),
   };
 }
 
@@ -346,6 +395,8 @@ export function createHostileStepFieldProvider(
   context: HostileContext & { readonly policy: import("../../policy/combat/contract.js").CombatPolicy },
   activeResponse: () => HostileResponse["kind"] | null,
   navigationPolicy: () => Readonly<NavigationPolicy>,
+  /** What the request now running owes cover from; nothing for a caller that has no request (a scenario's own provider). */
+  cover: () => readonly CoverObligation[] = () => [],
 ): StepFieldProvider {
   return () => {
     const threats: FieldThreat[] = [];
@@ -364,7 +415,11 @@ export function createHostileStepFieldProvider(
         body: { position: entity.position.clone(), ...entityDimensions(bot, entity) },
       });
     }
-    if (threats.length === 0) return null;
+    // An admitted response already owns the body and its route: the obligation prices only the requests' own searches.
+    // Copied, bodies included: the store refreshes its entries in place, and a search prices the snapshot it began with.
+    const owed = activeResponse() === null ? cover().map((obligation): CoverObligation => ({ ...obligation,
+      body: { ...obligation.body, position: obligation.body.position.clone() } })).sort((left, right) => left.threatId - right.threatId) : [];
+    if (threats.length === 0 && owed.length === 0) return null;
     // Sorted so the fingerprint says what the field is, not what order the
     // entity table happened to be in.
     threats.sort((left, right) => left.id - right.id);
@@ -375,6 +430,7 @@ export function createHostileStepFieldProvider(
       activeResponse() === null && bot.health < context.policy.critical_health
         ? { world: bot.world, eyeHeight: observedEyeHeight(bot.entity) }
         : null;
-    return fieldOver(threats, sight, navigationPolicy().hostile_avoidance_multiplier);
+    const owedSight: CoverSight | null = owed.length === 0 ? null : { obligations: owed, world: bot.world, size: entityDimensions(bot, bot.entity) };
+    return fieldOver(threats, sight, owedSight, navigationPolicy().hostile_avoidance_multiplier);
   };
 }

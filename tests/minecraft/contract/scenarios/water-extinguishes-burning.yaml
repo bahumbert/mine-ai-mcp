@@ -1,0 +1,23 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-water-extinguishes-burning
+tags: [contract]
+description: Measure burning metadata after water replaces lava around a burning body.
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/bot-contract.ts, --without-runtime]
+params:
+  check: water-extinguishes-burning
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }

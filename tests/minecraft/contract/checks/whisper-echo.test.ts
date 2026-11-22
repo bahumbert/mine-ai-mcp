@@ -15,6 +15,15 @@ test("whisper-echo fails, saying no answer came, when a server echoes only the f
   );
 });
 
+test("whisper-echo ignores the system lines other lanes of a shared server cause (a player left the game)", async () => {
+  await runOnFake(whisperEcho, {}, (subject, harness) => {
+    const leftTheGame = { translate: "multiplayer.player.left", with: [{ toString: () => "ActorL4003" }], toString: () => "ActorL4003 left the game" } as never;
+    harness.clock.after(0, () => subject.bot.emit("message", leftTheGame, "system"));
+    harness.clock.after(10, () => subject.bot.emit("message", leftTheGame, "system"));
+    return subject;
+  });
+});
+
 test("whisper-echo fails, showing both lists, when a line the check did not ask for arrives in the window", async () => {
   await assert.rejects(
     runOnFake(whisperEcho, {}, (subject, harness) => {

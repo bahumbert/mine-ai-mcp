@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { waitForWorldAge } from "../../../world/world-age.js";
+import { waitForServerTicks } from "../../../world/world-age.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { HORIZONTAL, sourceFeeding, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
@@ -12,10 +12,11 @@ import { waterMiningStance } from "../../world/water.js";
 
 /** World ticks a removed source's spread takes to drain (seven cells, a water update every 5 ticks, and a margin). */
 const DRAIN_TICKS = 40;
-/** Longest wall-clock wait for that drain, whatever the server's clock does. */
-const DRAIN_WALL_MS = 5_000;
 
-const touching = (cell: Vec3) => [
+/** The drain's answer when the server clock stood still while unfed flow decayed: nothing was placed or swung. */
+const STILL_CLOCK_REFUSAL = "the server clock stood still while flow over the target decayed";
+
+export const touching = (cell: Vec3) => [
   cell.offset(0, 1, 0),
   cell.offset(0, -1, 0),
   ...HORIZONTAL.map((offset) => cell.plus(offset)),
@@ -35,6 +36,11 @@ export async function clearMiningWater(
   if (waterMiningStance(read, bot.entity.position.floored(), bot.entity.onGround)) return null;
   // The target's own faces: water beside the cell over it reaches the target only through that cell, sealed first.
   const wetFaces = () => touching(target).filter(holdsWaterAt);
+  // Plain flowing water: not a source, not a plant or block holding water (those keep the plug-at-once path).
+  const isLoadedPlainFlow = (cell: Vec3) => {
+    const block = read(cell.x, cell.y, cell.z);
+    return block.kind === "loaded" && block.traits.liquid === "water" && !block.traits.liquidSource && !block.traits.waterlogged;
+  };
   const seeds = [...wetFaces(), bot.entity.position.floored()];
   if (!seeds.some(holdsWaterAt)) return null;
   // Isolating the water from a stance over a solid floor keeps the body on it, where the dig after it is priced.
@@ -66,10 +72,15 @@ export async function clearMiningWater(
       const plugged = await place(bot, source, { ...(signal && { signal }) });
       if (plugged.kind !== "failed") removedSource = true;
     }
-    // A removed source drains its spread on the server's scheduled water updates: wait on the world age, bounded on
-    // the wall clock, never on client ticks, which stop with physics.
-    if (removedSource) await waitForWorldAge(bot, DRAIN_TICKS, { wallMs: DRAIN_WALL_MS, signal: lifetime,
-      until: () => wetFaces().length === 0 && !holdsWaterAt(bot.entity.position.floored()) });
+    // Flow no source feeds (a scooped cast, a receding pool) decays by itself: a plug over it would hide the dig ray (D38).
+    const faces = wetFaces();
+    const orphanFlow = sources.size === 0 && faces.length > 0 && faces.every(isLoadedPlainFlow);
+    // Scheduled water updates follow world age; only a still server clock ends the wait early (scenario-ticks C8, 2026-11-15).
+    if (removedSource || orphanFlow) {
+      const waited = await waitForServerTicks(bot, DRAIN_TICKS, { signal: lifetime,
+        until: () => wetFaces().length === 0 && !holdsWaterAt(bot.entity.position.floored()) });
+      if (orphanFlow && waited === "stalled") return STILL_CLOCK_REFUSAL;
+    }
     for (const cell of wetFaces()) {
       const placed = await place(bot, cell, { ...(signal && { signal }) });
       if (placed.kind === "failed") return `water at ${cell} could not be isolated: ${placed.error}`;

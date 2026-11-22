@@ -17,7 +17,7 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "max_distance keeps the whole run within that many blocks (horizontally) of where it started: no farther target and no exploring, and with none left in range it stops naming the nearest farther one seen. " +
   "reposition with navigate first if you want blocks from a particular area. " +
   "The best carried tool for each block is equipped automatically, so equip is not needed first. " +
-  "A run that breaks and picks up nothing for 180 s stops with what it got and says how far it walked meanwhile. " +
+  "A run that breaks and picks up nothing for 3 600 world ticks (180 s at 20 tps) stops with what it got and says how far it walked meanwhile. " +
   "By default a required tool-tier loss stops with partial progress; on_tool_loss=continue keeps mining with the remaining tool. " +
   "The response lists every cell broken and its distance from where the run started, and names a tool that broke during the run (collected.toolLost). " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
@@ -44,7 +44,7 @@ export const MAX_EXTRA_BREAKS = 4;
  * well inside it; the circling it ends (observed live 2026-10-02) lasted 15 to
  * 27 minutes.
  */
-export const COLLECT_STALL_MS = 180_000;
+export const COLLECT_STALL_TICKS = 3_600;
 
 export const HIGHLIGHT_COLOURS = {
   candidate: "#ffaa0d",
@@ -63,6 +63,28 @@ export function cellLabel(position: Position3): string {
 
 export function decimal(value: number): number {
   return Number(value.toFixed(1));
+}
+
+/**
+ * The nearest loaded match beyond `max_distance`. `situation` (absent: open) says when it lies under water or roofed
+ * over; then `open` is the nearest beyond the range that does not (null: none of the `capped ? 256 : all` scanned),
+ * so the model learns where the nearest is and what the nearest usable one is.
+ */
+export interface NearestBeyondRange {
+  readonly position: Position3;
+  readonly distance: number;
+  readonly situation?: "open" | "under_water" | "roofed";
+  readonly open?: { readonly position: Position3; readonly distance: number } | null;
+  /** The scan stopped at its limit of 256: more matches may be loaded than it looked at. */
+  readonly capped?: boolean;
+}
+
+function nearestBeyondRangeWords(nearest: NearestBeyondRange): string {
+  const where = `the nearest loaded one is at ${cellLabel(nearest.position)}, ${nearest.distance} blocks from the start`;
+  if (nearest.situation === undefined || nearest.situation === "open") return `${where}.`;
+  const how = nearest.situation === "under_water" ? "under water" : "roofed over";
+  if (nearest.open) return `${where} (${how}); the nearest not under water or roofed over is at ${cellLabel(nearest.open.position)}, ${nearest.open.distance} blocks.`;
+  return `${where} (${how}); none ${nearest.capped ? "of the nearest 256 loaded" : "loaded"} is in the open.`;
 }
 
 /** The items a capacity refusal was about: named when few, counted when the selector matched many. */
@@ -94,10 +116,12 @@ export const outcomes = {
     `[COLLECT_TARGET_MISMATCH] The requested cell at ${cellLabel(position)} is ${observedName}, not ${selector}.`,
   targetsUnreachable: (selector: string, reason: string) =>
     `[NO_REACHABLE_MATCHING_TARGETS] Every loaded ${selector} block was found but none could be reached. Last routing stop: ${reason}`,
+  targetsUnderWater: (selector: string, summary: string) =>
+    `[TARGETS_UNDER_WATER] Every ${selector} block found lies in water and none can be drained first from dry ground with the blocks you carry, so none was walked to: ${summary}.`,
   noLoadedTargets: (selector: string) => `[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded ${selector} blocks.`,
-  noTargetInRange: (selector: string, range: number, nearest: { readonly position: Position3; readonly distance: number } | null) =>
+  noTargetInRange: (selector: string, range: number, nearest: NearestBeyondRange | null) =>
     `[NO_TARGET_IN_RANGE] No ${selector} block left within ${range} blocks of where the run started; ` +
-    (nearest === null ? "none is loaded farther either." : `the nearest loaded one is at ${cellLabel(nearest.position)}, ${nearest.distance} blocks from the start.`),
+    (nearest === null ? "none is loaded farther either." : nearestBeyondRangeWords(nearest)),
   unmineable: (blockName: string, position: Position3, reason: string) =>
     `[TARGET_UNMINEABLE] ${blockName} at ${cellLabel(position)} cannot be broken: ${reason}.`,
   dropAttemptsExhausted: (mined: number, collected: number, requested: number) =>
@@ -105,8 +129,8 @@ export const outcomes = {
   inventoryFull: (totalSlots: number, itemNames: readonly string[]) =>
     `[INVENTORY_FULL] All ${totalSlots} inventory slots are occupied with no room in a stack of ${describeItems(itemNames)}; allow_full_inventory=false.`,
   incomplete: "[COLLECTION_INCOMPLETE] Collection stopped before the requested inventory gain was observed.",
-  stalled: (seconds: number, walked: number, fromStart: number) =>
-    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
+  stalled: (seconds: number, ticks: number | null, walked: number, fromStart: number) =>
+    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s and ${ticks ?? "unknown"} world ticks (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
   progress: (reason: string, gained: number, requested: number, blocksBroken: number) =>
     `${reason} Broke ${blocksBroken} matching block${blocksBroken === 1 ? "" : "s"}; inventory gained ${gained}/${requested} requested items.`,
 } as const;
@@ -218,6 +242,13 @@ const collectionEvidenceSchema = z.strictObject({
   gainedByItem: z.record(z.string(), z.number().int().nonnegative()),
   blocksBroken: z.number().int().nonnegative(),
   brokenAt: z.array(brokenCellSchema),
+  /**
+   * Broken blocks that should have dropped an item and showed no item entity within the mine process's wait, over the
+   * whole request. A block whose loot table guarantees nothing with the tool used (leaves without shears, ore with a
+   * too low tool tier) is not counted; a block the version has no loot table for is (`mining/expected-drop.ts`).
+   * Absent in old results.
+   */
+  lostDrops: z.number().int().nonnegative().optional(),
   /** The tool (carried item and its class) that broke or wore down to a lower tier during the run; absent when none did. */
   toolLost: z.strictObject({ item: z.string(), class: z.string() }).optional(),
 });

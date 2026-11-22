@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { COLLECT_BLOCK } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
@@ -24,7 +25,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const collect = runtime.actions.find((action) => action.name === COLLECT_BLOCK);
   if (!collect) throw new Error("The scenario requires collect_block.");
   let ticks = 0;
-  const started = Date.now();
+  const started = monotonicNow();
   const frame = () => {
     const trunk = Array.from(
       { length: 6 },
@@ -86,7 +87,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     const safePartial = output.result.status === "partial" && "error" in output.result &&
       /liquid isolation needs/.test(String(output.result.error)) && gained > 0 && gained < 6 &&
       bot.health === 20 && bot.entity.position.distanceTo(new Vec3(treeX, treeY, treeZ)) < 16 &&
-      Date.now() - started < 45_000;
+      monotonicNow() - started < 45_000;
     return {
       status: (expect_safe_partial === true ? safePartial : output.result.status === "succeeded") ? "succeeded" : "failed",
       detail: JSON.stringify({ result: output.result, final: frame() }),

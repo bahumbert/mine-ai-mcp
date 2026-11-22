@@ -1,6 +1,7 @@
-import type { BotRuntime } from "../runtime-client.ts";
+import type { BotRuntime, ProtectedArea } from "../runtime-client.ts";
 import { areaKey, type BlockArea } from "../runtime-client.ts";
-import { farmPlot, type FarmPlot } from "./plot.ts";
+import { overlapsOf } from "../skills/protected-areas.ts";
+import { farmBox, farmPlot, type FarmPlot } from "./plot.ts";
 
 /** How far (blocks, per axis) from the first spot a new farm's middle may be moved to find tillable ground. */
 export const SITE_RADIUS = 16;
@@ -162,17 +163,23 @@ function soilNames(area: BlockArea, plot: FarmPlot): string[] {
   return names;
 }
 
+/** A site found, or why none is; `overlaps` lists the protected areas the asked plot overlaps when they are a reason. */
+export type SiteChoice = { readonly plot: FarmPlot } | { readonly refusal: string; readonly overlaps?: readonly ProtectedArea[] };
+
 /**
  * Where a new farm of this size can go: the asked plot when its ground is tillable under the open sky, else the
  * nearest plot within {@link SITE_RADIUS} that is, each at its own column's ground height (a slope is not "no
  * ground"); otherwise why none is. A block name `facts` knows a till failed on is not soil. The asked plot is one small read; the wide box is read once, only when that fails.
  * A cell not loaded is unknown, never air or soil: a plot with one is not chosen.
+ * A plot whose {@link farmBox} (ring included) overlaps a protected area in `areas`, anyone's, is not chosen either
+ * (live 2026-10-10: a farm protected over her own house); the refusal then carries the areas the asked plot overlaps.
  */
-export async function chooseSite(runtime: BotRuntime, plot: FarmPlot, facts?: TillFacts): Promise<{ readonly plot: FarmPlot } | { readonly refusal: string }> {
+export async function chooseSite(runtime: BotRuntime, plot: FarmPlot, facts?: TillFacts, areas: readonly ProtectedArea[] = []): Promise<SiteChoice> {
   const near = plotBox(plot, 0, -1, SKY_HEIGHT);
   const nearArea = await runtime.blocksIn(near.min, near.max);
   const asked = problems(plot, nearArea, await tagsOf(runtime, soilNames(nearArea, plot)), true, facts);
-  if (fit(asked)) return { plot };
+  const overlaps = overlapsOf(areas, farmBox(plot));
+  if (fit(asked) && overlaps.length === 0) return { plot };
 
   const wide = plotBox(plot, SITE_RADIUS, -SITE_RISE - 1, SITE_RISE + SKY_HEIGHT);
   const area = await runtime.blocksIn(wide.min, wide.max);
@@ -189,11 +196,15 @@ export async function chooseSite(runtime: BotRuntime, plot: FarmPlot, facts?: Ti
     const ground = grounds.get(`${x},${z}`);
     if (ground === undefined || ground === null || ground === "unknown") continue;
     const moved = farmPlot({ x, y: ground.y, z }, plot.size);
-    if (fit(problems(moved, area, tags, true, facts))) best = { plot: moved, distance };
+    if (overlapsOf(areas, farmBox(moved)).length === 0 && fit(problems(moved, area, tags, true, facts))) best = { plot: moved, distance };
   }
   if (best !== null) return { plot: best.plot };
-  const why = [...asked.wrong, ...(asked.unknown > 0 ? [`${asked.unknown} not loaded`] : [])].join(", ");
-  return { refusal: `no ground to farm within ${SITE_RADIUS} blocks around y ${plot.water.y}: the plot there is ${why}; walk to ${asked.learned ? "ground a hoe tills" : "grass or dirt"} under the open sky and farm there` };
+  const why = [...asked.wrong, ...(asked.unknown > 0 ? [`${asked.unknown} not loaded`] : [])];
+  if (overlaps.length > 0) {
+    const named = overlaps.map((overlapping) => `#${overlapping.regionId} '${overlapping.label}'`).join(", ");
+    return { refusal: `no plot within ${SITE_RADIUS} blocks around y ${plot.water.y} is clear of protected area${overlaps.length === 1 ? "" : "s"} ${named} and on ground to farm`, overlaps };
+  }
+  return { refusal: `no ground to farm within ${SITE_RADIUS} blocks around y ${plot.water.y}: the plot there is ${why.join(", ")}; walk to ${asked.learned ? "ground a hoe tills" : "grass or dirt"} under the open sky and farm there` };
 }
 
 /**

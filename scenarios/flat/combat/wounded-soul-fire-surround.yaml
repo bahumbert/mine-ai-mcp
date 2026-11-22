@@ -26,7 +26,8 @@ players:
       - { item: diamond_pickaxe, count: 1 }
       - { item: cobblestone, count: 64 }
       - { item: cooked_beef, count: 32 }
-params: { mob: blaze, startingHealth: 5 }
+# The fire cells declare the obstruction; a blaze hit that knocks the body onto one burns it 8 to 9 s, which 5 health does not outlast (analysis 2026-11-22).
+params: { mob: blaze }
 client:
   command: bun
   args: ["../../src/client-host.ts", "./wounded-ranged-shelter.ts"]

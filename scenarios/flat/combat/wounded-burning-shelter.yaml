@@ -20,7 +20,6 @@ players:
       - { item: diamond_sword, count: 1 }
       - { item: diamond_pickaxe, count: 1 }
       - { item: cobblestone, count: 64 }
-      - { item: shield, count: 1 }
       - { item: cooked_beef, count: 32 }
 params: { mob: blaze, burning: true }
 client:

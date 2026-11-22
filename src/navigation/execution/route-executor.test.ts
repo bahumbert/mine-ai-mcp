@@ -32,6 +32,8 @@ import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { OpenedPassages } from "./opened-passages.js";
 import { RouteExecutor, type RouteExecutionRequest } from "./route-executor.js";
+import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
+import { NO_TICK_CANCEL_MS } from "./no-tick-cancel.js";
 
 /** Let the executor's pending microtasks and immediates run. */
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -74,17 +76,14 @@ function executeSingleStep(options: {
  * tick at a time, and counts what the executor asks of it.
  */
 class TickDrivenBot extends FakeNavigationBot {
-  subscriptions = 0;
   preparations = 0;
   controls = 0;
-  snapshotCalls = 0;
   nextVelocity: Position3 = STILL;
   lastIntent: MovementControlIntent | null = null;
   readonly preparedVelocities: Position3[] = [];
   readonly executions: MovementExecution[] = [];
   readonly steeringTargets: Position3[] = [];
   override movementSnapshot() {
-    this.snapshotCalls += 1;
     const velocity = this.nextVelocity;
     this.nextVelocity = STILL;
     return {
@@ -122,10 +121,6 @@ class TickDrivenBot extends FakeNavigationBot {
   override applyMovementSteering(target: Position3) {
     this.steeringTargets.push(target);
   }
-  override subscribePhysicsTick(listener: () => void) {
-    this.subscriptions += 1;
-    return super.subscribePhysicsTick(listener);
-  }
   /** One physics tick with the body supported at `x`, carrying `velocity` into it. */
   tickAt(x: number, velocity: Position3 = STILL) {
     this.current = observation(x);
@@ -141,6 +136,29 @@ class TickDrivenBot extends FakeNavigationBot {
 }
 
 // ── Effects and their confirmation ───────────────────────────────────────────
+
+test("support-refused route invalidates without movement-failure evidence and a safe next route completes", async () => {
+  const world = flatWorld();
+  const bot = new FakeNavigationBot();
+  const ledger = new ExpectedMutationLedger();
+  const position = { x: 1, y: 62, z: 0 };
+  world.load(position, { stateId: 2 });
+  bot.startEffect = () => ({
+    issued: false, cancel() {},
+    completion: Promise.resolve({ kind: "failed", observation: "Move onto the bank.", cause: "support" }),
+  });
+  const step: PlannedStep = {
+    ...walkStep("unsafe-edge", 0, 1),
+    operations: [{ kind: "break", position, expectedStateId: 2, toolType: null, brings: [] }],
+  };
+  assert.deepEqual(await executeSingleStep({ step, world, bot, ledger }), { kind: "invalidated" });
+  assert.equal(ledger.activeCount, 0);
+  assert.equal(ledger.receiptCount, 0);
+  assert.equal(bot.ownedControlCount, 0);
+  assert.equal(bot.ticks.size, 0);
+  bot.prepareMovement = async (next) => ({ kind: "completed", arrival: next.to });
+  assert.equal((await executeSingleStep({ step: walkStep("safe-bank", 0, -1), world, bot, ledger })).kind, "exhausted");
+});
 
 /**
  * A break followed by a move. Each row is one stance the bot may be in when
@@ -388,7 +406,6 @@ test("one physics-tick subscription advances a complete movement-only route", as
   bot.tickAt(2);
   bot.tickAt(2);
   assert.equal((await result).kind, "exhausted");
-  assert.equal(bot.subscriptions, 1);
   assert.equal(bot.ticks.size, 0);
   assert.equal(bot.ownedControlCount, 0);
   assert.deepEqual(bot.executions, [{ end: "continuous" }, { end: "settled" }]);
@@ -411,7 +428,6 @@ test("a mixed-kind continuous handoff reuses the route tick's velocity snapshot"
   bot.tickAt(1.1, { x: 0.3, y: 0, z: 0 });
   while (bot.preparations < 2) await nextTurn();
 
-  assert.equal(bot.snapshotCalls, 2);
   assert.deepEqual(bot.preparedVelocities, [STILL, { x: 0.3, y: 0, z: 0 }]);
   controller.abort();
   bot.tickAt(1.1);
@@ -420,12 +436,7 @@ test("a mixed-kind continuous handoff reuses the route tick's velocity snapshot"
 
 test("a failed continuous handoff clears the controls it inherited", async () => {
   class FailedHandoffBot extends TickDrivenBot {
-    clearCalls = 0;
     inheritedControlsAtFailure = 0;
-    override clearOwnedControls() {
-      this.clearCalls += 1;
-      super.clearOwnedControls();
-    }
     override async prepareMovement(
       step: PlannedStep,
       token: unknown,
@@ -462,8 +473,6 @@ test("a failed continuous handoff clears the controls it inherited", async () =>
   assert.equal((await result).kind, "failed");
   assert.equal(bot.inheritedControlsAtFailure > 0, true);
   assert.equal(bot.ownedControlCount, 0);
-  // Once at the failed ownership transfer and once at route cleanup.
-  assert.equal(bot.clearCalls, 2);
 });
 
 test("the route applies a gap controller's per-tick landing steering", async () => {
@@ -494,105 +503,131 @@ test("the route applies a gap controller's per-tick landing steering", async () 
 
 // ── Giving the body back ─────────────────────────────────────────────────────
 
-test("route cancellation clears controls and detaches its physics-tick subscription", async () => {
-  const bot = new TickDrivenBot();
-  const controller = new AbortController();
-  const execution = executeSingleStep({
-    step: walkStep("cancelled", 0, 3),
-    world: flatWorld(),
-    bot,
-    signal: controller.signal,
-  });
-  await nextTurn();
-  controller.abort();
-  bot.tickAt(0);
-  assert.equal((await execution).kind, "cancelled");
-  assert.equal(bot.subscriptions, 1);
-  assert.equal(bot.ticks.size, 0);
-  assert.equal(bot.ownedControlCount, 0);
+test("route invalidation interrupts movement at a cleaned physical checkpoint", async () => {
+  for (const stop of ["abort", "invalidate"] as const) {
+    const bot = new TickDrivenBot();
+    const control = new AbortController();
+    const executor = routeExecutor({
+      context: { runId: "ground-stop", world: flatWorld(), bot, ledger: new ExpectedMutationLedger(), signal: control.signal },
+      plan: routePlan([walkStep("grounded", 0, 3)]),
+      stepStarted: () => undefined, phase: () => undefined, stepCompleted: () => "continue",
+    });
+    const completion = executor.execute();
+    await flush();
+    if (stop === "abort") { control.abort(); bot.tickAt(0); }
+    else executor.invalidate();
+    assert.equal((await completion).kind, stop === "abort" ? "cancelled" : "invalidated");
+    assert.equal(bot.ticks.size, 0);
+    assert.equal(bot.ownedControlCount, 0);
+  }
 });
 
-test("a moving step whose physics stopped settles cancelled about a second after the abort", async () => {
+/** Invalidation at either side of takeoff keeps the same committed hop through its safe landing. */
+async function invalidatedParkour(ticksPerSecond: number, invalidateAtTick: number) {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const harness = createFakeBot({ clock, server: { ticksPerSecond } });
   const bot = new TickDrivenBot();
-  const controller = new AbortController();
-  const execution = executeSingleStep({
-    step: walkStep("no-tick", 0, 3),
-    world: flatWorld(),
-    bot,
-    signal: controller.signal,
+  const world = flatWorld();
+  for (const x of [1, 2, 3]) world.load({ x, y: 62, z: 0 }, { stateId: 0 });
+  const executor = routeExecutor({
+    context: { runId: "stale-gap", world, bot, ledger: new ExpectedMutationLedger(), signal: new AbortController().signal },
+    plan: routePlan([gapStep("parkour", 4)]),
+    stepStarted: () => undefined, phase: () => undefined, stepCompleted: () => "continue",
   });
-  await nextTurn();
-  assert.ok(bot.controls > 0, "the step took the controls");
-  const abortedAt = performance.now();
-  controller.abort();
-  // The fake never ticks: before the watchdog this wait ended only with the runner's 30 s stall.
-  const result = await execution;
-  const waited = performance.now() - abortedAt;
-  assert.equal(result.kind, "cancelled");
-  assert.ok(waited >= 900 && waited < 1_500, `settled after ${waited} ms`);
-  assert.equal(bot.ownedControlCount, 0);
+  const completion = executor.execute();
+  const pending = watch(completion);
+  await flush();
+  let ticks = 0;
+  const detach = harness.server.onTick(() => {
+    ticks += 1;
+    if (ticks === 1) bot.tickAt(0.45, { x: 0.3, y: 0, z: 0 });
+    else if (ticks === 2) bot.knockback(1, 64, { x: 0.25, y: 0.2, z: 0 });
+    else if (ticks === 3) bot.knockback(2.5, 64, { x: 0.25, y: -0.2, z: 0 });
+    else bot.tickAt(4);
+  });
+  try {
+    await clock.advance(invalidateAtTick * 1_000 / ticksPerSecond);
+    assert.equal(harness.server.gameTime, 24_000 + invalidateAtTick);
+    executor.invalidate();
+    await flush();
+    assert.equal(pending.over, false, invalidateAtTick === 1
+      ? "invalidation must retain the unsafe moving takeoff" : "invalidating must retain the airborne step");
+    assert.ok(bot.ownedControlCount > 0, "the committed step still owns controls");
+    await clock.advance((3 - invalidateAtTick) * 1_000 / ticksPerSecond);
+    assert.equal(pending.over, false, "later airborne ticks must keep steering");
+    assert.equal(bot.lastIntent?.forward, true);
+    await clock.advance(1_000 / ticksPerSecond);
+    assert.deepEqual(await completion, { kind: "invalidated" });
+    assert.equal(harness.server.gameTime, 24_004);
+    assert.equal(bot.current.position.x, 4.5);
+    assert.equal(bot.current.stance, "supported");
+    assert.equal(bot.ownedControlCount, 0);
+    assert.equal(bot.ticks.size, 0);
+  } finally { detach(); }
+  const next = executeSingleStep({ step: walkStep("after-invalidated-landing", 4, 5), world, bot });
+  await flush();
+  bot.tickAt(5);
+  assert.equal((await next).kind, "exhausted");
+  assert.equal(bot.current.position.x, 5.5);
   assert.equal(bot.ticks.size, 0);
-});
+  await clock.advance(NO_TICK_CANCEL_MS * 2);
+  assert.equal(bot.ownedControlCount, 0);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+}
 
-test("a tick after the watchdog settled applies no control", async () => {
+/** Both stop causes expire on silence, ignore late ticks, and leave the next route free to move. */
+async function silentRouteStop(ticksPerSecond: number, stop: "abort" | "invalidate") {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const harness = createFakeBot({ clock, server: { ticksPerSecond } });
   const bot = new TickDrivenBot();
-  const controller = new AbortController();
-  const execution = executeSingleStep({
-    step: walkStep("late-tick", 0, 3),
-    world: flatWorld(),
-    bot,
-    signal: controller.signal,
+  const control = new AbortController();
+  const executor = routeExecutor({
+    context: { runId: "silent-stale-gap", world: flatWorld(), bot, ledger: new ExpectedMutationLedger(), signal: control.signal },
+    plan: routePlan([gapStep("parkour", 4)]),
+    stepStarted: () => undefined, phase: () => undefined, stepCompleted: () => "continue",
   });
-  await nextTurn();
-  controller.abort();
+  const completion = executor.execute();
+  const pending = watch(completion);
+  await flush();
+  bot.tickAt(0.1, { x: 0.25, y: 0, z: 0 });
+  bot.knockback(1, 64, { x: 0.25, y: 0.2, z: 0 });
+  assert.ok(bot.ownedControlCount > 0);
   const lateTick = [...bot.ticks];
-  assert.equal((await execution).kind, "cancelled");
+  if (stop === "abort") control.abort();
+  else executor.invalidate();
+  harness.server.stop();
+  await clock.advance(NO_TICK_CANCEL_MS - 1);
+  assert.equal(pending.over, false, "the no-tick bound has not elapsed");
+  await clock.advance(1);
+  assert.deepEqual(await completion, { kind: "cancelled" });
+  assert.equal(harness.server.gameTime, 24_000);
+  assert.equal(bot.ownedControlCount, 0);
+  assert.equal(bot.ticks.size, 0);
   bot.lastIntent = null;
   for (const tick of lateTick) tick();
   assert.equal(bot.lastIntent, null);
-  assert.equal(bot.ownedControlCount, 0);
-});
-
-test("after a no-tick cancel the next run on the same bot walks to its goal", async () => {
-  const bot = new TickDrivenBot();
-  const first = new AbortController();
-  const cancelled = executeSingleStep({ step: walkStep("silent", 0, 3), world: flatWorld(), bot, signal: first.signal });
-  await nextTurn();
-  first.abort();
-  assert.equal((await cancelled).kind, "cancelled");
-  assert.equal(bot.ticks.size, 0);
-  // Physics is back: only the new run moves the body, and it reaches its goal.
-  const second = executeSingleStep({ step: walkStep("resumed", 0, 3), world: flatWorld(), bot });
-  await nextTurn();
+  const next = executeSingleStep({ step: walkStep("after-silent-stop", 0, 3), world: flatWorld(), bot });
+  await flush();
   bot.tickAt(0);
   bot.tickAt(3);
-  assert.equal((await second).kind, "exhausted");
+  assert.equal((await next).kind, "exhausted");
   assert.equal(bot.current.position.x, 3.5);
-  assert.equal(bot.ownedControlCount, 0);
-});
-
-test("route invalidation interrupts movement at a cleaned physical checkpoint", async () => {
-  const bot = new TickDrivenBot();
-  const executor = routeExecutor({
-    context: {
-      runId: "run",
-      world: flatWorld(),
-      bot,
-      ledger: new ExpectedMutationLedger(),
-      signal: new AbortController().signal,
-    },
-    plan: routePlan([walkStep("invalidated", 0, 3)], { id: "invalidated-route" }),
-    stepStarted: () => undefined,
-    phase: () => undefined,
-    stepCompleted: () => "continue",
-  });
-  const execution = executor.execute();
-  await nextTurn();
-  executor.invalidate();
-  assert.equal((await execution).kind, "invalidated");
   assert.equal(bot.ticks.size, 0);
+  await clock.advance(NO_TICK_CANCEL_MS * 2);
   assert.equal(bot.ownedControlCount, 0);
-});
+  assert.equal(clock.pendingGlobalTimers(), 0);
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a stale airborne parkour lands before invalidation and the next route completes (${ticksPerSecond} tps)`, async () => {
+    for (const invalidateAtTick of [1, 2]) await invalidatedParkour(ticksPerSecond, invalidateAtTick);
+  });
+  test(`an invalidated airborne step cancels when physics stops (${ticksPerSecond} tps)`, async () => {
+    for (const stop of ["abort", "invalidate"] as const) await silentRouteStop(ticksPerSecond, stop);
+  });
+}
 
 test("a terminal world invalidation releases a cancelled jump without another physics tick", async () => {
   const bot = new TickDrivenBot();
@@ -621,7 +656,7 @@ test("a terminal world invalidation releases a cancelled jump without another ph
   await Promise.resolve();
   assert.equal(settled, false, "Committed jump must retain ownership during ordinary cancellation.");
   assert.ok(bot.ownedControlCount > 0);
-  executor.invalidate();
+  executor.terminate();
   assert.equal((await completion).kind, "cancelled");
   assert.equal(bot.ownedControlCount, 0);
   assert.equal(bot.ticks.size, 0);

@@ -1,69 +1,42 @@
-import { setTimeout as sleep } from "node:timers/promises";
-import { describeStep, stepKey, targetItems, type Step } from "./actions.ts";
-import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
+import { sleepMs } from "./wall-timers.ts";
+import { parseActivity } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
-import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
-import { improvement, temporaryRoles } from "./building/materials.ts";
-import type { HouseSize } from "./building/house.ts";
-import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { Inbox, type Heard } from "./inbox.ts";
-import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
-import { obtainedBy } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
-import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
-import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
-import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatLine, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
-import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
-import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
-import { shelterForNight, underCover } from "./night-shelter.ts";
+import { MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
+import { monotonicNow } from "./monotonic-clock.ts";
+import { sameWords, type ChatLine, type Mind, type Objective, type WorkDecision } from "./mind.ts";
 import { personaSkills, type Persona } from "./persona.ts";
-import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
+import type { BotRuntime, BotSnapshot, PlayerMessage } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
-import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { loopVerdict } from "./step-loop-rules.ts";
-import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
-import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
+import { lastOfPlay, minutesByActivity, minutesByPurpose } from "./time-spent.ts";
 import { WhoWasNamed } from "./who-was-named.ts";
+import { AgentMemory } from "./agent/agent-memory.ts";
+import { decideChat, listensTo, type ChatRoutingHost } from "./agent/chat-routing.ts";
+import { FailedSteps } from "./agent/failed-steps.ts";
+import { GameFacts } from "./agent/game-facts.ts";
+import { AgentNarration } from "./agent/narration.ts";
+import { opportunitiesFor } from "./agent/house-opportunities.ts";
+import { StepGuards } from "./agent/step-guards.ts";
+import { StepRunner } from "./agent/step-runner.ts";
+import { SituationDecisions } from "./agent/situation-host.ts";
+import { neededWork, stopAll, stopWorkOf, topWork } from "./agent/stack.ts";
+import { newWork, stageWorkValidation, type Work } from "./agent/work.ts";
 
-/** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
-const BODY_RESTARTED = "[BODY_RESTARTED]";
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
 const STARTUP_RETRY_MS = 10_000;
 /** Chat lines kept as conversational context. */
 const HISTORY_LINES = 12;
-/** Known places shown to the models; the oldest is forgotten first. */
-/** Carried full blocks named to the goal tier as materials a house could use. */
-const MAX_CARRIED_BLOCKS = 5;
-const KNOWN_PLACES = 8;
-/** Steps kept per objective for the work tier. */
-const STEP_MEMORY = 20;
-/** Outcomes of its own objectives remembered for the goal tier. */
-const OWN_MEMORY = 5;
-/** How many failed steps are kept (live 2026-10-10). */
-const FAILED_STEP_MEMORY = 8;
-/** How often a step of its own is checked for nightfall (TEMPORARY night shelter). */
-const NIGHT_CHECK_MS = 20_000;
-/** After a night shelter could not be made, how long before it is tried again. */
-const SHELTER_RETRY_MS = 5 * 60_000;
-/** Farms it remembers and every tier sees. */
-const KNOWN_FARMS = 4;
 /** Chances of the likeliest activities kept in the brain log with each own objective. */
 const TOP_CHANCES = 5;
 /** Unusable model replies in a row before an objective is dropped. */
 const MAX_BAD_REPLIES = 2;
 /** Decisions in a row that a content check kept sending back (not a format failure: those are bad replies). */
 const MAX_SENT_BACKS = 4;
-/** Activity records read back at start: more than an hour of steps. */
-const ACTIVITY_MEMORY = 200;
-/** A step shorter than this is not worth a memory note (it still counts until the brain stops). */
-const MIN_RECORDED_MS = 5_000;
-/** How often activity-time notes older than the last hour of play are deleted (the hour rotates). */
-const ROTATE_EVERY_MS = 10 * 60_000;
-/** At most this many notes deleted in one `note_delete`. */
-const DELETE_BATCH = 500;
 
 export interface AgentOptions {
   readonly persona: Persona;
@@ -92,67 +65,6 @@ export interface AgentOptions {
   readonly noGain?: { readonly minutes: number; readonly sampleMs: number };
 }
 
-/** One objective on the stack and what was done for it. */
-interface Work {
-  readonly objective: Objective;
-  readonly steps: StepRecord[];
-  /** What was carried after each of `steps` (name:count, sorted; null when unknown); not shown to the model, so prompts do not change. */
-  readonly carried: (string | null)[];
-  taken: number;
-  badReplies: number;
-  sentBacks: number;
-  /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
-  step: AbortController | null;
-  /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
-  lastFact: string;
-  spokenAt: number;
-  /** The skill whose steps failed last, and how many times in a row. */
-  failing: { skill: string; count: number };
-  /** Who the order came from by whisper: its progress and its end are whispered back to them (spec 2026-10-09, C). */
-  whisperTo: string | null;
-  /** Step key -> refusals since that step last ran (rule 2: three end the objective); counted by the mind, reset here. */
-  readonly refused: Map<string, number>;
-  /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
-  readonly wanted: Set<string>;
-  /** Where a level_area around each player (lower-case name) was first aimed in this objective: later steps reuse it (run 13). */
-  readonly levelSites: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
-  /** The tool classes whose tool broke in this objective and was not made again: the next fetch makes it first (N7). */
-  readonly toolsLost: Set<string>;
-  /**
-   * What its time counts for: the objective's purpose, until one of its steps builds, improves a house or farms; from
-   * then on that (run 11, 2026-10-14: houses were labelled crafting, mining or woodcutting by the goal tier).
-   */
-  purpose: Activity | null;
-}
-
-/** A decision to run a step. */
-type StepDecision = Extract<WorkDecision, { readonly kind: "step" }>;
-
-/** What a step run left, before it is recorded: its result, when it started, the runtime actions and phases it went through. */
-interface StepRun {
-  readonly label: string;
-  readonly result: SkillResult;
-  readonly started: number;
-  readonly actions: readonly ActionTime[];
-  readonly phases: readonly ActivityPhase[];
-  /** Why the no-gain watch stopped the step, or null. */
-  readonly stalled: string | null;
-}
-
-/** What is carried, as `name:count` sorted (totals per name): compared to tell whether the inventory changed. */
-function carriedOf(snapshot: BotSnapshot): string {
-  const totals = new Map<string, number>();
-  for (const { name, count } of snapshot.inventory) totals.set(name, (totals.get(name) ?? 0) + count);
-  return [...totals].map(([name, count]) => `${name}:${count}`).sort().join(",");
-}
-
-/** Skills that are an end in themselves: an objective that runs one is for that work (its fetches included). */
-const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
-
-function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
-}
-
 /**
  * One character (ADR-008, ADR-011). Every message it hears goes to the chat tier, which answers in character and
  * decides whether to take something on. What it takes on goes on top of a stack of objectives (an order sets aside
@@ -167,59 +79,28 @@ export class Agent {
   private readonly history: ChatLine[] = [];
   /** Whom each player's lines named last: a line naming nobody is read as following the one that did. */
   private readonly whoWasNamed: WhoWasNamed;
-  private readonly places: KnownPlace[] = [];
-  /** Its farms, oldest first, each as it was at its last tend. */
-  private readonly farms: KnownFarm[] = [];
   private readonly soil: TillFacts;
-
-  /**
-   * The places shown to the models: the known ones, and the unfinished house with where to stand to resume it (live
-   * 2026-10-02: asked to "go back and finish the house you started", she began a new one where she stood).
-   */
-  private knownPlaces(): KnownPlace[] {
-    // Her farms, as they were at their last tend: the models only know what the situation says (when to come back is
-    // their choice).
-    const farms = this.farms.map((farm): KnownPlace => ({
-      name: `your ${farm.crop} farm`,
-      detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when you last tended it, ${minutesAgo(farm.tendedAt)}; farming it again harvests what is ripe and replants it`,
-    }));
-    const house = this.building.unfinished;
-    if (house === null) return [...this.places, ...farms];
-    const { x, y, z } = house.site.door;
-    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
-  }
-  /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
-  private readonly areas: ProtectedArea[] = [];
-  /** Each finished step's activity and time over the last hour of play, oldest first. */
-  private readonly times: ActivityTime[] = [];
-  /** When old activity notes were last deleted. */
-  private rotatedAt = Number.NEGATIVE_INFINITY;
+  /** What it knows and keeps across restarts: places, farms, protected areas, its own outcomes, activity time, the unfinished house. */
+  private readonly memory: AgentMemory;
   /** When each player (lower case) last said anything: a follow they asked for ends after a long silence. */
   private readonly lastHeard = new Map<string, number>();
   /** Game facts learnt from the runtime, kept for the session: block tags by name, foods seen, how items are got. */
-  /** The game's data per block name, as the runtime reports it (null: no such block), read once. */
-  private readonly blockKindCache = new Map<string, BlockKind | null>();
-  private readonly foods = new Set<string>();
-  private readonly itemActivities = new Map<string, Activity | null>();
-  private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
-  /** The unfinished house as last saved to memory, to save it again only when it changed. */
-  private savedUnfinished = "null";
+  private readonly facts: GameFacts;
   private readonly stack: Work[] = [];
-  private readonly lately: string[] = [];
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
   private lastFailed: { readonly objective: string; readonly reason: string } | null = null;
-  /** Steps that failed lately, whatever the objective, newest last: shown to the work tier, which refuses a second repeat. */
-  private readonly failedSteps: { readonly objective: Objective; readonly step: string; readonly key: string; readonly detail: string; readonly at: number; readonly failures: readonly number[]; readonly carried: string | null; readonly position: Position | null }[] = [];
+  private readonly failedSteps = new FailedSteps();
+  /** What the chat routing reads from this agent. */
+  private readonly chatHost: ChatRoutingHost;
+  /** Runs the step the model chose and keeps what it did. */
+  private readonly runner: StepRunner;
+  /** The goal tier's pace. */
+  private readonly guards: StepGuards;
+  private readonly narration: AgentNarration;
+  private readonly situations: SituationDecisions;
   private restUntil = 0;
-  private nextGoalCall = 0;
   private wake: (() => void) | null = null;
   private runSignal: AbortSignal = new AbortController().signal;
-  /** The night shelter running now (see {@link shelterIfNight}); an order stops it. */
-  private sheltering: AbortController | null = null;
-  /** No shelter tried before then: the last one could not be dug here. */
-  private shelterRetryAt = 0;
-  /** When the sky was last looked at for nightfall during a step of its own. */
-  private nightCheckedAt = Number.NEGATIVE_INFINITY;
   /** Calls of any tier in a row that found the model server away (reset by any answer): sets how long the next wait is. */
   private modelFailures = 0;
   /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
@@ -228,38 +109,78 @@ export class Agent {
   constructor(private readonly options: AgentOptions) {
     this.soil = options.soil ?? new TillFacts();
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
+    this.facts = new GameFacts(options.runtime, options.log);
+    this.memory = new AgentMemory(options, this.body);
+    this.narration = new AgentNarration({ options, stack: this.stack, history: this.history, runSignal: () => this.runSignal, speak: (line, whisperTo) => this.speak(line, undefined, undefined, whisperTo) });
+    this.situations = new SituationDecisions({ options, stack: this.stack, places: () => this.memory.knownPlaces(), runSignal: () => this.runSignal, wake: () => this.wake?.(), journal: (event) => options.journal?.(event), narrate: (work, line) => { void this.narration.narrate(work.objective.text, "event", line, work.whisperTo); } });
+    this.guards = new StepGuards({
+      options,
+      pollMs: options.pollMs ?? DEFAULT_POLL_MS,
+      runSignal: () => this.runSignal,
+      top: () => topWork(this.stack),
+      idle: (ms) => this.idle(ms),
+      interrupted: () => this.stack.at(-1)?.situation != null,
+    });
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
     this.whoWasNamed = new WhoWasNamed(options.persona.username, () => options.otherAgents.names());
+    this.chatHost = {
+      options,
+      history: this.history,
+      inbox: this.inbox,
+      areas: this.memory.areas,
+      activity: () => this.activity,
+      knownPlaces: () => this.memory.knownPlaces(),
+      orderOnTop: () => (topWork(this.stack)?.objective.requester ?? null) !== null,
+      modelFailed: (error) => this.modelFailed(error),
+      resetModelFailures: () => { this.modelFailures = 0; },
+      runSignal: () => this.runSignal,
+    };
+    this.runner = new StepRunner({
+      options,
+      body: this.body,
+      memory: this.memory,
+      facts: this.facts,
+      failedSteps: this.failedSteps,
+      soil: this.soil,
+      lastHeard: this.lastHeard,
+      progress: (work, fact) => this.narration.progress(work, fact),
+      journalState: (step) => this.journalState(step),
+      runSignal: () => this.runSignal,
+      neededWork: (work) => neededWork(this.stack, work),
+      observe: (snapshot) => this.situations.observe(snapshot),
+    });
   }
 
   get activity(): string {
     const top = this.stack.at(-1);
     if (top === undefined) return "idle";
-    const whose = top.objective.requester === null ? "your own goal" : `for ${top.objective.requester}`;
+    const whose = top.situation !== null ? "an event" : top.objective.requester === null ? "your own goal" : `for ${top.objective.requester}`;
     const paused = this.stack.slice(0, -1).map((work) => JSON.stringify(work.objective.text));
     return `${JSON.stringify(top.objective.text)} (${whose})${paused.length === 0 ? "" : `; set aside: ${paused.join(", ")}`}`;
   }
 
   async run(signal: AbortSignal): Promise<void> {
     this.runSignal = signal;
-    signal.addEventListener("abort", () => this.wake?.(), { once: true });
+    signal.addEventListener("abort", () => { this.situations.stopFor(null); this.wake?.(); }, { once: true });
     const { persona } = this.options;
     this.options.journal?.({ kind: "persona", name: persona.displayName, stance: persona.stance, goal: persona.goal ?? null, preferences: persona.preferences ?? null });
     // The runtime keeps chat from before this brain started; answering it now would be confusing.
     await this.options.runtime.readMessages();
-    await this.recallMemory();
-    await this.rotateActivityNotes();
-    await this.recallAreas();
+    await this.memory.recallMemory();
+    await this.memory.rotateActivityNotes();
+    await this.memory.recallAreas();
     // One failed read must not end the brain (live 2026-10-05: an unreadable modded item on the ground failed
     // view_status, and the brain stopped before its first step).
     for (;;) {
       try {
-        await this.keepSettings(await this.options.runtime.status());
+        const snapshot = await this.options.runtime.status();
+        this.situations.observe(snapshot);
+        await this.keepSettings(snapshot);
         break;
       } catch (error) {
         if (signal.aborted) return;
         this.options.log(`status unreadable, retrying: ${String(error)}`);
-        await sleep(STARTUP_RETRY_MS, undefined, { signal }).catch(() => undefined);
+        await sleepMs(STARTUP_RETRY_MS, signal).catch(() => undefined);
       }
     }
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
@@ -269,28 +190,34 @@ export class Agent {
     let unreadable = false;
     try {
       while (!signal.aborted) {
-        // Reading never waits for the chat tier: lines that come while it thinks are heard at once (and may supersede
-        // its reply), so a "stop" is not stuck behind a queue of calls.
-        // A runtime restarting under a poll fails the read: the next poll tries again (review B5).
-        try {
-          for (const message of await this.options.runtime.readMessages()) {
-            this.lastHeard.set(message.username.toLowerCase(), monotonicNow());
-            this.inbox.push(message);
-            this.wakeChat?.();
-          }
-          unreadable = false;
-        } catch (error) {
-          if (!unreadable) this.options.log(`chat unreadable, retrying at the next poll (not logged again until a read works): ${String(error)}`);
-          unreadable = true;
-        }
-        await this.stopOwnStepAtNightfall().catch(() => undefined);
-        await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
+        unreadable = await this.readChat(unreadable);
+        void this.situations.poll().catch(() => undefined);
+        await sleepMs(this.options.pollMs ?? DEFAULT_POLL_MS, signal).catch(() => undefined);
       }
     } finally {
       this.stopAll();
       this.wakeChat?.();
       await working;
       await chatting;
+    }
+  }
+
+  /**
+   * One poll of the chat. Reading never waits for the chat tier: lines that come while it thinks are heard at once (and
+   * may supersede its reply), so a "stop" is not stuck behind a queue of calls. A runtime restarting under a poll fails
+   * the read: the next poll tries again (review B5). `unreadable`: the last poll failed; returns whether this one did.
+   */
+  private async readChat(unreadable: boolean): Promise<boolean> {
+    try {
+      for (const message of await this.options.runtime.readMessages()) {
+        this.lastHeard.set(message.username.toLowerCase(), monotonicNow());
+        this.inbox.push(message);
+        this.wakeChat?.();
+      }
+      return false;
+    } catch (error) {
+      if (!unreadable) this.options.log(`chat unreadable, retrying at the next poll (not logged again until a read works): ${String(error)}`);
+      return true;
     }
   }
 
@@ -326,8 +253,8 @@ export class Agent {
     const { persona, log } = this.options;
     const line = this.remember(message.username, message.message);
     const talkedTo = this.whoWasNamed.note(message, heardAt);
-    if (!this.listensTo(message.username)) return;
-    const decision = await this.decideChat(message, heard, heardAt, talkedTo);
+    if (!listensTo(this.chatHost, message.username)) return;
+    const decision = await decideChat(this.chatHost, message, heard, heardAt, talkedTo);
     if (decision === null) return;
     const { route } = decision;
     const request = route === "act" || route === "later" ? ` ${JSON.stringify(decision.request)}` : "";
@@ -381,59 +308,17 @@ export class Agent {
       // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
       // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
       // only waits behind work done for someone.
-      const top = this.stack.at(-1);
+      const top = topWork(this.stack);
       const objective = asked;
       if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
       else this.queue(objective, whisperTo);
     }
   }
 
-  /**
-   * The chat tier's decision about `message`, or null when there is none to act on. A model server that does not
-   * answer is waited for and asked again while the line is under {@link CHAT_RETRY_MS} old and its speaker has said
-   * nothing since (a stale reply is dropped unspoken anyway); any other failure drops the line, as it always did.
-   */
-  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<ChatDecision | null> {
-    const { persona, mind, log } = this.options;
-    for (;;) {
-      try {
-        const snapshot = await this.options.runtime.status();
-        const decision = await mind.chat({ persona, message, history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }) }, this.runSignal);
-        this.modelFailures = 0;
-        return decision;
-      } catch (error) {
-        if (this.runSignal.aborted) return null;
-        if (!(error instanceof ModelUnavailable)) {
-          log(`chat tier failed on "${message.message}": ${String(error)}`);
-          return null;
-        }
-        const delay = this.modelFailed(error);
-        const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
-        if (superseded || monotonicNow() - heardAt >= CHAT_RETRY_MS) {
-          log(`chat tier unavailable, "${message.message}" dropped (${superseded ? "its speaker said something since" : "no answer in time"}): ${error.message}`);
-          return null;
-        }
-        await sleep(delay, undefined, { signal: this.runSignal }).catch(() => undefined);
-      }
-    }
-  }
-
-  /**
-   * Who the agent hears at all; whether a message is meant for it is the chat tier's call (no name needed).
-   * Other agents are never answered (see {@link AgentOptions.otherAgents}).
-   */
-  private listensTo(username: string): boolean {
-    const { persona } = this.options;
-    const speaker = username.toLowerCase();
-    if (this.options.otherAgents.names().some((name) => name.toLowerCase() === speaker)) return false;
-    return persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker);
-  }
-
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
   private take(objective: Objective, whisperTo: string | null = null): void {
     const current = this.stack.at(-1);
     current?.step?.abort();
-    this.sheltering?.abort();
     this.stack.push(newWork(objective, whisperTo));
     this.journalObjective("taken", objective);
     this.wake?.();
@@ -442,8 +327,9 @@ export class Agent {
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
   private queue(objective: Objective, whisperTo: string | null = null): void {
     const work = newWork(objective, whisperTo);
-    if (this.stack.length === 0) this.stack.push(work);
-    else this.stack.splice(this.stack.length - 1, 0, work);
+    const top = topWork(this.stack);
+    if (top === undefined) this.stack.push(work);
+    else this.stack.splice(this.stack.indexOf(top), 0, work);
     this.journalObjective("queued", objective);
     this.wake?.();
   }
@@ -456,7 +342,6 @@ export class Agent {
     while (!signal.aborted) {
       const work = this.stack.at(-1);
       try {
-        if (await this.shelterIfNight(work)) continue;
         if (work !== undefined) await this.advance(work);
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
         repeated = { error: "", count: 0 };
@@ -493,86 +378,35 @@ export class Agent {
     return modelRetryDelay(this.modelFailures, this.options.pollMs ?? DEFAULT_POLL_MS, this.options.random ?? Math.random);
   }
 
-  /**
-   * TEMPORARY night measure (see night-shelter.ts): at nightfall, a step of its own goal is set aside (the objective
-   * stays on the stack and resumes in the morning). Looked at every {@link NIGHT_CHECK_MS}.
-   */
-  private async stopOwnStepAtNightfall(): Promise<void> {
-    if (!this.options.persona.settings.shelterAtNight || monotonicNow() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
-    const top = this.stack.at(-1);
-    if (top?.step == null || top.objective.requester !== null || monotonicNow() < this.shelterRetryAt) return;
-    this.nightCheckedAt = monotonicNow();
-    if (!(await this.outInTheNight())) return;
-    this.options.log("night fell: setting the step aside to dig in");
-    top.step.abort();
-  }
-
-  /** Night in the overworld, and nothing over its head (underground or under a roof the night is no worse). */
-  private async outInTheNight(): Promise<boolean> {
-    const { runtime } = this.options;
-    const snapshot = await runtime.status();
-    return snapshot.clock?.phase === "night" && !(await underCover(runtime, snapshot.position));
-  }
-
-  /**
-   * TEMPORARY night measure (see night-shelter.ts): at night, unless working on an order, it digs in and waits for the
-   * day. True when it took the turn (sheltered, or tried to); a shelter that could not be made is not tried again for
-   * {@link SHELTER_RETRY_MS}, so it goes on with its work meanwhile.
-   */
-  private async shelterIfNight(work: Work | undefined): Promise<boolean> {
-    const { persona, runtime, log } = this.options;
-    if (!persona.settings.shelterAtNight || monotonicNow() < this.shelterRetryAt) return false;
-    if (work !== undefined && work.objective.requester !== null) return false;
-    if (!(await this.outInTheNight())) return false;
-    const controller = new AbortController();
-    this.sheltering = controller;
-    const objective = work?.objective.text ?? "(own goal)";
-    const label = "shelter for the night";
-    log(`night: ${label}`);
-    this.journalState(label);
-    const started = monotonicNow();
-    let result: SkillResult;
-    try {
-      result = await shelterForNight({
-        runtime,
-        body: this.body,
-        signal: AbortSignal.any([controller.signal, this.runSignal]),
-        areas: this.areas,
-        dayCame: async () => (await runtime.status()).clock?.phase !== "night",
-      });
-    } catch (error) {
-      result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
-    } finally {
-      this.sheltering = null;
-    }
-    if (result.status === "failed") this.shelterRetryAt = monotonicNow() + SHELTER_RETRY_MS;
-    const outcome = result.status === "stopped" ? "interrupted" : result.status;
-    const detail = result.status === "stopped" ? "left for an order, or stopped" : result.detail;
-    log(`  -> ${label}: ${outcome}: ${detail}`);
-    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: elapsedSince(started), activity: null });
-    this.journalState(null);
-    if (result.status === "done") {
-      this.lately.push(`${label}: ${detail}`);
-      if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
-    }
-    return true;
-  }
-
   /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */
   private async pickOwnObjective(): Promise<boolean> {
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.length > 0) return true;
     const { persona, mind, runtime, log } = this.options;
     if (persona.goal === undefined || monotonicNow() < this.restUntil) return false;
-    if (!(await this.waitForGoalBudget())) return true;
+    if (!(await this.guards.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
-    const hour = lastOfPlay(this.times);
+    this.situations.observe(snapshot);
+    this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
+    const hour = lastOfPlay(this.memory.times);
     const time = minutesByActivity(hour);
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
     // the hour's time spent *for* each, not the kind of work the body did.
     const spent = new Map(minutesByPurpose(hour).map(({ activity, minutes }) => [activity, minutes]));
     const chances = activityChances(availableActivities(personaSkills(persona), snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
-    const opportunities = await this.opportunities(snapshot, drawn);
-    const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
+    const opportunities = await opportunitiesFor({ memory: this.memory, facts: this.facts, runtime, style: persona.style, log }, snapshot, drawn);
+    let chosen;
+    try {
+      chosen = await mind.chooseObjective({ persona, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], lately: [...this.memory.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
+    } catch (error) {
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.length > 0) return true;
+      throw error;
+    }
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.length > 0) return true;
+    const { text, purpose } = chosen;
     this.modelFailures = 0;
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || monotonicNow() < this.restUntil) return true;
@@ -585,20 +419,28 @@ export class Agent {
 
   /** Takes one step towards `work`: one model call, then the chosen skill. */
   private async advance(work: Work): Promise<void> {
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.at(-1) !== work) return;
     const { persona, runtime } = this.options;
-    if (work.objective.requester === null && !(await this.waitForGoalBudget())) return;
+    if (work.situation === null && work.objective.requester === null && !(await this.guards.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     const snapshot = await runtime.status();
+    this.situations.observe(snapshot);
+    if (this.stack.at(-1) !== work) return;
+    this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     await this.keepSettings(snapshot);
-    const decision = await this.decideStep(work, snapshot);
+    // A planned step (a situation's, decided when it was raised) runs without a model call, once.
+    const decision = work.planned ?? (await this.decideStep(work, snapshot));
+    await this.situations.settled();
     // Set aside or stopped while it was thinking: it thinks again once the objective is back on top.
     if (decision === null || this.stack.at(-1) !== work) return;
+    work.planned = null;
     if (decision.kind === "done") return this.finish(work, "done", decision.summary);
     if (decision.kind === "give_up") return this.finish(work, "failed", decision.reason);
     if (work.taken >= persona.settings.maxStepsPerObjective) return this.finish(work, "failed", `still not done after ${work.taken} steps`);
     work.taken += 1;
-    const run = await this.runChosenStep(work, decision, snapshot);
-    const record = await this.recordStep(work, decision, run, snapshot);
+    const run = await this.runner.runChosenStep(work, decision, snapshot);
+    const record = await this.runner.recordStep(work, decision, run, snapshot);
     if (record === null) return;
     const verdict = loopVerdict(work, record, decision.step.skill, persona.settings);
     if (verdict !== null) this.finish(work, "failed", verdict);
@@ -610,16 +452,22 @@ export class Agent {
    */
   private async decideStep(work: Work, snapshot: BotSnapshot): Promise<WorkDecision | null> {
     const { persona, mind, log } = this.options;
+    const validation = stageWorkValidation(work);
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.knownPlaces(), areas: [...this.areas], steps: [...work.steps], paused, earlierFailures: this.earlierFailures(snapshot), ownsTemporaryHouse: this.temporaryHouse() !== null, refused: work.refused }, this.runSignal);
+      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], steps: [...work.steps], paused, earlierFailures: this.failedSteps.earlier(snapshot), ownsTemporaryHouse: this.memory.temporaryHouse() !== null, refused: validation.refused, sentBackSteps: validation.sentBackSteps, situation: this.situations.laterInput(work, snapshot) }, this.runSignal);
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.at(-1) !== work) return null;
+      validation.commit();
       work.badReplies = 0;
       work.sentBacks = 0;
       this.modelFailures = 0;
       return decision;
     } catch (error) {
       // Stopped while it thought (an order stopped or the agent shutting down): nothing it did is counted or told.
-      if (this.runSignal.aborted || !this.stack.includes(work)) return null;
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.at(-1) !== work) return null;
+      validation.commit();
       // The model server is away: no reply was given, so none is bad. The work loop waits and asks again.
       if (error instanceof ModelUnavailable) throw error;
       const sentBack = String(error).includes("[LLM_SENT_BACK]");
@@ -639,149 +487,6 @@ export class Agent {
     }
   }
 
-  /** Runs the step the model chose under a no-gain watch, timing it and the runtime actions and phases it went through. */
-  private async runChosenStep(work: Work, decision: StepDecision, snapshot: BotSnapshot): Promise<StepRun> {
-    const label = describeStep(decision.step);
-    this.options.log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
-    const controller = new AbortController();
-    work.step = controller;
-    this.journalState(label);
-    const started = monotonicNow();
-    // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
-    // travelling; a skill's phases (the house's site preparation) change the activity from then on.
-    const actions: ActionTime[] = [];
-    // The step runs: its earlier refusals are forgotten (rule 2 counts refusals with no run in between).
-    work.refused.delete(stepKey(decision.step));
-    for (const { item } of targetItems(decision.step)) work.wanted.add(item);
-    if (decision.step.skill === "collect_block") await this.wantMinedDrops(work, decision.step.block);
-    const gain = watchGain(decision.step, snapshot, controller, { runtime: this.options.runtime, log: this.options.log, ...(this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }) });
-    this.body.onAction = (tool, input, ms) => {
-      gain.alive();
-      if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: monotonicNow() });
-    };
-    const phases: ActivityPhase[] = [];
-    let result: SkillResult;
-    try {
-      result = await runStep(decision.step, this.stepContext(work, controller, gain, started, phases));
-    } catch (error) {
-      result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
-    } finally {
-      gain.stop();
-      work.step = null;
-      this.body.onAction = null;
-    }
-    return { label, result, started, actions, phases, stalled: gain.stalled() };
-  }
-
-  /** What a skill gets to run `work`'s step: the runtime, the body, what the agent knows and keeps, and the signals it reports back through. */
-  private stepContext(work: Work, controller: AbortController, gain: GainWatch, started: number, phases: ActivityPhase[]): SkillContext {
-    const { persona, runtime } = this.options;
-    const { requester } = work.objective;
-    return {
-      runtime,
-      body: this.body,
-      signal: AbortSignal.any([controller.signal, this.runSignal]),
-      requester: requester ?? undefined,
-      self: persona.username,
-      style: persona.style,
-      remember: (place) => this.learnPlace(place),
-      ownHouse: () => this.temporaryHouse(),
-      farms: this.farms,
-      rememberFarm: (farm) => this.learnFarm(farm),
-      soil: this.soil,
-      building: this.building,
-      areas: this.areas,
-      levelSites: work.levelSites,
-      toolsLost: work.toolsLost,
-      ...(requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
-      phase: (activity) => {
-        gain.alive();
-        phases.push({ activity, at: monotonicNow() });
-      },
-      heading: gain.heading,
-      alive: gain.alive,
-      ...(requester !== null && { heardFrom: () => this.lastHeard.get(requester.toLowerCase()) ?? started }),
-      // Only an order is narrated (owner, 2026-10-02); its own goals show in the monitor.
-      ...(requester !== null && { progress: (fact: string) => {
-        gain.alive();
-        this.progress(work, fact);
-      } }),
-    };
-  }
-
-  /**
-   * Keeps what a finished step did: its time and activity, its record on the objective, its failure for the other
-   * objectives, the journal. Null when the body restarted under it (shown as failed, but no refusal, no repeat and no
-   * streak: the step was not wrong); else the record, for the loop rules.
-   */
-  private async recordStep(work: Work, decision: StepDecision, run: StepRun, snapshot: BotSnapshot): Promise<StepRecord | null> {
-    const { label, result, started, stalled } = run;
-    const ended = monotonicNow();
-    const endedAt = new Date().toISOString();
-    const ms = Math.round(ended - started);
-    const { activity, spans, carried, position, room } = await this.activityOf(decision.step, run.actions, snapshot, started, ended, run.phases);
-    // A house or a farm is what the objective turned out to be for, whatever its label said (the end decides).
-    const endPurpose = ENDS.get(decision.step.skill);
-    if (endPurpose !== undefined) work.purpose = endPurpose;
-    const { purpose } = work;
-    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: endedAt, minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
-    if (monotonicNow() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
-    // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
-    let record: StepRecord = stalled !== null && result.status !== "done"
-      ? { step: label, outcome: "failed", detail: stalled }
-      : result.status === "stopped"
-        ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
-        : { step: label, outcome: result.status, detail: result.detail };
-    // A full inventory names what to drop, with whole counts, and spares what the work needs (live 2026-10-10/11).
-    if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, this.neededFor(room, work))}` };
-    work.steps.push(record);
-    work.carried.push(carried);
-    const restarted = record.outcome === "failed" && record.detail.includes(BODY_RESTARTED);
-    if (record.outcome === "failed" && !restarted) this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
-    this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
-    this.journalState(null);
-    if (work.steps.length > STEP_MEMORY) {
-      work.steps.splice(0, work.steps.length - STEP_MEMORY);
-      work.carried.splice(0, work.carried.length - STEP_MEMORY);
-    }
-    this.options.log(`  -> ${record.outcome}: ${record.detail}`);
-    this.memorizeUnfinishedHouse();
-    return restarted ? null : record;
-  }
-
-  /** Saves the unfinished house to memory when it differs from the last saved one. */
-  private memorizeUnfinishedHouse(): void {
-    const unfinished = JSON.stringify(this.building.unfinished);
-    if (unfinished === this.savedUnfinished) return;
-    this.savedUnfinished = unfinished;
-    this.memorize({ kind: "unfinished_house", house: this.building.unfinished });
-  }
-
-  /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
-  private rememberFailedStep(objective: Objective, step: string, key: string, detail: string, carried: string | null, position: Position | null): void {
-    const now = monotonicNow();
-    const before = this.failedSteps.find((failure) => failure.key === key)?.failures ?? [];
-    const kept = this.failedSteps.filter((failure) => failure.key !== key);
-    kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now], carried, position });
-    this.failedSteps.splice(0, this.failedSteps.length, ...kept.slice(-FAILED_STEP_MEMORY));
-  }
-
-  /**
-   * The steps that failed lately for any objective, this one included, most recent first. `changed`: the inventory or
-   * the place in `snapshot` differs from the state after the step's last failure (unknown state: not changed).
-   */
-  private earlierFailures(snapshot: BotSnapshot): EarlierFailure[] {
-    const carried = carriedOf(snapshot);
-    const now = monotonicNow();
-    return this.failedSteps
-      .filter((failure) => now - failure.at <= FAILED_STEP_MINUTES * 60_000)
-      .reverse()
-      .map(({ step, key, detail, objective, at, failures, carried: after, position }) => ({
-        step, key, detail, objective: objective.text, minutesAgo: Math.max(1, Math.round((now - at) / 60_000)), count: failures.filter((failed) => now - failed <= FAILED_STEP_MINUTES * 60_000).length,
-        changed: (after !== null && after !== carried) || (position !== null && snapshot.position !== null && Math.hypot(position.x - snapshot.position.x, position.y - snapshot.position.y, position.z - snapshot.position.z) >= MOVED_BLOCKS),
-      }));
-  }
-
   /** Ends an objective: an order is reported in character; its own objectives are remembered for the goal tier. */
   private finish(work: Work, outcome: "done" | "failed", detail: string): void {
     // An objective no longer on the stack was stopped: a late result of its step or its model call says nothing (BRN-08).
@@ -792,31 +497,15 @@ export class Agent {
     this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
     this.options.journal?.({ kind: "objective", event: "finished", text: objective.text, requester: objective.requester, outcome, detail });
     this.journalState(null);
+    if (work.situation !== null) { this.situations.closed(work, detail); return; }
     if (objective.requester === null) {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lastFailed = outcome === "failed" ? { objective: objective.text, reason: detail } : null;
-      this.lately.push(outcomeLine);
-      if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
-      this.memorize({ kind: "own_objective", outcome: outcomeLine });
+      this.memory.rememberOwnOutcome(outcomeLine);
+      this.memory.memorize({ kind: "own_objective", outcome: outcomeLine });
       return;
     }
-    void this.narrate(objective.text, outcome, detail, work.whisperTo);
-  }
-
-  /**
-   * Paces own-goal thinking (ADR-011): waits until the next call is allowed. False when an order to do now arrived
-   * meanwhile (orders and chat are never held back; an order taken on for later waits its turn).
-   */
-  private async waitForGoalBudget(): Promise<boolean> {
-    const interval = 60_000 / this.options.persona.settings.goalCallsPerMinute;
-    const orderOnTop = () => (this.stack.at(-1)?.objective.requester ?? null) !== null;
-    while (monotonicNow() < this.nextGoalCall) {
-      if (this.runSignal.aborted || orderOnTop()) return false;
-      await this.idle(Math.min(this.nextGoalCall - monotonicNow(), this.options.pollMs ?? DEFAULT_POLL_MS));
-    }
-    if (orderOnTop()) return false;
-    this.nextGoalCall = monotonicNow() + interval;
-    return true;
+    void this.narration.narrate(objective.text, outcome, detail, work.whisperTo);
   }
 
   /** Sleeps until `ms` pass, something is taken on, or the agent stops. */
@@ -844,248 +533,6 @@ export class Agent {
     this.options.log(`${wanted ? "may" : "never"} dig straight down: ${applied ? "set" : "not set yet"}`);
   }
 
-  /**
-   * The kind of work a finished step was, from game facts the runtime gives (block tags, hostile species, foods),
-   * learnt once per name. Null for errands, or when the facts cannot be read (the step still happened).
-   */
-  private async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null; readonly room: Pick<BotSnapshot, "inventory" | "foods"> | null }> {
-    try {
-      const after = await this.options.runtime.status();
-      for (const food of [...before.foods, ...after.foods]) this.foods.add(food.name);
-      const hostile = new Set([...before.mobs, ...after.mobs].filter((mob) => mob.hostile).map((mob) => mob.name));
-      const blocks = actions.flatMap((action) => action.tool === "collect_block" && typeof action.input.block_name === "string" ? [action.input.block_name] : []);
-      if (step.skill === "collect_block") blocks.push(step.block);
-      const facts = { tags: await this.tagsOf(blocks), hostile, foods: this.foods };
-      const carried = carriedOf(after);
-      return { activity: activityOf(step, actions, facts), spans: activityTimes(step, actions, facts, started, ended, phases), carried, position: after.position, room: { inventory: after.inventory, foods: after.foods } };
-    } catch (error) {
-      this.options.log(`could not tell what kind of work that was: ${String(error)}`);
-      return { activity: null, spans: [], carried: null, position: null, room: null };
-    }
-  }
-
-  /** What mining `block` gives is wanted too (game data): the fresh loot is not buried to make room (run 15 N5). */
-  private async wantMinedDrops(work: Work, block: string): Promise<void> {
-    work.wanted.add(block);
-    for (const drop of (await this.options.runtime.blockDrops([block]).catch(() => ({})))[block] ?? []) work.wanted.add(drop);
-  }
-
-  /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
-  private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
-    const house = this.building.unfinished;
-    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
-    return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
-  }
-
-  /** The game's block tags of these blocks, asked of the runtime once per name. */
-  private async tagsOf(blocks: readonly string[]): Promise<Readonly<Record<string, readonly string[]>>> {
-    const kinds = await this.kindsOf(blocks);
-    return Object.fromEntries(blocks.map((block) => [block, kinds.get(block)?.tags ?? []]));
-  }
-
-  /** The game's data for these names (an item that is no block has none), asking the runtime only for names not yet known. */
-  private async kindsOf(names: readonly string[]): Promise<ReadonlyMap<string, BlockKind | null>> {
-    const unknown = [...new Set(names)].filter((name) => !this.blockKindCache.has(name));
-    if (unknown.length > 0) {
-      const kinds = await this.options.runtime.blockKinds(unknown);
-      for (const name of unknown) this.blockKindCache.set(name, kinds[name] ?? null);
-    }
-    return this.blockKindCache;
-  }
-
-  /** Counts a step's time towards its activity; a long enough one is remembered across restarts. */
-  private spent(time: ActivityTime, remember: boolean): void {
-    this.times.push(time);
-    this.times.splice(0, this.times.length, ...lastOfPlay(this.times));
-    if (remember) this.memorize({ kind: "activity_time", time });
-  }
-
-  /** Things that could use doing now (the tasks a character looks for); the goal tier decides what to make of them. */
-  private async opportunities(snapshot: BotSnapshot, drawn: readonly Activity[]): Promise<Opportunity[]> {
-    const ownHome = this.places.some((place) => place.own === true);
-    const unfinished = this.building.unfinished;
-    let houseShortfall: Shortfall[] = [];
-    let smallHouse: OpportunityFacts["smallHouse"] = [];
-    let carriedBlocks: OpportunityFacts["carriedBlocks"] = [];
-    let temporaryHouse: OpportunityFacts["temporaryHouse"] = null;
-    try {
-      if (!ownHome && unfinished === null) {
-        houseShortfall = await this.houseShortfall(snapshot);
-        smallHouse = this.smallHouseRoles(snapshot);
-        carriedBlocks = await this.carriedBlocks(snapshot);
-      }
-      temporaryHouse = await this.temporaryHouseFacts();
-    } catch (error) {
-      this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
-    }
-    return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse }, drawn);
-  }
-
-  /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */
-  private smallHouseRoles(snapshot: BotSnapshot): OpportunityFacts["smallHouse"] {
-    const cells = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).cells;
-    return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
-  }
-
-  /** The most carried blocks that fill a whole cell (what `build` may use for a wall, floor or roof), at most five. */
-  private async carriedBlocks(snapshot: BotSnapshot): Promise<OpportunityFacts["carriedBlocks"]> {
-    const kinds = await this.kindsOf(snapshot.inventory.map((stack) => stack.name));
-    const counts = new Map<string, number>();
-    for (const stack of snapshot.inventory) if (kinds.get(stack.name)?.fullCube === true) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
-    return [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, MAX_CARRIED_BLOCKS);
-  }
-
-  /** Its temporary own house, which roles are temporary, and what improving them needs beyond what it carries. */
-  private async temporaryHouseFacts(): Promise<OpportunityFacts["temporaryHouse"]> {
-    const place = this.temporaryHouse();
-    const house = place?.house;
-    if (house === undefined) return null;
-    const style = styleOrDefault(house.style);
-    const roles = temporaryRoles(house.materials, style);
-    const missing = shortfall(improvement(style, house, roles).bill, (await this.options.runtime.status()).inventory);
-    return {
-      door: house.door,
-      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] })),
-      shortfall: await this.withActivities(missing),
-    };
-  }
-
-  /** What a small house in its own style needs beyond what it carries, each with the work that gets it. */
-  private async houseShortfall(snapshot: BotSnapshot): Promise<Shortfall[]> {
-    const bill = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).bill;
-    return this.withActivities(shortfall(bill, snapshot.inventory));
-  }
-
-  /** Each missing material with the work that gets it (as `get_items` would); the ones no work gets are left out. */
-  private async withActivities(items: readonly MaterialCount[]): Promise<Shortfall[]> {
-    const missing: Shortfall[] = [];
-    for (const { item, count } of items) {
-      let activity = this.itemActivities.get(item);
-      if (activity === undefined) {
-        const how = await obtainedBy(this.options.runtime, item);
-        activity = how.way === "gather"
-          ? gatheringActivity(how.block, { tags: await this.tagsOf([how.block]), hostile: new Set(), foods: this.foods })
-          : how.way === "craft" || how.way === "smelt" ? "crafting" : how.way === "farm" ? "farming" : how.way === "hunt" ? "hunting" : null;
-        this.itemActivities.set(item, activity);
-      }
-      if (activity !== null) missing.push({ item, count, activity });
-    }
-    return missing;
-  }
-
-  /** Its latest own house that still has temporary parts: the latest note of each place name counts, an improved one no longer. */
-  private temporaryHouse(): KnownPlace | null {
-    const latest = new Map<string, KnownPlace>();
-    for (const place of this.places) latest.set(place.name, place);
-    return [...latest.values()].reverse().find((place) => place.own === true && Object.keys(place.house?.materials ?? {}).length > 0) ?? null;
-  }
-
-  private learnPlace(place: KnownPlace): void {
-    this.options.log(`known place: ${place.name} (${place.detail})`);
-    this.places.push(place);
-    if (this.places.length > KNOWN_PLACES) this.places.splice(0, this.places.length - KNOWN_PLACES);
-    this.memorize({ kind: "place", place });
-  }
-
-  private learnFarm(farm: KnownFarm): void {
-    this.options.log(`farm: ${farm.crop} ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z} (${farm.state.planted} planted)`);
-    const index = this.farms.findIndex((known) => known.centre.x === farm.centre.x && known.centre.y === farm.centre.y && known.centre.z === farm.centre.z);
-    if (index >= 0) this.farms.splice(index, 1);
-    this.farms.push(farm);
-    if (this.farms.length > KNOWN_FARMS) this.farms.splice(0, this.farms.length - KNOWN_FARMS);
-    this.memorize({ kind: "farm", farm });
-  }
-
-  /** The areas protected in this world's bot data, so the models know them from the first prompt. */
-  private async recallAreas(): Promise<void> {
-    try {
-      this.areas.push(...await this.options.runtime.protectedRegions());
-      this.options.log(`knows ${this.areas.length} protected area(s)`);
-    } catch (error) {
-      this.options.log(`could not read its protected areas: ${String(error)}`);
-    }
-  }
-
-  /** What it knew before this brain started: the memories saved as notes in this world's bot data. */
-  private async recallMemory(): Promise<void> {
-    const limits = { places: KNOWN_PLACES, lately: OWN_MEMORY, farms: KNOWN_FARMS, times: ACTIVITY_MEMORY };
-    try {
-      const rows = await this.options.runtime.queryBotData(recallQuery(this.options.persona.username, limits));
-      const recalled = recall(rows.map((row) => String(row[1] ?? "")), limits);
-      this.places.push(...recalled.places);
-      this.lately.push(...recalled.lately);
-      this.farms.push(...recalled.farms);
-      for (const time of recalled.times) this.spent(time, false);
-      this.building.unfinished = recalled.unfinished;
-      this.savedUnfinished = JSON.stringify(recalled.unfinished);
-      const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
-      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}`);
-    } catch (error) {
-      this.options.log(`could not recall its memory: ${String(error)}`);
-    }
-  }
-
-  /**
-   * Deletes its activity-time notes older than its last hour of play (spec 2026-10-04-activity-time-travel-
-   * terraforming: only the last hour is kept), at start and then every {@link ROTATE_EVERY_MS}.
-   */
-  private async rotateActivityNotes(): Promise<void> {
-    this.rotatedAt = monotonicNow();
-    try {
-      const rows = await this.options.runtime.queryBotData(activityNotesQuery(this.options.persona.username));
-      const stale = staleActivityNotes(rows, RECENT_MINUTES);
-      for (let start = 0; start < stale.length; start += DELETE_BATCH) {
-        const outcome = await this.body.act("note_delete", { note_ids: stale.slice(start, start + DELETE_BATCH) }, "Forget what is older than my last hour of play.");
-        if (outcome.status !== "succeeded") {
-          this.options.log(`could not forget old activity notes (${outcome.status}): ${outcome.error ?? ""}`);
-          return;
-        }
-      }
-      if (stale.length > 0) this.options.log(`forgot ${stale.length} activity note(s) older than its last hour of play`);
-    } catch (error) {
-      this.options.log(`could not forget old activity notes: ${String(error)}`);
-    }
-  }
-
-  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). */
-  private memorize(memory: Memory): void {
-    this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
-      .then((outcome) => {
-        if (outcome.status !== "succeeded") this.options.log(`could not save a memory (${outcome.status}): ${outcome.error ?? ""}`);
-      })
-      .catch((error: unknown) => this.options.log(`could not save a memory: ${String(error)}`));
-  }
-
-  /**
-   * A skill started something new for an order: the chat tier may say it, at most once per
-   * `settings.narrateEverySeconds` (counted from the reply that took the order on) and never twice for the same thing.
-   */
-  private progress(work: Work, fact: string): void {
-    // A step that outlives its stop may still report (BRN-08): the order was stopped, nothing is told about it.
-    if (!this.stack.includes(work) || fact === work.lastFact) return;
-    work.lastFact = fact;
-    this.options.log(`  now: ${fact}`);
-    const asked = monotonicNow() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
-    this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
-    if (!asked) return;
-    work.spokenAt = monotonicNow();
-    void this.narrate(work.objective.text, "progress", fact, work.whisperTo, () => this.stack.includes(work));
-  }
-
-  /**
-   * Has the chat tier tell the players about an order: how it ended, or what it does now. `stillOn`: asked when the
-   * line comes back, a line about an order stopped meanwhile is dropped (flavour text, never retried: BRN-11).
-   */
-  private async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string, whisperTo: string | null, stillOn: () => boolean = () => true): Promise<void> {
-    if (this.runSignal.aborted) return;
-    try {
-      const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);
-      if (stillOn()) this.speak(line, undefined, undefined, whisperTo);
-    } catch (error) {
-      this.options.log(`narration failed: ${String(error)}`);
-    }
-  }
-
   private journalObjective(event: "taken" | "queued" | "own", objective: Objective): void {
     this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester, purpose: objective.purpose });
     this.journalState(null);
@@ -1098,22 +545,20 @@ export class Agent {
 
   /** "stop": everything on the stack ends, its own goal included. */
   private stopAll(): void {
-    for (const work of this.stack) work.step?.abort();
-    this.stack.length = 0;
+    this.situations.stopFor(null);
+    const removed = [...this.stack];
+    stopAll(this.stack);
+    for (const work of removed) this.situations.closed(work, "stopped");
     this.journalState(null);
     this.wake?.();
   }
 
-  /**
-   * "stop" from a player: the orders that player gave and the character's own goals end, the orders of
-   * other players stay on the stack (review R18).
-   */
+  /** "stop" from a player: only that player's share of the stack ends (see `stopWorkOf`). */
   private stopWorkOf(speaker: string): void {
-    const name = speaker.toLowerCase();
-    const ends = ({ objective }: Work) => objective.requester === null || objective.requester.toLowerCase() === name;
-    for (const work of this.stack.filter(ends)) work.step?.abort();
-    const kept = this.stack.filter((work) => !ends(work));
-    this.stack.splice(0, this.stack.length, ...kept);
+    this.situations.stopFor(speaker);
+    const before = [...this.stack];
+    stopWorkOf(this.stack, speaker);
+    for (const work of before) if (!this.stack.includes(work)) this.situations.closed(work, `stopped by ${speaker}`);
     this.journalState(null);
     this.wake?.();
   }
@@ -1147,11 +592,4 @@ export class Agent {
     const index = this.history.indexOf(line);
     if (index !== -1) this.history[index] = { ...line, to };
   }
-}
-
-/** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
-function minutesAgo(iso: string): string {
-  const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
-  if (!Number.isFinite(minutes)) return "some time ago";
-  return minutes < 1 ? "just now" : minutes < 120 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
 }

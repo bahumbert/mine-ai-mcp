@@ -1,0 +1,43 @@
+template: ../../templates/flat-single-action.yaml
+name: shelter-off-centre-drop-in
+tags: [regression]
+description: >-
+  The step-in of the shelter flow (plan 2026-11-07-p4-05a-shelter T3a): the bot stands at x 0.85 over the edge of the
+  cell it digs, faces the middle of the hole (yaw pi/2: forward is -x; `look` at a cell takes whole block numbers, so
+  angles) and holds `forward` for 2 physics ticks (ceil(0.35 / 0.2)). It must end inside the hole, feet at y -60 in
+  the middle of cell 0.
+
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+
+geometry:
+  - fill: { block: bedrock, from: [-6, -64, -6], to: [6, -64, 6] }
+  - fill: { block: dirt, from: [-3, -63, -3], to: [3, -60, 3] }
+
+players:
+  - name: Actor
+    pos: [0.85, -59, 0.5]
+    inventory:
+      - { item: dirt, count: 4 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
+    # Let the dig settle for at least 20 server ticks before the step-in.
+    - { action: raw_action, waitServerTicks: 20, input: { operation: look, yaw: 1.5707963267948966, pitch: 0 } }
+    - { action: raw_action, input: { operation: control, state: forward, ticks: 2 } }
+    # The fall takes a few ticks after the step: the goal is read only after them (run 3 of 3 ended mid-fall, 2026-11-08).
+    # Server ticks, not client ticks (plan 2026-11-15-scenario-ticks P6). At 5 tps this scenario stays red: the server answers the fall with position corrections (P1 open, 2026-11-15).
+    - { action: raw_action, waitServerTicks: 20, input: { operation: look, yaw: 1.5707963267948966, pitch: 0 } }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: reach, who: Actor, pos: [0.5, -60, 0.5], radius: 0.5 }
+    - { kind: completion, who: Actor }

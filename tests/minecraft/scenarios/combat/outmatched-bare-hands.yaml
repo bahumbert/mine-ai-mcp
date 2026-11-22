@@ -1,0 +1,31 @@
+template: ../../templates/combat-assessment.yaml
+
+name: outmatched-bare-hands
+tags: [acceptance, regression]
+description: >-
+  Bare hands against a normal-difficulty zombie must produce an outmatched evade,
+  survive twenty seconds, and then finish collecting a nearby log.
+
+# The next action places its log beside the evade endpoint, including when the action fails or the client exits.
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -64 -60 -64 64 -59 64 air"
+
+params:
+  mob: zombie
+  response: evade
+  reason: outmatched
+  observeSeconds: 20
+  nextAction:
+    action: collect_block
+    input: { block_name: oak_log, count: 1, scaffold: false }
+    logMin: [-64, -60, -64]
+    logMax: [64, -60, 64]
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: survive, who: Actor, seconds: 20 }
+    - { kind: hasItem, who: Actor, item: oak_log, count: 1 }
+    - { kind: completion, who: Actor }

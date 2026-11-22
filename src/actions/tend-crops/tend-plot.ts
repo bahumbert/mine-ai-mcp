@@ -21,6 +21,8 @@ export interface CellBlock {
 export interface PlotFacts {
   /** Whether the crop is ripe; null when the block is not a crop. */
   isRipe(block: CellBlock): boolean | null;
+  /** The age a crop block is ripe at (the loot table's, else its last age); null when the block is not a crop. */
+  ripeAge(blockName: string): number | null;
   /** The item a crop is planted from (an unripe crop's drop); null when not a crop. */
   seedOf(blockName: string): string | null;
   /** Whether a player clears this plant off soil (the game's replaceable plants and flowers, never a sapling). */
@@ -38,6 +40,13 @@ export interface FarmCell {
 /** Why a till did not change the soil: no hoe in hand, the use failed, it went out but the server was not seen to answer, or it was answered and the block stayed. */
 export type TillFailure = { readonly kind: "no hoe" } | { readonly kind: "error"; readonly error: string } | { readonly kind: "unchanged" } | { readonly kind: "unconfirmed" };
 
+/**
+ * Why a seed's use grew nothing: none of the item is carried, the use failed before or without an answer (`error`: refused,
+ * thrown), it went out but the server was not seen to answer in time (`unconfirmed`: the crop may still arrive), or the
+ * server clock moved on far enough and nothing grew (`unchanged`: the only answer that teaches).
+ */
+export type PlantFailure = { readonly kind: "none carried" } | { readonly kind: "error"; readonly error: string } | { readonly kind: "unconfirmed" } | { readonly kind: "unchanged" };
+
 /** The physical gestures; each answers null when done, else why not. */
 export interface FarmBody {
   read(x: number, y: number, z: number): CellBlock | null;
@@ -47,8 +56,8 @@ export interface FarmBody {
   breakBlock(cell: FarmCell): Promise<string | null>;
   /** Use the best carried hoe on the soil's top face; null when the soil changed, else why not. */
   till(soil: FarmCell): Promise<TillFailure | null>;
-  /** Use one `item` on the farmland's top face; done when something grows above it. */
-  plant(soil: FarmCell, item: string): Promise<string | null>;
+  /** Use one `item` on the farmland's top face; null when something grows above it, else why not. */
+  plant(soil: FarmCell, item: string): Promise<PlantFailure | null>;
   /** Pick up what the breaks dropped on and around the plot; `left`: the names of the drops it could not get. */
   collectDrops(): Promise<{ readonly left: readonly string[] }>;
   carried(item: string): number;
@@ -111,14 +120,21 @@ interface TendState {
   readonly observe: (progress: TendProgress) => void;
   readonly counts: { harvested: number; cleared: number; tilled: number; planted: number };
   readonly hoeCarriedAtStart: boolean;
+  /** The crops standing when the request began, read once here: a resumed attempt finds the plot already worked on. */
+  readonly before: TendEvidence["before"];
   readonly tilledSoil: Record<string, number>;
   readonly till: { hoeGone: boolean; untillable: Record<string, TendCell[]> };
   /** The first carried count of each item the request touched, so `gained` covers every attempt. */
   readonly inventoryBefore: Map<string, number>;
   /** The seed each harvested cell gave, by "x,z", for replanting it. */
   readonly seedFor: Map<string, string>;
-  /** Items that did not take when planted: not tried again. */
+  /** Items the server refused at two different cells with no planting of them between: not tried again this request. */
   readonly unplantable: Set<string>;
+  /** Per item and cell (by "x,z"), the last refusal's attempt sequence: one place still counts once across resumes. */
+  readonly refusedAt: Map<string, Map<string, number>>;
+  plantSeq: number;
+  /** Unanswered plantings kept across attempts, until a crop is seen or the empty cell is tried again. */
+  readonly pendingPlants: Map<string, { item: string; seq: number; cell: TendCell }>;
   skipped: Record<string, TendCell[]>;
   settled: Set<string>;
   dropsLeft: readonly string[];
@@ -163,6 +179,7 @@ function evidenceOf(a: TendAttempt): TendEvidence {
     gained: Object.fromEntries([...state.inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
     skipped: state.skipped,
     dropsLeft: [...state.dropsLeft],
+    before: state.before,
     after: plotAfter(state.request, state.cells, body, state.facts),
   };
 }
@@ -177,16 +194,20 @@ export function beginTendPlot(
   facts: PlotFacts,
   observe: (progress: TendProgress) => void = () => {},
 ): { attempt(body: FarmBody, stop?: () => string | null): Promise<TendOutcome> } {
+  const cells = serpentine(request);
   const state: TendState = {
-    request, facts, observe,
-    cells: serpentine(request),
+    request, facts, observe, cells,
     counts: { harvested: 0, cleared: 0, tilled: 0, planted: 0 },
     hoeCarriedAtStart: body.hasHoe(),
+    before: { crops: cropsOf(request, cells, body, facts).crops },
     tilledSoil: {},
     till: { hoeGone: false, untillable: {} },
     inventoryBefore: new Map(),
     seedFor: new Map(),
     unplantable: new Set(),
+    refusedAt: new Map(),
+    plantSeq: 0,
+    pendingPlants: new Map(),
     skipped: {},
     settled: new Set(),
     dropsLeft: [],
@@ -291,10 +312,44 @@ function plantChoices(state: TendState, cell: TendCell): string[] {
 
 /**
  * Then every cell tilled and planted: with the item asked for, else (a cell harvested here) the crop's own seed. An
- * item that does not take is not tried again (live 2026-10-03: asked to plant "wheat", the harvest, not the seed,
- * all 13 harvested cells stayed empty). Returns a stall reason, else null.
+ * item the server answers "nothing grew" at two different cells (no planting of it between) is not tried again (live
+ * 2026-10-03: asked to plant "wheat", the harvest, not the seed, all 13 harvested cells stayed empty); one answer, a
+ * failed use and an unanswered use teach nothing. Every cell left is reported with its reason. Returns a stall reason, else null.
  */
 async function plantingPass(a: TendAttempt): Promise<string | null> {
+  try {
+    return await plantCells(a);
+  } finally {
+    reconcilePending(a);
+  }
+}
+
+/** Count an observed planting and discard only the refusals older than that use, even when its answer arrived late. */
+function plantSucceeded(state: TendState, item: string, seq: number): void {
+  state.counts.planted += 1;
+  const refusals = state.refusedAt.get(item);
+  if (refusals !== undefined) {
+    for (const [key, refusedSeq] of refusals) if (refusedSeq < seq) refusals.delete(key);
+  }
+  if ((refusals?.size ?? 0) < REFUSALS_TO_SWITCH_OFF) state.unplantable.delete(item);
+  report(state);
+}
+
+/** A pending use whose crop now stands counts once, and no longer leaves the cell skipped as not confirmed. */
+function reconcilePending(a: TendAttempt): void {
+  const { state, body } = a;
+  for (const [key, { item, seq, cell }] of state.pendingPlants) {
+    const above = body.read(cell.x, state.request.y + 1, cell.z);
+    if (above === null || state.facts.isRipe(above) === null) continue;
+    plantSucceeded(state, item, seq);
+    state.pendingPlants.delete(key);
+    const stillEmpty = state.skipped[PLANT_NOT_CONFIRMED]?.filter((skipped) => cellKey(skipped) !== key);
+    if (stillEmpty?.length) state.skipped[PLANT_NOT_CONFIRMED] = stillEmpty;
+    else delete state.skipped[PLANT_NOT_CONFIRMED];
+  }
+}
+
+async function plantCells(a: TendAttempt): Promise<string | null> {
   const { state, body } = a;
   for (const cell of state.cells) {
     if (state.settled.has(cellKey(cell))) continue;
@@ -370,26 +425,52 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
       why = `no ${item} left`;
       continue;
     }
-    let failed: string | null;
+    const seq = ++state.plantSeq;
+    state.pendingPlants.delete(cellKey(cell));
+    let failed: PlantFailure | null;
     try {
       failed = await body.plant(soilOf(state, cell), item);
     } catch (error) {
       const above = body.read(cell.x, state.request.y + 1, cell.z);
-      if (above !== null && state.facts.isRipe(above) !== null) state.counts.planted += 1;
+      if (above !== null && state.facts.isRipe(above) !== null) plantSucceeded(state, item, seq);
       throw error;
     }
     if (failed === null) {
-      state.counts.planted += 1;
-      report(state);
+      plantSucceeded(state, item, seq);
       return null;
     }
-    state.unplantable.add(item);
-    why = `${item} cannot be planted`;
+    if (failed.kind === "none carried") {
+      why = `no ${item} left`;
+      continue;
+    }
+    // An error or an unanswered use teaches nothing and tries no other item on this cell: only the server's answer does.
+    if (failed.kind === "error") return `plant failed: ${failed.error}`;
+    if (failed.kind === "unconfirmed") {
+      state.pendingPlants.set(cellKey(cell), { item, seq, cell });
+      return PLANT_NOT_CONFIRMED;
+    }
+    why = noteRefusal(a, item, cell, seq);
   }
-  return why;
+  // Every item is off (a till cell was tilled before this): the cell is reported, never left with no reason.
+  return why ?? (state.request.plant === null ? null : `${state.request.plant} cannot be planted`);
+}
+
+/** The server answered that `item` grew nothing at `cell`: at two different cells the item is off for the request. Returns the skip reason. */
+function noteRefusal(a: TendAttempt, item: string, cell: TendCell, seq: number): string {
+  reconcilePending(a);
+  const { state } = a;
+  const cells = state.refusedAt.get(item) ?? new Map<string, number>();
+  state.refusedAt.set(item, cells.set(cellKey(cell), seq));
+  if (cells.size < REFUSALS_TO_SWITCH_OFF) return DID_NOT_TAKE(item);
+  state.unplantable.add(item);
+  return `${item} cannot be planted`;
 }
 
 const NO_HOE_LEFT = "no hoe left";
+const PLANT_NOT_CONFIRMED = "plant not confirmed (server behind)";
+const DID_NOT_TAKE = (item: string) => `${item} did not take`;
+/** The same answer at this many different cells: "a fact one bot learns for all needs repeated evidence" (`claude/rules/code-changes.md`). */
+const REFUSALS_TO_SWITCH_OFF = 2;
 const NO_HOE = "no hoe";
 const TILL_NOT_CONFIRMED = "till not confirmed (server behind)";
 
@@ -410,9 +491,29 @@ async function tillCell(body: FarmBody, soil: FarmCell, needsTill: () => boolean
   return needsTill() ? (failure ?? { kind: "unchanged" }) : null;
 }
 
-/** The plot as it stands now: crops by block and age, empty and dry farmland, water. */
+/**
+ * The crops standing on the plot's farmland by `<block> age <n>` (`ripe` appended when ripe), and the age each crop
+ * block is ripe at. One reading for the plot before the tend and the plot after it, so their keys are the same.
+ */
+function cropsOf(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, facts: PlotFacts): { crops: Record<string, number>; ripeAge: Record<string, number> } {
+  const standing = { crops: {} as Record<string, number>, ripeAge: {} as Record<string, number> };
+  for (const cell of cells) {
+    const soil = body.read(cell.x, request.y, cell.z);
+    const above = body.read(cell.x, request.y + 1, cell.z);
+    if (soil === null || above === null || !facts.isTilledSoil(soil)) continue;
+    const ripe = facts.isRipe(above);
+    if (ripe === null) continue;
+    const key = `${above.name} age ${String(above.properties.age)}${ripe ? " ripe" : ""}`;
+    standing.crops[key] = (standing.crops[key] ?? 0) + 1;
+    const ripeAge = facts.ripeAge(above.name);
+    if (ripeAge !== null) standing.ripeAge[above.name] = ripeAge;
+  }
+  return standing;
+}
+
+/** The plot as it stands now: crops by block and age with their ripe ages, empty and dry farmland, water. */
 function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, facts: PlotFacts): TendEvidence["after"] {
-  const after = { crops: {} as Record<string, number>, emptyFarmland: 0, dryFarmland: 0, water: 0 };
+  const after = { ...cropsOf(request, cells, body, facts), emptyFarmland: 0, dryFarmland: 0, water: 0 };
   for (const cell of cells) {
     const soil = body.read(cell.x, request.y, cell.z);
     const above = body.read(cell.x, request.y + 1, cell.z);
@@ -420,13 +521,7 @@ function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: 
     if (soil.liquid) after.water += 1;
     if (!facts.isTilledSoil(soil)) continue;
     if (Number(soil.properties.moisture ?? 7) < 7) after.dryFarmland += 1;
-    const ripe = facts.isRipe(above);
-    if (ripe === null) {
-      if (!above.breakable) after.emptyFarmland += 1;
-      continue;
-    }
-    const key = `${above.name} age ${String(above.properties.age)}${ripe ? " ripe" : ""}`;
-    after.crops[key] = (after.crops[key] ?? 0) + 1;
+    if (facts.isRipe(above) === null && !above.breakable) after.emptyFarmland += 1;
   }
   return after;
 }

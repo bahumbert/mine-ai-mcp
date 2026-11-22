@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
 import { placeBlock } from "../../../src/world/placement.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
@@ -31,9 +32,9 @@ export const run: MineAiScenario = async ({ bot, signal, log }) => {
       signal,
     };
     const before = count();
-    const started = Date.now();
+    const started = monotonicNow();
     const blocked = await placeBlock(bot, request);
-    const elapsedMs = Date.now() - started;
+    const elapsedMs = monotonicNow() - started;
     const packetCount = () => packets;
     const blockedPackets = packets;
     if (

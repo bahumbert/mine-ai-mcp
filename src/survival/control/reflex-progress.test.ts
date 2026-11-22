@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, listenerCounts } from "../../test-support/fake-bot/index.js";
-import { climbsBy, fallsUnder, observeBodyProgress, ReflexProgress, risesOver, turnsTrue, watchBodyTicks } from "./reflex-progress.js";
+import { climbsBy, fallsUnder, nearsBy, observeBodyProgress, ReflexProgress, risesOver, turnsTrue, watchBodyTicks } from "./reflex-progress.js";
+
+test("nearing marks a block gained, never pacing or a missing reading", () => {
+  for (const [values, expected] of [
+    [[5, 4.5, 4.1, 3.9, null, 5, 3.9, 2.8], [false, false, false, true, false, false, false, true]],
+    [[null, 5, 6, 5, 6], [false, false, false, false, false]],
+  ] as const) {
+    let value: number | null = null;
+    const sample = nearsBy(() => value, 1);
+    assert.deepEqual(values.map((next) => { value = next; return sample(); }), expected);
+  }
+});
 
 function fixture() {
   const { bot, combat } = createFakeBot();

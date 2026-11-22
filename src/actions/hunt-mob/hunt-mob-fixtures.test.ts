@@ -7,7 +7,7 @@ import { type HuntTarget } from "../../navigation/processes/hunting/hunt-process
 import type { CombatOutcome } from "../../survival/index.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { engagingCombat } from "../../test-support/combat.js";
-import { type FakeClock, type FakeEntitySpec, type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeEntitySpec, type FakeHarness, type FakeServerOptions, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { type HuntMobDependencies, type TargetEngagement } from "./hunt-mob.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
@@ -37,13 +37,14 @@ export function huntBot(
   targets: readonly EntitySpec[],
   inventory: { count: number },
   health = 20,
-  { dropName = "white_wool", clock }: { dropName?: string; clock?: FakeClock } = {},
+  { dropName = "white_wool", clock, server }: { dropName?: string; clock?: FakeClock; server?: FakeServerOptions } = {},
 ): Bot {
   const harness = createFakeBot({
     position: new Vec3(0, 64, 0),
     groundY: null,
     health,
     clock,
+    server,
     entities: Object.fromEntries(targets.map((target) => [target.id, target])),
   });
   const drops = carriedCountField(harness, dropName);

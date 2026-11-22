@@ -1,4 +1,4 @@
-// Runs one trial on a server under the wall-clock bounds: the arrangement mutex, the abort at goal timeout + slack, the lane's restore.
+// Runs one trial under a wall bound scaled by its server's tick rate, with an arrangement mutex and a bounded lane restore.
 import type { ArenaTrialOptions, ClientProvider, RunResult, Scenario } from "mine-labs";
 import { controlChunkOf, type Lane } from "../arena/lanes.ts";
 import type { ArrangementMutex } from "./arrangement-mutex.ts";
@@ -6,9 +6,16 @@ import type { ScenarioServerConfig } from "./config.ts";
 import type { MutexQueueMarks } from "./pool.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
-const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
+export const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
+/** Spec 2026-11-15-scenario-ticks open choice 1: twice the nominal game duration, plus the existing wall slack. */
+export const TRIAL_TICK_SLACK_FACTOR = 2;
 const WORLD_FLOOR_Y = -64;
 const WORLD_CEILING_Y = 319;
+
+/** Scale the goal's game seconds to wall time; null means the server's default 20 ticks/s. */
+export function trialWallBoundMs(timeoutSeconds: number, tickRate: number | null, slackMs: number, k: number): number {
+  return timeoutSeconds * 1000 * (20 / (tickRate ?? 20)) * k + slackMs;
+}
 
 export interface TrialRunInput {
   readonly server: ScenarioServer;
@@ -17,6 +24,8 @@ export interface TrialRunInput {
   readonly log: (message: string) => void;
   readonly signal: AbortSignal;
   readonly reuseServer: boolean;
+  /** The daemon's bound for a goal whose server clock stopped advancing. */
+  readonly goalStallMs: number;
   readonly arena?: ArenaTrialOptions;
   /** Hands over the arena restore to run after the trial (Mine Labs' `deferReset`). */
   readonly deferReset: (restore: (log: (message: string) => void) => Promise<void>) => void;
@@ -34,6 +43,8 @@ export interface TrialJob {
   readonly name: string;
   /** Already shifted for a lane. */
   readonly scenario: Scenario;
+  /** Carried from placement: a lane's scenario no longer has its server-wide tick-rate command. */
+  readonly tickRate: number | null;
   /** Null: the scenario runs alone on its own server at offset 0, with no arena. */
   readonly lane: Lane | null;
   readonly server: ScenarioServer;
@@ -54,7 +65,7 @@ export interface TrialEnd {
   /** `free`: the arena is certified clean; `quarantined`: not certified, never reuse; `held`: something may still be running there. */
   readonly lane: "free" | "quarantined" | "held";
   readonly serverSick: boolean;
-  /** The trial was aborted at goal timeout + slack. */
+  /** The trial was aborted at the rate-scaled goal wall bound plus slack. */
   readonly hitWallBound: boolean;
   /** A restore ran and finished. */
   readonly restored: boolean;
@@ -66,6 +77,9 @@ export interface TrialEnd {
   readonly arranged: boolean;
   /** Where the trial's time went; absent on an end the scheduler made without running the trial. */
   readonly phases?: TrialPhases;
+  readonly late?: true;
+  readonly threw?: string;
+  readonly settledAt?: number;
 }
 
 /** The time of one trial, phase by phase, in ms (a phase the trial never reached is 0). */
@@ -112,6 +126,7 @@ class TrialMarks {
   /** The first client was asked for: its `init` is written right after. */
   initSent(): void { this.#initAt ??= performance.now(); }
   settled(): void { this.#settledAt ??= performance.now(); }
+  settledAt(): number | undefined { return this.#settledAt; }
 
   phases(): TrialPhases {
     const now = performance.now();
@@ -139,11 +154,11 @@ export function phaseFields(phases: TrialPhases): string {
   return `mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs}${settle} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`;
 }
 
-function phasesLine(phases: TrialPhases): string {
+export function phasesLine(phases: TrialPhases): string {
   return `phases: ${phaseFields(phases)}`;
 }
 
-type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs"> };
+type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs" | "stallStopMs"> };
 
 function arenaOf(lane: Lane): ArenaTrialOptions {
   const { cell } = lane;
@@ -196,7 +211,7 @@ export async function executeTrial(deps: TrialDeps, job: TrialJob): Promise<Tria
   marks.settled();
   const phases = marks.phases();
   job.log(phasesLine(phases));
-  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases, arranged: marks.wasArranged() };
+  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases, arranged: marks.wasArranged(), settledAt: marks.settledAt() };
 }
 
 async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): Promise<Omit<TrialEnd, "mutexWaitMs" | "phases" | "arranged">> {
@@ -212,7 +227,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
   const queue = job.lane ? job.queue : undefined;
   const startedAt = Date.now();
   const wall = new AbortController();
-  const timeoutMs = (job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS) * 1000 + deps.config.trialSlackMs;
+  const timeoutMs = trialWallBoundMs(job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS, job.tickRate, deps.config.trialSlackMs, TRIAL_TICK_SLACK_FACTOR);
   const wallTimer = setTimeout(() => wall.abort("wall-clock bound"), timeoutMs);
   const signal = AbortSignal.any([job.signal, wall.signal]);
   const late = lateAfterAbort(signal, deps.config.restoreBoundMs);
@@ -220,6 +235,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
   try {
     const trial = deps.runTrial({
       server: job.server, scenario: job.scenario, runDir: job.runDir, log: job.log, signal, reuseServer: job.reuseServer,
+      goalStallMs: deps.config.stallStopMs,
       arena: job.lane ? arenaOf(job.lane) : undefined,
       deferReset: handed => { restore = handed; },
       onArranged: async () => { marks.arranged(); queue?.arranged(); release(); },
@@ -231,11 +247,11 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
     const hitWallBound = wall.signal.aborted;
     if (settled === "late") {
       const result = errorResult(job, startedAt, `trial did not settle within ${deps.config.restoreBoundMs} ms after it was aborted`);
-      return { result, lane: "held", serverSick: true, hitWallBound, restored: false };
+      return { result, lane: "held", serverSick: true, hitWallBound, restored: false, late: true };
     }
     if ("error" in settled) {
       const detail = settled.error instanceof Error ? settled.error.message : String(settled.error);
-      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false };
+      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false, threw: detail };
     }
     // A trial that failed before `onArranged` still holds its arrangement turn; its own restore must not wait behind it.
     release();

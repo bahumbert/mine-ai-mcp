@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { LAVA_SPREAD_REASON } from "../movements/policy.js";
 import { describeCalculationFailure } from "./process-events.js";
 
 /** What a model reads after a search that ran out of time or radius: the next move it has. */
@@ -99,6 +100,26 @@ test("a dead end at the start names the refusals counted there instead of claimi
   });
   assert.doesNotMatch(text, /dead end/);
   assert.match(text, /shut in at the start: 3 digs would open into water or lava, 1 refused by your rule against digging straight down, 1 under water$/);
+});
+
+test("a dead end at the start that digging off closes says so, and names no style rule", () => {
+  const text = describeCalculationFailure({
+    kind: "no_path",
+    search: { ...search, visited: 2, farthestVisited: 1, generated: 2, startRefusals: { dig_disabled: 8 } },
+    closest: { ...closest, position: { x: 0, y: -55, z: -1 }, withinStartBlocks: 1 },
+  });
+  assert.match(text, /shut in at the start: 8 not dug because this request has digging off$/);
+  assert.doesNotMatch(text, /digging straight down/);
+});
+
+test("a start whose exits lava is about to flow into says so, with the count", () => {
+  const text = describeCalculationFailure({
+    kind: "no_path",
+    search: { ...search, visited: 1, farthestVisited: 0, generated: 1, startRefusals: { [LAVA_SPREAD_REASON]: 4 } },
+    closest: { ...closest, position: { x: 3, y: 63, z: 0 }, withinStartBlocks: 3 },
+  });
+  assert.doesNotMatch(text, /dead end/);
+  assert.match(text, /shut in at the start: 4 exits lava is about to flow into$/);
 });
 
 test("a shore with an unreachable goal keeps its dead end even with a liquid refusal counted at the start", () => {

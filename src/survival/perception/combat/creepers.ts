@@ -2,20 +2,20 @@ import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import { z } from "zod";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 
 const explosionPosition = z.object({ x: z.number(), y: z.number(), z: z.number() });
 
 type Entity = Bot["entity"];
 export const CREEPER_CLEARANCE = 8;
 export const FUSE_UNWIND_TICKS = 30;
-export const isCreeper = (entity: Entity): boolean => entity.name === "creeper";
 export function isSwelling(bot: Bot, entity: Entity): boolean {
   const index = bot.registry.entitiesByName[entity.name ?? ""]?.metadataKeys?.indexOf("swell_dir") ?? -1;
   const direction: unknown = index >= 0 ? entity.metadata?.[index] : undefined;
   return direction === 1;
 }
 export function fusedThreats(bot: Bot, range: number): readonly Entity[] {
-  return Object.values(bot.entities).filter(entity => entity.isValid && isCreeper(entity) &&
+  return Object.values(bot.entities).filter(entity => entity.isValid && hasSelfExplosion(entity.name, bot.version) &&
     entity.position.distanceTo(bot.entity.position) <= range);
 }
 export interface CreeperObservation {

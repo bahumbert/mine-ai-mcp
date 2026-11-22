@@ -54,6 +54,7 @@ tick:
 goal:
   kind: all
   timeout: 150
+  stillTicks: 4280 # P4-29 a11 T8: longest passing still span 2136 ticks (20 tps 2133, 10 tps 2136; n 8 and 8); 2x rounded up to 20; the timeout governs (150 s = 3000 ticks).
   goals:
     - kind: entityCount
       entity: phantom

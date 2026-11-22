@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { lavaAt } from "../../test-support/lava-world.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
 import { LAVA_SPREAD_ESCAPE_COST, relaxedForEscape } from "../orchestration/escape-policy.js";
@@ -18,14 +19,6 @@ import { MemoryWorld } from "../world/memory-world.js";
 const { registry } = createFakeBot().bot;
 const FEET = { x: 0, y: 63, z: 0 };
 const FALLING = 8;
-
-function lavaAt(world: MemoryWorld, position: { x: number; y: number; z: number }, level: number): void {
-  world.load(position, {
-    stateId: registry.blocksByName.lava.minStateId + level,
-    collisionShapes: [],
-    traits: { empty: true, liquid: "lava", liquidSource: level === 0, liquidLevel: level, damaging: true },
-  });
-}
 
 function decide(world: MemoryWorld, dimension = "overworld") {
   const { bot } = createFakeBot({ dimension });
@@ -45,6 +38,7 @@ test("a cell whose head cell has a falling column landing beside it is avoided; 
   assert.equal(decide(landing).kind, "prohibited");
   // The state a settled stream leaves beside a step (scenario step-up-turn-beside-lava-stream): it reaches the body through the feet row.
   const settled = flatWorld();
+  settled.load({ x: 0, y: 63, z: -1 }, { stateId: 1 });
   lavaAt(settled, { x: 0, y: 64, z: -1 }, 2);
   assert.equal(decide(settled).kind, "allowed");
 });

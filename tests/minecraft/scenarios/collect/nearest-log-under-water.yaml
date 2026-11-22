@@ -1,0 +1,46 @@
+template: ../../templates/flat-single-action.yaml
+name: nearest-log-under-water
+tags: [regression]
+description: >-
+  Live 2026-11-07, run 34: the nearest oak_log the hint named lay 66 blocks under the sea, and the model walked
+  there. With no log within 8 blocks, a log at 20 blocks sits at the bottom of a walled basin under 5 water and a log at
+  30 blocks stands on grass: collect_block stops with NO_TARGET_IN_RANGE naming the drowned one as under water and the
+  dry one as the nearest not under water or roofed over.
+# The template clears x -16..20; this arena reaches x 40.
+reset:
+  - "fill -16 -59 -16 40 -40 16 air"
+  - "fill 17 -60 -3 23 -60 3 grass_block"
+
+geometry:
+  - fill: { block: grass_block, from: [-4, -60, -4], to: [36, -60, 4] }
+  # The basin: stone walls and floor around x 20, open top, water to the rim, one log on the floor.
+  - fill: { block: stone, from: [18, -60, -2], to: [22, -54, 2] }
+  - fill: { block: water, from: [19, -59, -1], to: [21, -54, 1] }
+  - setblock: { block: oak_log, at: [20, -59, 0] }
+  # The dry log, 30 blocks out, open to the sky.
+  - setblock: { block: oak_log, at: [30, -59, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_axe, count: 1 }
+
+params:
+  action: collect_block
+  input:
+    block_name: oak_log
+    count: 1
+    max_distance: 8
+  expect:
+    status: failed
+    # Distances are relative to the start, so a lane's shift does not change them; the cells are in world coordinates.
+    errorContains: " 20 blocks from the start (under water); the nearest not under water or roofed over is at "
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    # Nothing was mined: both logs stand.
+    - { kind: blocksAt, block: oak_log, positions: [[20, -59, 0], [30, -59, 0]] }
+    - { kind: completion }

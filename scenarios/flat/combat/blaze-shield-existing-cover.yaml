@@ -36,4 +36,5 @@ goal:
   timeout: 120
   goals:
     - { kind: kill, who: CoverBlaze, target: blaze }
+    - { kind: survive, who: CoverBlaze, seconds: 1 }
     - { kind: completion, who: CoverBlaze }

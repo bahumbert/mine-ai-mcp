@@ -1,0 +1,35 @@
+template: ../../templates/collect/single-action.yaml
+name: falling-column-trailing-edge
+tags: [regression]
+description: A coal under a sand column is dug from a body that stands 0.1 into the sand's column, so the sand must not land on the body (collect/coal-under-sand, 2026-11-16).
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: peaceful
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, randomTickSpeed: 0 }
+reset: ["fill -6 -63 -6 6 -48 6 air"]
+geometry:
+  - fill: { block: stone, from: [-4, -63, -4], to: [4, -60, 4] }
+  # A one-wide corridor (z -1..1, feet and head) inside a bedrock box; its coal sits above head height in the column
+  # z -1 and carries four sand blocks, hidden behind it, so the plan digs the coal first and the sand falls into the
+  # corridor cells of that column.
+  - fill: { block: bedrock, from: [-1, -59, -2], to: [1, -52, 2] }
+  - fill: { block: air, from: [0, -59, -1], to: [0, -58, 1] }
+  - setblock: { block: coal_ore, at: [0, -57, -1] }
+  - fill: { block: sand, from: [0, -56, -1], to: [0, -53, -1] }
+players:
+  - name: Collector
+    pos: [0.5, -59, -0.5]
+    inventory: [{ item: diamond_pickaxe, count: 1 }]
+params:
+  action: collect_block
+  input: { block_name: coal_ore, count: 1, scaffold: false }
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Collector, item: coal, count: 1 }
+    # The point of the fixture: `minecraft:in_wall` took a heart in the 2026-11-16 run.
+    - { kind: health, who: Collector, health: 20 }
+    - { kind: completion, who: Collector }

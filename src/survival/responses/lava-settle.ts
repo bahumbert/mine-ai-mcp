@@ -3,19 +3,20 @@ import type { Bot } from "mineflayer";
 import type { WorldView } from "../../navigation/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt, lavaFlowDelayTicks } from "../../world/lava-flow.js";
+import { serverPacedSignal } from "../../world/server-paced.js";
 import { airSupplyPoints, isBurning, isInFire, isInLava } from "../perception/body.js";
 import type { FireEscapeReason } from "../positioning/fire-escape.js";
-import { escapeFire, type FireEscapeOutcome } from "./fire.js";
+import { escapeFire, type FireEscapeOptions, type FireEscapeOutcome } from "./fire.js";
 
 /** Lava that has not changed for this many flow steps of world age is not spreading any more. */
 export const LAVA_SETTLE_FLOW_STEPS = 2;
-/** Wall clock bound on the wait: lava still changing after this long is left to the model. */
-export const LAVA_SETTLE_MAXIMUM_MS = 10_000;
+/** Server-tick bound on the wait, with wall and stopped-server backstops. */
+export const LAVA_SETTLE_MAXIMUM_TICKS = 200;
 /** Half the bar: the breath reflex still has time to act, but the lava wait must not use it up. */
 const LOW_AIR_POINTS = 10;
 
 /**
- * `settled`: no lava change for two flow steps (or none at all); `spreading`: still changing when the wall clock
+ * `settled`: no lava change for two flow steps (or none at all); `spreading`: still changing when the budget
  * ended the wait; `advancing`: lava is in the body or can spread into it on its next step (the escape runs again);
  * `endangered`: damage other than the burn was taken or air ran low; `died`: death or respawn.
  */
@@ -56,8 +57,10 @@ export async function awaitLavaSettled(
   bot: Bot,
   signal: AbortSignal,
   lastLavaChangeAge: () => number | null,
-  { maximumMs = LAVA_SETTLE_MAXIMUM_MS }: { maximumMs?: number } = {},
+  { maximumTicks = LAVA_SETTLE_MAXIMUM_TICKS, budget }: Pick<FireEscapeOptions, "maximumTicks" | "budget"> = {},
 ): Promise<LavaSettle> {
+  using ownedBudget = budget ? null : serverPacedSignal(bot, maximumTicks);
+  const limit = budget ?? ownedBudget!;
   const hurt = hurtWatch(bot);
   const verdict = (): LavaSettle | null => {
     if (bot.health <= 0) return "died";
@@ -67,32 +70,26 @@ export async function awaitLavaSettled(
     const last = lastLavaChangeAge();
     return last === null || bot.time.age - last >= LAVA_SETTLE_FLOW_STEPS * lavaFlowDelayTicks(bot) ? "settled" : null;
   };
-  // The wall clock and a death end the waits even when physics ticks have stopped (as escapeFire's do).
-  const ended = new AbortController();
-  const end = () => ended.abort();
-  let timedOut = false;
-  const wallClock = setTimeout(() => {
-    timedOut = true;
-    end();
-  }, maximumMs);
+  const died = new AbortController();
+  const end = () => died.abort();
   bot.once("death", end);
   bot.once("respawn", end);
-  const waits = AbortSignal.any([signal, ended.signal]);
-  const endedVerdict = (): LavaSettle => verdict() ?? (timedOut ? "spreading" : "died");
+  const ended = AbortSignal.any([died.signal, limit.signal]);
+  const waits = AbortSignal.any([signal, ended]);
+  const endedVerdict = (): LavaSettle => verdict() ?? (limit.end() !== null ? "spreading" : "died");
   try {
     for (;;) {
       signal.throwIfAborted();
       const now = verdict();
       if (now) return now;
-      if (ended.signal.aborted) return endedVerdict();
+      if (ended.aborted) return endedVerdict();
       await waitForPhysicsTicks(bot, 1, waits);
     }
   } catch (error) {
     signal.throwIfAborted();
-    if (!ended.signal.aborted) throw error;
+    if (!ended.aborted) throw error;
     return endedVerdict();
   } finally {
-    clearTimeout(wallClock);
     hurt.stop();
     bot.off("death", end);
     bot.off("respawn", end);
@@ -105,10 +102,16 @@ export interface EscapeAndSettle {
   readonly settle: Exclude<LavaSettle, "advancing"> | null;
 }
 
+/** Select the current danger for an escape restarted by the settle wait. */
+function rerunFireReason(bot: Bot): FireEscapeReason {
+  if (advancingLavaAt(bot)) return "advancing_lava";
+  return "contact";
+}
+
 /**
  * Leave the fire, then wait for nearby lava to settle. Lava that moves at the body during the wait (the settle says
  * `advancing`) runs the escape again, with the reason read from the cells now, inside the same hold and the same
- * `maximumMs` clock: when the clock is out, the wait answers `spreading` and the action is returned with a message.
+ * server-tick budget: when it is spent, the wait answers `spreading` and the action is returned with a message.
  */
 export async function escapeThenSettle(
   bot: Bot,
@@ -116,20 +119,23 @@ export async function escapeThenSettle(
   signal: AbortSignal,
   reason: FireEscapeReason,
   lastLavaChangeAge: () => number | null,
-  { maximumMs = LAVA_SETTLE_MAXIMUM_MS }: { maximumMs?: number } = {},
+  { maximumTicks = LAVA_SETTLE_MAXIMUM_TICKS, footing, record }: FireEscapeOptions = {},
 ): Promise<EscapeAndSettle> {
-  let escape = await escapeFire(bot, world, signal, reason);
-  const deadline = performance.now() + maximumMs;
+  let escape = await escapeFire(bot, world, signal, reason, { footing, record });
+  if (escape !== "escaped") return { escape, settle: null };
+  using budget = serverPacedSignal(bot, maximumTicks);
   for (;;) {
     if (escape !== "escaped") return { escape, settle: null };
-    const left = deadline - performance.now();
-    if (left <= 0) return { escape, settle: "spreading" };
-    const settle = await awaitLavaSettled(bot, signal, lastLavaChangeAge, { maximumMs: left });
+    if (budget.end() !== null) return { escape, settle: "spreading" };
+    const settle = await awaitLavaSettled(bot, signal, lastLavaChangeAge, { budget });
     if (settle !== "advancing") return { escape, settle };
-    const leftToEscape = deadline - performance.now();
-    if (leftToEscape <= 0) return { escape, settle: "spreading" };
-    escape = await escapeFire(bot, world, signal, advancingLavaAt(bot) ? "advancing_lava" : "contact", {
-      maximumMs: leftToEscape,
+    if (budget.end() !== null) return { escape, settle: "spreading" };
+    escape = await escapeFire(bot, world, signal, rerunFireReason(bot), {
+      budget,
+      footing, record,
     });
+    // A rerun shares the settle budget; expiry out of contact is spreading, not a failed escape (2026-11-18).
+    if (escape === "timed_out" && !isInLava(bot) && !isInFire(bot))
+      return { escape: "escaped", settle: "spreading" };
   }
 }

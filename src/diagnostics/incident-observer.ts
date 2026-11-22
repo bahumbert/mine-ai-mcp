@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { IncidentReference, IncidentRetention, IncidentTrigger } from "../bot-data/incident-log.js";
 import { writeIncidentArtifact } from "../bot-data/incident-log.js";
-import type { NavigationRuntime } from "../navigation/index.js";
+import type { NavigationEvent, NavigationRuntime } from "../navigation/index.js";
 import { deathMessage } from "../runtime/player-events.js";
 import type { ReflexLimitKind } from "../session/abort.js";
 import type { ActionRunnerStatus } from "../session/action-runner.js";
@@ -12,6 +12,7 @@ import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import type { CombatPerception } from "../survival/perception/combat/observations.js";
 import type { CombatPositionPlan } from "../survival/positioning/combat/geometry.js";
 import type { FootingRecoverySnapshot } from "../survival/responses/footing.js";
+import { isShield, OFF_HAND_SLOT } from "../survival/weapons/equipment.js";
 import { monotonicNow } from "../utils/index.js";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { damageSourceName } from "../world/damage-registry.js";
@@ -75,6 +76,36 @@ const observedBoolean = (entity: object, field: string): boolean | null => {
   return typeof value === "boolean" ? value : null;
 };
 
+const ENTITY_SAMPLE_TICKS = 5;
+
+/** Read the player's collision cells without treating partial blocks as cubes. */
+function collisionCells(position: { x: number; y: number; z: number }, world: NavigationRuntime["world"]) {
+  const cells: { x: number; y: number; z: number; block: ReturnType<NavigationRuntime["world"]["blockAt"]> }[] = [];
+  for (let x = Math.floor(position.x - 0.3); x <= Math.floor(position.x + 0.3); x++) {
+    for (let z = Math.floor(position.z - 0.3); z <= Math.floor(position.z + 0.3); z++) {
+      for (let y = Math.floor(position.y) - 1; y <= Math.floor(position.y + 1.8); y++) {
+        cells.push({ x, y, z, block: world.blockAt(x, y, z) });
+      }
+    }
+  }
+  return cells;
+}
+
+/** Capture nearby threats and approaching projectiles within thirty-two blocks. */
+function nearbyEntities(bot: Bot) {
+  const position = bot.entity.position;
+  return Object.values(bot.entities)
+    .filter((entity) =>
+      Math.hypot(entity.position.x - position.x, entity.position.y - position.y, entity.position.z - position.z) <= 32)
+    .map((entity) => ({
+      id: entity.id,
+      name: entity.name,
+      position: vector(entity.position),
+      velocity: vector(entity.velocity),
+      projectile: projectileSnapshot(bot, entity),
+    }));
+}
+
 export interface IncidentObserverOptions {
   readonly survival?: () => SurvivalStatus;
   readonly directory: string;
@@ -95,6 +126,100 @@ export interface IncidentObserverOptions {
   readonly published: (reference: IncidentReference) => void;
 }
 
+interface SearchCompute {
+  readonly runId: string;
+  slices: number;
+  computeMs: number;
+  readonly firstAt: number;
+  readonly admissionObserved: boolean;
+  lastAt: number;
+  finishedSlices?: number;
+}
+
+/** Runtime diagnostics can capture the exposed recorder directly, so every capture snapshots open searches. */
+class NavigationIncidentRecorder extends IncidentRecorder {
+  snapshotSearches: () => void = () => undefined;
+
+  override capture(...args: Parameters<IncidentRecorder["capture"]>) {
+    this.snapshotSearches();
+    return super.capture(...args);
+  }
+}
+
+/** Retain search timing without flooding the incident ring with every slice (combat P1 T3, 2026-11-09). */
+class NavigationIncidentHistory implements Disposable {
+  readonly #searches = new Map<string, SearchCompute>();
+  readonly #unsubscribe: () => void;
+
+  constructor(
+    navigation: Pick<NavigationRuntime, "onEvent">,
+    private readonly recorder: IncidentRecorder,
+    private readonly owner: IncidentObserverOptions["owner"],
+    private readonly dimension: () => string,
+  ) {
+    this.#unsubscribe = navigation.onEvent(event => this.#record(event));
+  }
+
+  #record(event: NavigationEvent): void {
+    const now = monotonicNow();
+    if (event.kind === "search_started") {
+      this.#finishRun(event.runId, event.kind);
+      this.#searches.set(event.searchId, { runId: event.runId, slices: 0, computeMs: 0, firstAt: now, lastAt: now, admissionObserved: true });
+    }
+    if (event.kind === "search_slice") {
+      const search: SearchCompute = this.#searches.get(event.searchId) ??
+        { runId: event.runId, slices: 0, computeMs: 0, firstAt: now, lastAt: now, admissionObserved: false };
+      search.slices += 1;
+      // Navigation emits cumulative compute; summing those totals would count earlier slices again.
+      search.computeMs = event.computeMs;
+      search.lastAt = now;
+      this.#searches.set(event.searchId, search);
+      if (search.finishedSlices !== undefined && search.slices >= search.finishedSlices)
+        this.#write(event.searchId, "search_finished");
+      return;
+    }
+    if (event.kind === "search_finished") {
+      const search = this.#searches.get(event.searchId);
+      // Navigation emits terminal evidence before the final slice (navigation-run.ts, 2026-11-09).
+      if (search) search.finishedSlices = event.counts.slices;
+      if (search && search.slices >= event.counts.slices) this.#write(event.searchId, event.kind);
+    }
+    // Route IDs are made from their search ID; a continuation may already be admitted before this commit.
+    if (event.kind === "route_committed") this.#write(event.planId.split(":route:")[0]!, event.kind);
+    if (event.kind === "calculation_failed" || event.kind === "run_settled")
+      this.#finishRun(event.runId, event.kind);
+    if (event.kind === "world_change" && event.classification === "irrelevant") return;
+    if (event.kind === "route_committed") {
+      this.recorder.retainPlan({ ...this.owner(), dimension: this.dimension(), event });
+      const { plan, ...summary } = event;
+      this.recorder.record("navigation", { ...this.owner(), event: summary });
+      return;
+    }
+    this.recorder.record("navigation", { ...this.owner(), event });
+  }
+
+  #write(searchId: string, reason: string): void {
+    const search = this.#searches.get(searchId);
+    if (search?.slices) this.recorder.record("navigation", {
+      event: { kind: "search_compute", searchId, ...search, reason, endedAt: monotonicNow() },
+    });
+    if (reason !== "capture") this.#searches.delete(searchId);
+  }
+
+  #finishRun(runId: string, reason: string): void {
+    for (const [id, search] of this.#searches) if (search.runId === runId) this.#write(id, reason);
+  }
+
+  capture(): void {
+    for (const id of this.#searches.keys()) this.#write(id, "capture");
+  }
+
+  [Symbol.dispose](): void {
+    this.#unsubscribe();
+    for (const id of this.#searches.keys()) this.#write(id, "observer_closed");
+  }
+}
+
 /** Passive runtime observations. No debug switch, controls, or raw packet dumps. */
 export function observeIncidents(
   bot: Bot,
@@ -102,7 +227,7 @@ export function observeIncidents(
   options: IncidentObserverOptions,
 ) {
   using listeners = new DisposableStack();
-  const recorder = new IncidentRecorder(
+  const recorder = new NavigationIncidentRecorder(
     { ...options.identity, runtimeId: randomUUID(), hostPid: process.pid, minecraftVersion: bot.version },
     ({ trigger, requestId, contents, precedingRequestId }) =>
       writeIncidentArtifact(options.directory, trigger, requestId, contents, precedingRequestId, options.retention),
@@ -110,6 +235,8 @@ export function observeIncidents(
     undefined,
     () => (options.survival ? { survival: options.survival() } : {}),
   );
+  const navigationHistory = listeners.use(new NavigationIncidentHistory(navigation, recorder, options.owner, () => bot.game.dimension));
+  recorder.snapshotSearches = () => navigationHistory.capture();
   let previous: { atMs: number; dimension: string; position: { x: number; y: number; z: number } } | null = null;
   let health = bot.health;
   let observationMs = 0;
@@ -177,42 +304,21 @@ export function observeIncidents(
           }
         : null;
     previous = { atMs, dimension, position: { x: position.x, y: position.y, z: position.z } };
-    // Read the collision cells touched by the 0.6-wide, 1.8-high player and
-    // the layer directly beneath it. A stalagmite must not become a cube here.
-    const cells: { x: number; y: number; z: number; block: ReturnType<NavigationRuntime["world"]["blockAt"]> }[] = [];
-    for (let x = Math.floor(position.x - 0.3); x <= Math.floor(position.x + 0.3); x++) {
-      for (let z = Math.floor(position.z - 0.3); z <= Math.floor(position.z + 0.3); z++) {
-        for (let y = Math.floor(position.y) - 1; y <= Math.floor(position.y + 1.8); y++) {
-          cells.push({ x, y, z, block: navigation.world.blockAt(x, y, z) });
-        }
-      }
-    }
+    const cells = collisionCells(position, navigation.world);
     const controls = Object.fromEntries(
       (["forward", "back", "left", "right", "jump", "sprint", "sneak"] as const).map((control) => [
         control,
         bot.getControlState(control),
       ]),
     );
-    // Thirty-two blocks covers nearby threats and approaching projectiles;
-    // entities outside this observation radius are explicitly not captured.
-    const entities = Object.values(bot.entities)
-      .filter(
-        (entity) =>
-          Math.hypot(entity.position.x - position.x, entity.position.y - position.y, entity.position.z - position.z) <=
-          32,
-      )
-      .map((entity) => ({
-        id: entity.id,
-        name: entity.name,
-        position: vector(entity.position),
-        velocity: vector(entity.velocity),
-        projectile: projectileSnapshot(bot, entity),
-      }));
+    // Entity serialization dominated per-tick cost; omit unsampled ticks rather
+    // than presenting an older snapshot as current (P4-06c T12, 2026-11-08).
+    const entities = physicsSamples % ENTITY_SAMPLE_TICKS === 0 ? nearbyEntities(bot) : undefined;
     const owner = options.owner();
     const phase = owner.combat.execution?.phase;
     if (phase) phaseTicks[phase] = (phaseTicks[phase] ?? 0) + 1;
     const useFlags = observedFlags(useFlagsIndex);
-    const observedShieldUse = bot.inventory.slots?.[45]?.name === "shield" && useFlags !== null && (useFlags & 3) === 3;
+    const observedShieldUse = isShield(bot, bot.inventory.slots?.[OFF_HAND_SLOT]) && useFlags !== null && (useFlags & 3) === 3;
     shieldUseTicks = observedShieldUse ? shieldUseTicks + 1 : 0;
     if (physicsSamples % 20 === 0) recorder.record("threats", { threats: threatSnapshot() }, atMs);
     const cost = performance.now() - started;
@@ -374,7 +480,7 @@ export function observeIncidents(
             shieldUseTicks >= 5 &&
             observedFlags(useFlagsIndex) !== null &&
             (observedFlags(useFlagsIndex)! & 3) === 3 &&
-            bot.inventory.slots?.[45]?.name === "shield",
+            isShield(bot, bot.inventory.slots?.[OFF_HAND_SLOT]),
           bearingBand: bearing,
           cause: attacker(value.sourceCauseId),
           direct: attacker(value.sourceDirectId),
@@ -431,19 +537,6 @@ export function observeIncidents(
         Math.hypot(change.position.x - position.x, change.position.y - position.y, change.position.z - position.z) <= 8
       )
         recorder.record("nearby_block_change", { dimension: bot.game.dimension, change });
-    }),
-  );
-  listeners.defer(
-    navigation.onEvent((event) => {
-      if (event.kind === "search_slice" || (event.kind === "world_change" && event.classification === "irrelevant"))
-        return;
-      if (event.kind === "route_committed") {
-        recorder.retainPlan({ ...options.owner(), dimension: bot.game.dimension, event });
-        const { plan, ...summary } = event;
-        recorder.record("navigation", { ...options.owner(), event: summary });
-        return;
-      }
-      recorder.record("navigation", { ...options.owner(), event });
     }),
   );
   const ownedListeners = listeners.move();

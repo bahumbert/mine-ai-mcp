@@ -43,8 +43,26 @@ function fixture() {
     },
   } as unknown as NavigationRuntime;
   const movements = {} as MovementPolicy;
-  return { bot, clock, spawnAt, navigation, movements, walks, inventory, tableItem, time: () => clock.now() };
+  return { bot, clock, spawnAt, navigation, movements, walks, inventory, tableItem, entities: harness.entities, time: () => clock.now() };
 }
+
+test("a drop taken by another entity names the taker", async () => {
+  const f = fixture();
+  using _installed = f.clock.install();
+  const drop = f.entities.spawn({ name: "item", position: new Vec3(1.5, 64, 0.5), item: { name: "crafting_table", count: 1 } });
+  const mob = f.entities.spawn({ name: "piglin", position: drop.position });
+  const navigation = {
+    navigate: async () => {
+      f.entities.takenBy(mob, drop, 1);
+      return { status: "stopped", reason: "item removed", elapsedMs: 0 };
+    },
+  } as unknown as NavigationRuntime;
+  const result = await f.clock.settle(recoverWorkstationDrop(f.bot, navigation, "crafting_table", source, 0, {}, {
+    clock: f.clock, movements: f.movements,
+  }), 60_000);
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.error : "", /taken by piglin #\d+/);
+});
 
 test("a drop that spawns 3 s late is waited for, walked onto and collected", async () => {
   const f = fixture();

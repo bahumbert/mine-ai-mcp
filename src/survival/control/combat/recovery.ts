@@ -55,6 +55,7 @@ export async function recoverCombatHealth(
     const scope = responseScope(bot, policy, response.kind);
     if (response.kind === "hide") {
       const result = await hideInPlace(bot, {
+        navigation,
         signal,
         threatContext: observed,
         recoverTo: recoveryHealth(policy().combat),

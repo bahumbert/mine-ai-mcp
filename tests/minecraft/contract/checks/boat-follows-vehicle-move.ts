@@ -45,8 +45,9 @@ export const boatFollowsVehicleMove: ContractCheck = {
   withoutRuntime: true,
   async run(subject) {
     const { bot } = subject;
-    const boat = boatSummonedAt(subject, BOAT_AT);
-    assert.ok(boat !== undefined, "no oak_boat entity in view");
+    // The summon and the packet that shows the boat to the client are two steps: the first read came 2.1 ms after `Summoned new Oak Boat` with no boat in view (1 run in 5, `p4-32-iso.log`).
+    await answerArrives(subject, () => boatSummonedAt(subject, BOAT_AT) !== undefined, "no oak_boat entity in view");
+    const boat = boatSummonedAt(subject, BOAT_AT)!;
     await afterServerTicks(subject, REST_TICKS, "the boat's float down to its rest level");
     const { y, z } = boat.position;
     let { x } = boat.position;

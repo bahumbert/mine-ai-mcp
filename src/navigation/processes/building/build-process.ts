@@ -54,8 +54,16 @@ import {
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { navigationFeet } from "../../world/block-geometry.js";
 import type { Position3 } from "../../world/world.js";
+import type { CellKeys } from "../../mineflayer/movement-policy.js";
 import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
 import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
+
+export type { CellKeys } from "../../mineflayer/movement-policy.js";
+
+/** A live view keeps cells the builder protects after the movement policy is made. */
+export function keptWith(live: CellKeys, kept: CellKeys): CellKeys {
+  return { has: (key) => live.has(key) || kept.has(key) };
+}
 
 /**
  * How far a cell may be from the feet to be worked without moving, measured
@@ -171,17 +179,20 @@ export type BuildCellState =
   | { readonly kind: "would_enclose" }
   /** The bot's own feet or head. */
   | { readonly kind: "occupied" }
-  /** A placement, dig, or route to it failed; it is not tried again this run. */
+  /** A failed placement, dig or route whose refusal still applies. */
   | { readonly kind: "refused"; readonly reason: string; readonly cause: RefusalCause };
 
 export interface BuildRequest {
   readonly cells: readonly BuildCell[];
   readonly removeWrongBlocks: boolean;
   /**
-   * The route policy, given the live set of packed cells the route must never
-   * dig: the structure's correct cells, kept current by the process.
+   * The default policy, given the live keys of the structure's correct cells.
    */
-  readonly movements: (protectedCells: ReadonlySet<number>) => MovementPolicy;
+  readonly movements: (protectedCells: CellKeys) => MovementPolicy;
+  /** Policy for each work route. In-reach digs and the outside leg use `movements`. */
+  readonly routeMovements?: (protectedCells: CellKeys) => MovementPolicy;
+  /** A route refusal lasts while this observation stays equal. Without it, the refusal lasts the run. */
+  readonly routeObservation?: () => string;
   readonly route: Navigate;
   readonly breakInPlace: BreakBlockInPlace;
   /** Whether the target has a reachable visible face from these feet. */
@@ -219,7 +230,7 @@ export class BuildProgress {
   placed = 0;
   dug = 0;
   passes = 0;
-  readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
+  readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause; readonly stamp?: string }>();
   readonly scaffold = new Map<number, PlacedScaffold>();
 }
 
@@ -299,6 +310,8 @@ export class BuildTargeting {
   readonly #states = new Map<number, BuildCellState>();
   /** The correct cells as packed keys, handed to the movement policy and kept current. */
   readonly protectedCells = new Set<number>();
+  /** The last stamped failure in this attempt, even if its cell becomes workable again. */
+  lastRouteRefusal: string | undefined;
   readonly #bounds: { readonly min: Vec3; readonly max: Vec3 };
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
 
@@ -319,7 +332,12 @@ export class BuildTargeting {
   }
 
   refuse(cell: BuildCell, reason: string, cause: RefusalCause): void {
-    this.progress.refused.set(keyOf(cell.position), { reason, cause });
+    const stamp = cause === "route" ? this.request.routeObservation?.() : undefined;
+    if (stamp !== undefined) {
+      reason = `${reason}; tried again when the clouds near the build, its cells or the bot's feet change`;
+      this.lastRouteRefusal = reason;
+    }
+    this.progress.refused.set(keyOf(cell.position), { reason, cause, ...(stamp !== undefined && { stamp }) });
     this.#refreshedAtMs = Number.NEGATIVE_INFINITY;
   }
 
@@ -351,6 +369,8 @@ export class BuildTargeting {
     const feet = feetOf(bot);
     const head = feet.offset(0, 1, 0);
     const carried = carriedCounts(bot);
+    let stamp: string | undefined;
+    const routeStamp = () => (stamp ??= this.request.routeObservation?.());
 
     this.#states.clear();
     this.protectedCells.clear();
@@ -360,19 +380,27 @@ export class BuildTargeting {
       if (block !== null && holdsCell(block, cell)) this.protectedCells.add(keyOf(cell.position));
     }
     for (const cell of this.request.cells) {
-      this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
+      this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried, routeStamp));
     }
     this.#refreshedAtMs = now;
     return this.#states;
   }
 
-  private classify(cell: BuildCell, feet: Vec3, head: Vec3, carried: ReadonlyMap<string, number>): BuildCellState {
+  private classify(
+    cell: BuildCell,
+    feet: Vec3,
+    head: Vec3,
+    carried: ReadonlyMap<string, number>,
+    routeStamp: () => string | undefined,
+  ): BuildCellState {
     const position = asVec3(cell.position);
     const block = this.bot.blockAt(position);
     if (block === null) return { kind: "unloaded" };
     if (holdsCell(block, cell) || (cell.blockName === "air" && isAir(block))) return { kind: "correct" };
     const refused = this.progress.refused.get(keyOf(cell.position));
-    if (refused !== undefined) return { kind: "refused", ...refused };
+    if (refused !== undefined && (refused.stamp === undefined || refused.stamp === routeStamp())) {
+      return { kind: "refused", cause: refused.cause, reason: refused.reason };
+    }
     // A cell asked to be air can only be dug clear, so asking is allowing.
     if (cell.blockName === "air") return { kind: "diggable", holds: block.name };
     if (!isReplaceableForPlacement(block, this.bot.version)) {
@@ -553,7 +581,7 @@ async function digCell(
   try {
     const dug = await request.breakInPlace({ movements, position: target.position, signal });
     if (dug.status === "broken") targeting.progress.dug += 1;
-    else targeting.refuse(target, `${holds} there could not be cleared: ${dug.reason}`, dug.cause ?? "placement");
+    else targeting.refuse(target, `${holds} there could not be cleared: ${dug.reason}`, dug.cause === "policy" ? "policy" : "placement");
   } catch (error) {
     if (bot.blockAt(asVec3(target.position))?.name !== heldBefore) targeting.progress.dug += 1;
     throw error;
@@ -652,7 +680,10 @@ export async function build(
 
     idlePasses = targeting.workDone === workBefore ? idlePasses + 1 : 0;
     if (idlePasses >= IDLE_PASSES) {
-      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`);
+      const lastRoute = targeting.lastRouteRefusal === undefined
+        ? `last route ${route.status}`
+        : `last work route refusal: ${targeting.lastRouteRefusal}`;
+      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; ${lastRoute}`);
     }
   }
 }
@@ -665,10 +696,22 @@ async function runRoute(
   movements: MovementPolicy,
   onPlacement?: (placed: PlacedScaffold) => void,
 ): Promise<NavigationResult> {
+  const goal = targeting.goal();
+  const stampsRefusals = request.routeObservation !== undefined;
+  let revision: string | null | undefined;
+  const trackedGoal: Goal = {
+    resolve(observation) {
+      const resolved = goal.resolve(observation);
+      revision = resolved.kind === "active" && (revision === undefined || revision === resolved.revision)
+        ? resolved.revision
+        : null;
+      return resolved;
+    },
+  };
   return request.route({
-    movements,
+    movements: request.routeMovements?.(targeting.protectedCells) ?? movements,
     ...(onPlacement && { onPlacement }),
-    goal: targeting.goal(),
+    goal: stampsRefusals ? trackedGoal : goal,
     onArrival: async ({ signal }) => {
       // An arrival that works nothing ends the route: continuing would ask the
       // navigator the same question from the same place, and the loop above
@@ -676,11 +719,22 @@ async function runRoute(
       if (!(await workInReach(bot, request, targeting, movements, signal))) return { kind: "completed" };
       targeting.refresh();
       const more = targeting.targets().length > 0 && !targeting.standingInStructure();
+      revision = undefined;
       return more ? { kind: "continue" } : { kind: "completed" };
     },
     onCalculationFailure: async ({ failure, observation }) => {
+      if (stampsRefusals) {
+        // The navigator may finish a search after a refused cell has rejoined its live goal.
+        targeting.refresh();
+        trackedGoal.resolve(observation);
+        if (revision === null) return { kind: "completed" };
+      }
+      const workBefore = targeting.workDone;
       targeting.refuseClosest(observation.position, describeCalculationFailure(failure), "route");
+      // A repeat can leave a moving set of targets inside this route. Let the outer pass count the idle work.
+      if (stampsRefusals && targeting.workDone === workBefore) return { kind: "completed" };
       targeting.refresh();
+      revision = undefined;
       return targeting.targets().length > 0 ? { kind: "continue" } : { kind: "completed" };
     },
     signal: request.signal,

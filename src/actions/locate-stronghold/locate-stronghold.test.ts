@@ -293,6 +293,20 @@ test("supply checklist rejects partial stacks, unsafe food, raw pumpkins and wea
   const supplies = strongholdSupplies(bot);
   assert.equal(supplies.filter((item) => item.carried >= item.required).length, 1);
   assert.equal(supplies.find((item) => item.recommendation === "Shield")?.carried, 1);
+  assert.equal(supplies.find((item) => /food/i.test(item.recommendation))?.carried, 0, "avoided foods are not auto-edible");
+});
+
+test("B4: supplies count tipped and spectral arrows with regular ones", () => {
+  const { bot, harness } = fixture();
+  fillSlots(harness, 0, [
+    { name: "bow", count: 1 },
+    { name: "arrow", count: 30 },
+    { name: "spectral_arrow", count: 20 },
+    { name: "tipped_arrow", count: 14 },
+  ]);
+  const arrows = strongholdSupplies(bot).find((item) => /arrows/i.test(item.recommendation));
+  assert.equal(arrows?.carried, 64);
+  assert.equal(arrows?.required, 64);
 });
 
 test("locate cannot skip the estimate phase even with a supply override", async () => {

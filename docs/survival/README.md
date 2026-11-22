@@ -125,6 +125,11 @@ admission and settles callers even if a disconnected operation cannot finish.
 footing, dragon, hostile and hunger responses. Each response supplies observation,
 decision, execution and settlement; it does not create another arbitration loop.
 Idle water stabilization has a named baseline owner and yields on admission.
+The fire response shares the runtime's footing recovery: out of fire and lava it
+lands a pending knockback before walking or pouring water. Renewed contact
+interrupts that landing so escape can handle the hazard. With no route, an
+airborne body waits for landing before fire judges its footing; the existing
+15-second wall bound still applies when physics stops.
 
 The breath response (`responses/breath.ts`) rises for air. Under a roof it swims to the nearest column open to the air
 (`swimExitPath`, breadth-first through water and air within 12 blocks, see `positioning/swim-escape.ts`); only when no

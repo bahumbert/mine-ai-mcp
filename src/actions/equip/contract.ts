@@ -2,10 +2,11 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { actionResultSchema, type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
+import type { FamilyIndex, ItemFamily } from "../../world/item-families.js";
 
 export const EQUIP = "equip" as const;
 export const EQUIP_DESCRIPTION =
-  "Equip carried items: wear armor in its slot, hold a tool or weapon, or put a shield in the off-hand. Use source_slot from view_status to choose a particular copy by its durability or other properties. Without source_slot, keep an already-equipped matching name or choose the first carried match. Each item's destination is inferred from its name unless given. Reports every equipment slot afterwards. Does not craft, fetch, or move.";
+  "Equip carried items: wear armor in its slot, hold a tool or weapon, or put a shield in the off-hand. Use source_slot from view_status to choose a particular copy by its durability or other properties. Without source_slot, keep an already-equipped matching name or choose the first carried match. Each item's destination is inferred from what the item is (armor piece, shield, elytra...) unless given. Reports every equipment slot afterwards. Does not craft, fetch, or move.";
 
 export const EQUIPMENT_DESTINATIONS = ["hand", "off-hand", "head", "torso", "legs", "feet"] as const;
 export type EquipmentDestination = (typeof EQUIPMENT_DESTINATIONS)[number];
@@ -41,22 +42,26 @@ export interface EquipRequest {
   readonly items: readonly EquipRequestItem[];
 }
 
-/** The slot an item is for when the caller did not say: armor by its suffix, a shield off-hand, everything else in hand. */
-export function inferEquipmentDestination(itemName: string): EquipmentDestination {
-  if (itemName.endsWith("_helmet") || itemName === "carved_pumpkin") return "head";
-  if (itemName.endsWith("_chestplate") || itemName === "elytra") return "torso";
-  if (itemName.endsWith("_leggings")) return "legs";
-  if (itemName.endsWith("_boots")) return "feet";
-  if (itemName === "shield") return "off-hand";
-  return "hand";
+/** The slot each worn family fills (the families of `data/item-families.json`); any other item is held. An item in two of them takes the first listed. */
+const SLOT_OF_FAMILY: ReadonlyArray<readonly [ItemFamily, EquipmentDestination]> = [
+  ["helmet", "head"], ["head_gear", "head"],
+  ["chestplate", "torso"], ["torso_gear", "torso"],
+  ["leggings", "legs"], ["boots", "feet"],
+  ["shield", "off-hand"],
+];
+
+/** The slot an item is for when the caller did not say: the slot of its worn family, else the hand. */
+export function inferEquipmentDestination(itemName: string, families: FamilyIndex): EquipmentDestination {
+  const itemFamilies = families.itemFamilies(itemName);
+  return SLOT_OF_FAMILY.find(([family]) => itemFamilies.includes(family))?.[1] ?? "hand";
 }
 
-export function parseEquipRequest(input: unknown): EquipRequest {
+export function parseEquipRequest(input: unknown, families: FamilyIndex): EquipRequest {
   const value = equipInputSchema.parse(input ?? {});
   return {
     items: value.items.map((item) => ({
       itemName: item.item_name,
-      destination: item.destination ?? inferEquipmentDestination(item.item_name),
+      destination: item.destination ?? inferEquipmentDestination(item.item_name, families),
       ...(item.source_slot !== undefined && { sourceSlot: item.source_slot }),
     })),
   };

@@ -1,7 +1,16 @@
 import type { Bot } from "mineflayer";
+import type { Item } from "prismarine-item";
+import type { Block } from "prismarine-block";
+import { Vec3 } from "vec3";
+import { z } from "zod";
+import { defineAction } from "../../actions/action.js";
 import { onBodyTick, type BodyTick } from "../../runtime/body-ticks.js";
 import { BodyAbort } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
+import { LIFE_SAVING_ROUTE_BLOCKS, pendingLifeSavingPlacements, removeLifeSavingPlacements, setLifeSavingRemovalContext, type LifeSavingRemovalContext } from "../../world/life-saving-placements.js";
+import { bucketItems } from "../../world/buckets.js";
+import { isBurning, isInFire, isInLava } from "../perception/body.js";
+import { hasFireDanger } from "../perception/fire-danger.js";
 import { Answered } from "../state/answered.js";
 import { Budgets } from "../state/budgets.js";
 import type { ReflexDefinition, ReflexName, ReflexSnapshot, SurvivalTransition } from "./contract.js";
@@ -11,6 +20,7 @@ import { ReflexRegistration, type RegisteredReflex } from "./reflex-registration
 export interface ReflexDriverOptions {
   /** The monotonic clock the answered scopes' expiries are counted on (default `monotonicNow`); a test drives it. */
   readonly now?: () => number;
+  readonly lifeSaving?: LifeSavingRemovalContext;
 }
 
 /** One ranked loop and one settlement path for all six survival responses. */
@@ -23,16 +33,43 @@ export class ReflexDriver implements AsyncDisposable {
   #stopListening: (() => void) | null = null;
   #world = 0;
   #dimension: string;
+  #removal: Promise<void> | null = null;
+  #removalController: AbortController | null = null;
+  #removalAt: string | null = null;
+  #removalRoute: Vec3[] = [];
+  readonly #retryRemoval = (): void => { this.#removalAt = null; };
+
+  /** Only terrain within the cleanup's reach of its obligation or travelled route can enable a retry. */
+  readonly #retryRemovalAfterBlock = (before: Block | null, after: Block | null): void => {
+    const ledger = pendingLifeSavingPlacements(this.bot).filter(entry => entry.dimension === this.bot.game.dimension);
+    if (ledger.length === 0) return;
+    const cell = after?.position ?? before?.position;
+    if (!cell) return;
+    if ([...ledger.map(entry => entry.cell), ...this.#removalRoute].some(at => at.distanceTo(cell) <= LIFE_SAVING_ROUTE_BLOCKS)) {
+      this.#retryRemoval();
+    }
+  };
+
+  /** Bucket or block changes can enable a refill or a safe route; other inventory packets cannot. */
+  readonly #retryRemovalAfterSlot = (_slot: number, before: Item | null, after: Item | null): void => {
+    if ([before, after].some(item => item && (bucketItems().includes(item.name) || this.bot.registry.blocksByName[item.name]))) {
+      this.#retryRemoval();
+    }
+  };
 
   constructor(
     readonly bot: Bot,
     readonly runner: ActionRunner,
     options: ReflexDriverOptions = {},
   ) {
-    this.answered = new Answered(options.now);
+    this.answered = new Answered(options.now, Date.now, () => bot.time?.age ?? null);
+    if (options.lifeSaving) setLifeSavingRemovalContext(bot, options.lifeSaving);
     this.#dimension = bot.game?.dimension;
     bot.on("death", this.#death);
     bot.on("game", this.#game);
+    // New terrain or supplies can make an unchanged stance safe to clean from (T9 review, 2026-11-09).
+    bot.on("blockUpdate", this.#retryRemovalAfterBlock);
+    bot.inventory.on("updateSlot", this.#retryRemovalAfterSlot);
   }
 
   onTransition(observer: (transition: SurvivalTransition) => void): () => void {
@@ -54,11 +91,67 @@ export class ReflexDriver implements AsyncDisposable {
   /** A seated tick (the bot is a passenger, physics is off) reaches only the reflexes that can act from a seat. */
   readonly #tick = (tick: BodyTick): void => {
     if (this.#closed || this.bot.health <= 0 || !this.runner.ownership().connected) return;
+    if (this.#removal) {
+      const cell = this.bot.entity.position.floored();
+      if (!this.#removalRoute.at(-1)?.equals(cell)) this.#removalRoute.push(cell);
+    }
     for (const name of REFLEX_PRIORITY) {
       const registration = this.#registrations.get(name);
       if (registration && (!tick.seated || registration.seated)) registration.tick();
     }
+    this.#removeWhenSafe();
   };
+
+  /** The tick after settlement sees released registrations, unlike the outcome callback itself. */
+  #removeWhenSafe(): void {
+    if (this.#removal) return;
+    if (this.runner.ownership().current !== null || !this.bot.entity.onGround ||
+      isBurning(this.bot) || isInFire(this.bot) || isInLava(this.bot) ||
+      this.snapshot().some((reflex) => reflex.response !== null)) {
+      this.#removalAt = null;
+      return;
+    }
+    const pending = pendingLifeSavingPlacements(this.bot).filter(entry => entry.dimension === this.bot.game.dimension);
+    if (pending.length === 0) { this.#removalAt = null; return; }
+    const at = `${this.bot.game.dimension}|${this.bot.entity.position}|${pending.map(entry => `${entry.cell}:${entry.recordedAt}`).join(";")}`;
+    if (at === this.#removalAt) return;
+    this.#removalAt = at;
+    this.#removalRoute = [this.bot.entity.position.floored()];
+    this.#removalController = new AbortController();
+    this.#removal = this.#removePlacements(this.#removalController.signal).finally(() => {
+      this.#removal = null;
+      this.#removalController = null;
+    });
+  }
+
+  /** A foreground body owner lets every reflex preempt cleanup through the runner's existing release path. */
+  async #removePlacements(signal: AbortSignal): Promise<void> {
+    const input = z.strictObject({});
+    const action = defineAction({
+      name: "remove_life_saving_placements", description: "Remove this bot's emergency placements when safe.",
+      inputSchema: input, resultSchema: z.strictObject({ status: z.literal("succeeded") }),
+      parse: (value) => input.parse(value), execution: { kind: "task" }, formatResult: () => "Emergency placement cleanup settled.",
+      execute: async (_request, context) => {
+        const result = await removeLifeSavingPlacements(this.bot, context.signal!, (left) => this.#publish({
+          kind: "outcome", reflex: "recover_footing",
+          evidence: { response: "remove_life_saving_placements", outcome: { kind: "placements_left", error: left.why } },
+        }), () => hasFireDanger(this.bot));
+        if (result.removed.length) this.#publish({
+          kind: "outcome", reflex: "recover_footing",
+          evidence: { response: "remove_life_saving_placements", outcome: {
+            kind: "placements_removed",
+            removed: result.removed.map(({ x, y, z }) => ({ x, y, z })),
+          } },
+        });
+        return { status: "succeeded" as const };
+      },
+    });
+    const output = await this.runner.run(action, {}, signal);
+    if (output.result.status === "failed") this.#publish({
+      kind: "outcome", reflex: "recover_footing",
+      evidence: { response: action.name, kind: "cleanup_failed", why: output.result.error },
+    });
+  }
 
   readonly #death = (): void => {
     this.#reset(new BodyAbort({ kind: "death" }, "The bot died."));
@@ -73,6 +166,9 @@ export class ReflexDriver implements AsyncDisposable {
   };
 
   #reset(cause: BodyAbort): void {
+    this.#retryRemoval();
+    this.#removalRoute = [];
+    this.#removalController?.abort(cause);
     this.#world++;
     this.answered.clear();
     for (const registration of this.#registrations.values()) registration.stop(cause);
@@ -116,11 +212,15 @@ export class ReflexDriver implements AsyncDisposable {
   async [Symbol.asyncDispose](): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#removalController?.abort(new Error("The survival driver closed."));
     this.#stopListening?.();
     this.bot.off("death", this.#death);
     this.bot.off("game", this.#game);
+    this.bot.off("blockUpdate", this.#retryRemovalAfterBlock);
+    this.bot.inventory.off("updateSlot", this.#retryRemovalAfterSlot);
     const closing = [...this.#registrations.values()].map((registration) => registration.close());
     await Promise.all(closing);
+    await this.#removal;
     this.answered.clear();
     this.#registrations.clear();
   }

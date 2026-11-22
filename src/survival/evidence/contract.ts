@@ -13,7 +13,7 @@ export const bodyAbortCauseSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("connection_lost") }),
   z.strictObject({ kind: z.literal("death") }),
   z.strictObject({ kind: z.literal("dimension_changed"), from: z.string(), to: z.string() }),
-  z.strictObject({ kind: z.literal("reflex_limit"), reflex: z.string(), limit: z.enum(["physics_stalled", "ceiling", "no_progress"]), elapsedMs: z.number() }),
+  z.strictObject({ kind: z.literal("reflex_limit"), reflex: z.string(), limit: z.enum(["physics_stalled", "ceiling", "no_progress"]), elapsedMs: z.number(), elapsedTicks: z.number().nullable().optional() }),
 ]);
 
 export const requestSchema = z.strictObject({
@@ -32,6 +32,8 @@ export const requestSchema = z.strictObject({
       baseline: factsSchema,
       checkpoint: factsSchema,
       completion: z.strictObject({ kind: z.enum(["event", "current"]), observed: z.boolean(), owes: z.string() }),
+      objective: z.strictObject({ remaining: z.number(), tolerance: z.number() }).nullable().optional(),
+      goalMet: z.boolean().optional(),
     })
     .nullable(),
 }).meta({ id: "MineAiRequest" });

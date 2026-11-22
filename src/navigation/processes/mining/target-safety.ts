@@ -28,9 +28,14 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
+import { bodyDependsOnBlock } from "../../world/body-support.js";
 import { waterMiningStance } from "../../world/water.js";
-import { isDryAir, isLava } from "../../world/block-geometry.js";
+import { dropColumn, isDryAir, isLava } from "../../world/block-geometry.js";
+import type { BlockObservation } from "../../world/world.js";
 import { liveBlockReader } from "../../mineflayer/world.js";
+import { cellHoldsWater } from "../../world/deep-water.js";
+import { breakRefusalCause } from "../../movements/policy.js";
+import { drownedVerdict } from "./drowned-target.js";
 import { MAXIMUM_BUCKET_DROP } from "../../mineflayer/movement-policy.js";
 import {
   observeMineflayerBlock,
@@ -60,8 +65,9 @@ export type MineTargetDecision =
        * the live world, and breaks it in place.
        */
       readonly routeMayBreak: boolean;
+      readonly drained?: { readonly wetStances: readonly BlockPosition[] };
     }
-  | { readonly kind: "prohibited"; readonly reason: string };
+  | { readonly kind: "prohibited"; readonly reason: string; readonly underWater?: true };
 
 /** Every neighbouring cell of `position` that holds lava right now. */
 export function lavaFacesOf(bot: Bot, position: BlockPosition): BlockPosition[] {
@@ -131,25 +137,14 @@ function fallingColumnStop(
 
 /**
  * Whether the block is a walkway in the air: something to stand on, with nothing under it for more blocks than a fall
- * is safe from and no deep water to land in. A bridge or a pillar the bot built is one, and mining it strands the bot
+ * is safe from and no deep source water to land in. A bridge or a pillar the bot built is one, and mining it strands the bot
  * (live 2026-10-10: Lena mined the blocks of her own bridge over a 23-block drop). A natural ceiling is not (solid above).
  */
 export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, position: BlockPosition): boolean {
-  const open = (y: number) => {
-    const block = world.blockAt(position.x, y, position.z);
-    return block.kind === "loaded" && block.traits.empty && block.traits.liquid === null;
-  };
-  if (!open(position.y + 1)) return false;
-  let depth = 0;
-  for (let y = position.y - 1; open(y); y -= 1) {
-    depth += 1;
-    if (depth > MAXIMUM_BUCKET_DROP) return true;
-  }
-  if (depth <= movements.maximumDrop) return false;
-  const landing = world.blockAt(position.x, position.y - 1 - depth, position.z);
-  const below = world.blockAt(position.x, position.y - 2 - depth, position.z);
-  const deepWater = (block: typeof landing) => block.kind === "loaded" && block.traits.liquid === "water";
-  return !(deepWater(landing) && deepWater(below));
+  const open = (block: BlockObservation) => block.kind === "loaded" && block.traits.empty && block.traits.liquid === null;
+  if (!open(world.blockAt(position.x, position.y + 1, position.z))) return false;
+  const { depth, deepWater } = dropColumn(world, position.x, position.y - 1, position.z, open);
+  return depth > MAXIMUM_BUCKET_DROP || (depth > movements.maximumDrop && !deepWater);
 }
 
 /**
@@ -159,14 +154,8 @@ export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, p
  * work uses (`sealAndBreakInReach` lets a floating body dig).
  */
 export function standsOnBlock(bot: Bot, position: BlockPosition): boolean {
-  const feet = bot.entity.position;
   const floating = Reflect.get(bot.entity, "isInWater") === true && !bot.entity.onGround;
-  return (
-    !floating &&
-    position.x === Math.floor(feet.x) &&
-    position.z === Math.floor(feet.z) &&
-    position.y === Math.ceil(feet.y) - 1
-  );
+  return bodyDependsOnBlock(bot.entity.position, floating, position, liveBlockReader(bot));
 }
 
 /**
@@ -190,12 +179,19 @@ export function evaluateMineTarget(
   const evaluation = movements.evaluateBreak(observeMineflayerBlock(block), position, world);
   const decision = evaluation.decision;
   const floodRule = decision.kind === "prohibited" && decision.cause === "opens_into_liquid";
-  if (decision.kind === "prohibited" && !floodRule) return { kind: "prohibited", reason: decision.reason };
+  const above = world.blockAt(position.x, position.y + 1, position.z);
+  const drainAbove = decision.kind === "prohibited" && breakRefusalCause(decision) === "under_water" &&
+    above.kind === "loaded" && cellHoldsWater(above);
+  if (decision.kind === "prohibited" && !floodRule && !drainAbove) {
+    return { kind: "prohibited", reason: decision.reason };
+  }
   const below = world.blockAt(position.x, position.y - 1, position.z);
   const needsIsolation = floodRule || (below.kind === "loaded" && below.traits.liquid === "water");
 
   const lavaFaces = lavaFacesOf(bot, position).length;
   const closures = lavaClosuresOf(bot, position).length;
+  const drowned = drownedVerdict(bot, world, position, availableBlocks, closures);
+  if (drowned.kind === "refused") return { kind: "prohibited", reason: drowned.reason, underWater: true };
   if (closures > availableBlocks) {
     const floor = closures > lavaFaces ? "a floor over lava" : null;
     const needed = lavaFaces === 0 ? floor : floor === null ? plural(lavaFaces, "lava face")
@@ -215,5 +211,6 @@ export function evaluateMineTarget(
   }
   const falling = fallingColumnStop(bot, movements, position, world);
   if (falling !== null) return { kind: "prohibited", reason: falling };
+  if (drowned.kind === "drainable") return { kind: "mineable", routeMayBreak: false, drained: { wetStances: drowned.wetStances } };
   return { kind: "mineable", routeMayBreak: !needsIsolation && closures === 0 };
 }

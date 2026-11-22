@@ -292,9 +292,15 @@ export class AsyncActions {
   }
   #untilSettled(retained: Execution, timeoutMs: number, signal?: AbortSignal): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const cleanup = () => { clearTimeout(timer); retained.listeners.delete(finish); signal?.removeEventListener("abort", abort); };
-      const finish = () => { try { cleanup(); } finally { resolve(); } };
-      const abort = () => { try { cleanup(); } finally { reject(signal?.reason); } };
+      let done = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        retained.listeners.delete(finish);
+        try { signal?.removeEventListener("abort", abort); }
+        catch { /* The signal's own cleanup failed; the wait has ended (2026-11-15). */ }
+      };
+      const finish = () => { if (done) return; done = true; try { cleanup(); } finally { resolve(); } };
+      const abort = () => { if (done) return; done = true; try { cleanup(); } finally { reject(signal?.reason); } };
       const timer = setTimeout(finish, timeoutMs);
       signal?.addEventListener("abort", abort, { once: true });
       retained.listeners.add(finish);

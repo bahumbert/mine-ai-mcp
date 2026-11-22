@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import type { Bot } from "mineflayer";
-import { createMovements, type NavigationResult } from "../../navigation/index.js";
+import { createMovements, createNavigationRuntime, reportNavigationDig, type NavigationResult } from "../../navigation/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
@@ -25,6 +25,7 @@ interface Scene {
   readonly carried?: Record<string, number>;
   readonly slots?: FakeBotOptions["slots"];
   readonly clock?: FakeBotOptions["clock"];
+  readonly server?: FakeBotOptions["server"];
 }
 
 /** A bot at (0.5, 64, 0.5) on flat ground whose standing cells are at `groundY`: stone below, air from there up. */
@@ -35,6 +36,7 @@ function flatGroundBot(groundY = 64, scene: Scene = {}) {
     carried: scene.carried ?? (scene.slots === undefined ? { dirt: 4, cobblestone: 11 } : undefined),
     slots: scene.slots,
     clock: scene.clock,
+    server: scene.server,
   });
   /** Lower the count of `name` carried to `count`, as a route that placed some leaves it. */
   const useUntil = (name: string, count: number) => {
@@ -57,7 +59,70 @@ function dependencies(
   };
 }
 
-const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
+const fakeNavigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
+
+test("a navigate that barely moves ends NAVIGATION_SLOW", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ stopSignal }) => {
+    const movement = setInterval(() => { bot.entity.position.x += 1; }, 60_000);
+    try {
+      await new Promise<void>((resolve) => stopSignal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped", reason: "stopped", elapsedMs: 120_000 };
+    } finally { clearInterval(movement); }
+  }));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 40, y: 64, z: 0 }), 122_000, 1000);
+  assert.equal(output.result.status, "failed");
+  assert.match("error" in output.result ? output.result.error : "", /^\[NAVIGATION_SLOW\]/u);
+  assert.ok("navigation" in output.result && output.result.navigation.digs);
+});
+
+test("a 150-second reflex suspension does not trip a resumed navigate", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ signal }) => {
+    if (++calls === 1) {
+      started();
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped", reason: "reflex", elapsedMs: 1 };
+    }
+    bot.entity.position.set(40.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 1 };
+  }));
+  const runner = new ActionRunner();
+  const pending = runner.run(action, { x: 40, y: 64, z: 0, range: 0 });
+  await entered;
+  runner.claim("hunger_reflex", "ate bread", async () => {
+    await clock.sleep(150_000);
+    return { value: null, continuation: { kind: "resume" as const } };
+  });
+  const output = await clock.settle(pending, 152_000, 1000);
+  assert.equal(output.result.status, "succeeded");
+});
+
+test("a climb-out leg and the onward route have separate windows", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  bot.entity.position.set(0.5, 40, 0.5);
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    await clock.sleep(100_000);
+    calls++;
+    if (calls === 1) return { status: "stopped", reason: "stalled", elapsedMs: 100_000 };
+    if (calls === 2) bot.entity.position.set(0.5, 64, 0.5);
+    else bot.entity.position.set(30.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 100_000 };
+  }));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 30, y: 64, z: 0, dig: true, range: 0 }), 305_000, 1000);
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(calls, 3);
+});
 
 /** Dependencies whose movement policy prices every break with the diamond pickaxe, so losing it ends a dig route. */
 function toolLossDeps(bot: Bot, run: NavigateDependencies["navigate"]): NavigateDependencies {
@@ -81,7 +146,7 @@ test("dig navigation safely settles partial when its best pickaxe capability dro
   const action = createNavigateAction(bot, fakeNavigation, toolLossDeps(bot, run));
   const output = await new ActionRunner().run(action, { x: 10, y: 64, z: 0, dig: true });
   assert.equal(output.result.status, "partial");
-  assert.match("error" in output.result ? output.result.error : "", /TOOL_TIER_LOST.*stone pickaxe remains/);
+  assert.match("error" in output.result ? output.result.error : "", /TOOL_TIER_LOST.*family: pickaxe; stone_pickaxe remains/);
 });
 
 /** The leg's navigation evidence after an engine that takes `legMs` of the installed clock, steps the wall clock by `wallStepMs` mid-leg, then throws. */
@@ -146,6 +211,58 @@ test("a midwater arrival records current completion without claiming grounded fo
   assert.equal(output.result.status, "succeeded");
   assert.equal(output.request?.evidence?.completion.observed, true);
 });
+
+test("navigate publishes its objective: the remaining distance and a tolerance of max(1, range), null after a dimension change", async () => {
+  for (const [range, tolerance] of [[0, 1], [1, 1], [3, 3]] as const) {
+    const { bot } = flatGroundBot();
+    const runner = new ActionRunner();
+    const seen: unknown[] = [];
+    const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+      bot.entity.position.set(4.5, 64, 0.5);
+      seen.push(runner.request()?.evidence?.objective);
+      bot.game.dimension = "the_nether";
+      seen.push(runner.request()?.evidence?.objective);
+      return { status: "stopped", reason: "stopped", elapsedMs: 1 };
+    }));
+    await runner.run(action, { x: 10, y: 64, z: 0, range });
+    const remaining = Math.hypot(10 - 4.5, 0 - 0.5); // the body at (4.5, 64, 0.5), the target (10, 64, 0)
+    assert.deepEqual(seen, [{ remaining, tolerance }, null], `range ${range}`);
+  }
+});
+
+// The arrival test reads the feet cell (`navigationFeet`, an integer cell): a cell 1 block off is no arrival at range 0,
+// and a cell at distance sqrt(10) is none at range 3.
+const GOAL_CASES = [
+  { range: 0, at: [10.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: true },
+  { range: 0, at: [9.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: false },
+  { range: 3, at: [7.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: true },
+  { range: 3, at: [7.5, 64, 1.5], onGround: true, dimension: "overworld", goalMet: false },
+  { range: 3, at: [10.5, 64.6, 0.5], onGround: false, dimension: "overworld", goalMet: false },
+  { range: 3, at: [10.5, 64, 0.5], onGround: true, dimension: "the_nether", goalMet: false },
+] as const;
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`navigate publishes goalMet as its own arrival test at each case (${ticksPerSecond} tps)`, async () => {
+    for (const goal of GOAL_CASES) {
+      const clock = createFakeClock({ mode: "mocked" });
+      using _installed = clock.install();
+      const { bot } = flatGroundBot(64, { clock, server: { ticksPerSecond } });
+      const runner = new ActionRunner();
+      let evidence: { goalMet?: boolean; completion: { observed: boolean } } | undefined;
+      const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+        const [x, y, z] = goal.at;
+        bot.entity.position.set(x, y, z);
+        bot.entity.onGround = goal.onGround;
+        bot.game.dimension = goal.dimension;
+        evidence = runner.request()?.evidence ?? undefined;
+        return { status: "stopped", reason: "stopped", elapsedMs: 1 };
+      }));
+      await clock.settle(runner.run(action, { x: 10, y: 64, z: 0, range: goal.range }), 2_000);
+      assert.equal(evidence?.goalMet, goal.goalMet, JSON.stringify(goal));
+      assert.equal(evidence?.goalMet, evidence?.completion.observed, JSON.stringify(goal));
+    }
+  });
+}
 
 test("resumed navigation retains the request origin and stocks and sums only route elapsed time", async () => {
   const { bot, useUntil } = flatGroundBot();
@@ -337,6 +454,38 @@ test("uses standard movements without an arbitrary route timeout and verifies th
   ]);
 });
 
+test("digs are on every result: the blocks the route broke, how many by hand", async () => {
+  const { bot } = flatGroundBot();
+  const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
+    reportNavigationDig(bot, { block: "stone", toolType: null, ms: 4000 });
+    reportNavigationDig(bot, { block: "dirt", toolType: bot.registry.itemsByName.stone_shovel!.id, ms: 500 });
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 5000 };
+  };
+  const output = await new ActionRunner().run(
+    createNavigateAction(bot, fakeNavigation, dependencies(run)),
+    { x: 10, y: 64, z: 0, range: 1 },
+  );
+  assert.equal(output.result.status, "succeeded");
+  const digs = "navigation" in output.result ? output.result.navigation.digs : null;
+  assert.equal(digs?.count, 2);
+  assert.equal(digs?.byHand, 1);
+  assert.equal(digs?.ms, 4500);
+});
+
+test("a route that broke nothing reports zero digs", async () => {
+  const { bot } = flatGroundBot();
+  const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 1000 };
+  };
+  const output = await new ActionRunner().run(
+    createNavigateAction(bot, fakeNavigation, dependencies(run)),
+    { x: 10, y: 64, z: 0, range: 1 },
+  );
+  assert.equal("navigation" in output.result ? output.result.navigation.digs.count : null, 0);
+});
+
 test("uses the same feet-block distance as Pathfinder when verifying completion", async () => {
   const { bot } = flatGroundBot(-59);
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
@@ -428,6 +577,7 @@ test("formats the observed route rather than only its status", () => {
       remainingDistance: Math.sqrt(0.5),
       elapsedMs: 31_000,
       missingDigTools: ["shovel"],
+      digs: { count: 0, ms: 0, byHand: 0, byHandMs: 0, byHandBlocks: [], fasterWith: [] },
       bucketDrops: { count: 0, waterRecovered: 0 },
       scaffolding: [
         { item: "dirt", inventoryBefore: 4, inventoryAfter: 4, consumed: 0 },
@@ -590,6 +740,20 @@ test("a route stopped at the shore of deep open water, with no boat carried, say
     "error" in output.result ? String(output.result.error) : "",
     /^\[NAVIGATION_DEEP_WATER\] The way to 60, 0 crosses deep open water from about 10, 0 \(31\+ blocks of it seen\); no boat is carried/u,
   );
+});
+
+test("a refused route at the shore of deep water keeps the caller's refusal, not the deep-water text", async () => {
+  const { bot } = flatGroundBot(64, { cells: seaCells(10, 40) });
+  const refusal = "[COVER_ROUTE_REFUSED] choose a covered target";
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "stopped", reason: `route_refused: ${refusal}`, elapsedMs: 5, routeFailed: true, routeRefused: true };
+  }));
+  const output = await new ActionRunner().run(action, { x: 60, y: 64, z: 0 });
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? String(output.result.error) : "";
+  assert.ok(error.includes(refusal), error);
+  assert.doesNotMatch(error, /NAVIGATION_DEEP_WATER/u);
 });
 
 test("a route with no path is planned once more with the common block the bot carries when the policy list holds none", async () => {
@@ -922,4 +1086,23 @@ test("a route that only dug beside flowing water does not claim to have dug down
   const text = formatNavigateResult(escapedResult(["dig_next_to_flowing_water"]));
   assert.match(text, /Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once \(a water source and lava still refuse\)\./);
   assert.doesNotMatch(text, /Dug down|digging straight down/);
+});
+
+test("a refusal reaches the navigate error", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  await using navigation = createNavigationRuntime(bot);
+  navigation.setRouteAdmissionProvider(() => ({ check: () => "[COVER_ROUTE_REFUSED] the route crosses the shooter's sight" }));
+  const output = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: 10, y: 64, z: 0 }), 20_000);
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? output.result.error : "";
+  assert.match(error, /route_refused/);
+  assert.match(error, /\[COVER_ROUTE_REFUSED\] the route crosses the shooter's sight/);
+  assert.equal(bot.entity.position.x, 0.5, "the body did not move");
+  // The next navigate request is admitted and runs: a refusal leaves no run behind.
+  navigation.setRouteAdmissionProvider(null);
+  const next = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: 10, y: 64, z: 0 }), 20_000);
+  assert.ok(!/busy|route_refused/i.test(JSON.stringify(next.result)), JSON.stringify(next.result));
+  assert.equal(navigation.active, false);
 });

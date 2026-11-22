@@ -71,11 +71,12 @@ geometry:
   - fill: { block: stone, from: [-6, -62, -3], to: [9, -54, 3] }
   # West ledge: floor top at -58, a one-block drop onto the leaf and no way back.
   - fill: { block: air, from: [-4, -57, 0], to: [-1, -55, 0] }
-  # The pool cell: clay bed, waterlogged stem, leaf head one below the ledge.
+  # The pool cell: clay bed, waterlogged stem, leaf head one below the ledge. The leaf first: a stem with air above it is
+  # destroyed by the next game tick, and a tick can fall between two setup commands (plan 2026-11-18-scenario-reds-part2-a12 T13ad).
   - fill: { block: air, from: [0, -60, 0], to: [0, -55, 0] }
   - setblock: { block: clay, at: [0, -61, 0] }
-  - setblock: { block: "big_dripleaf_stem[facing=east,waterlogged=true]", at: [0, -60, 0] }
   - setblock: { block: "big_dripleaf[facing=east,tilt=none,waterlogged=false]", at: [0, -59, 0] }
+  - setblock: { block: "big_dripleaf_stem[facing=east,waterlogged=true]", at: [0, -60, 0] }
   # East bank: floor top at -60, one step below the leaf, ending at a wall at 7.
   - fill: { block: air, from: [1, -59, 0], to: [6, -55, 0] }
   # The dry way round: south off the ledge's end, down two steps beside the
@@ -97,6 +98,8 @@ players:
     pos: [-3.5, -57, 0.5]
     inventory:
       - { item: iron_sword, count: 1 }
+      # The hunt's admission asks a shield against a hostile mob (shield-gate.ts).
+      - { item: shield, count: 1 }
 
 client:
   command: bun

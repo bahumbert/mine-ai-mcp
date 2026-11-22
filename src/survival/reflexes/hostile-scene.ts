@@ -6,6 +6,10 @@ import type { CombatController } from "../control/combat/contract.js";
 import type { ReflexDriver } from "../control/driver.js";
 import type { CombatPerception } from "../perception/combat/observations.js";
 import type { HostileResponse } from "../policy/combat/response.js";
+import { isShield, OFF_HAND_SLOT } from "../weapons/equipment.js";
+import type { ThreatChains } from "../state/threat-chains.js";
+import type { RequestStalls } from "../state/request-stall.js";
+import type { CoverObligations } from "../state/cover-obligation.js";
 
 export interface HostileScene {
   readonly bot: Bot;
@@ -17,6 +21,10 @@ export interface HostileScene {
   readonly context: ResponseContext;
   /** Hostiles seen since the encounter began and not yet resolved or out of the evade range. */
   readonly encounterThreats: Set<number>;
+  readonly chains: ThreatChains;
+  readonly stalls: RequestStalls;
+  /** The cover the interrupted request still owes the shooters its last evade hid from. */
+  readonly covers: CoverObligations;
   /** Hand a policy change to the policy state; a failure constrains the policy instead of throwing. */
   readonly transition: (pending: Promise<void>) => void;
   /** The response being executed now, null between responses. */
@@ -27,20 +35,12 @@ export function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-/** The window slot of the off-hand. */
-const OFF_HAND_SLOT = 45;
-
 /** What the off-hand holds, by item name; null when it is empty. */
 export function offHandItem(bot: Bot): string | null {
   return bot.inventory.slots[OFF_HAND_SLOT]?.name ?? null;
 }
 
-/** Whether the off-hand already holds a shield. */
-export function shieldInOffHand(bot: Bot): boolean {
-  return bot.inventory.slots[OFF_HAND_SLOT]?.name === "shield";
-}
-
-/** Every shield in the inventory. */
+/** Every shield (family `shield`) in the inventory. */
 export function carriedShields(bot: Bot) {
-  return bot.inventory.items().filter((item) => item.name === "shield");
+  return bot.inventory.items().filter((item) => isShield(bot, item));
 }

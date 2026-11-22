@@ -1,10 +1,10 @@
 import type { Bot } from "mineflayer";
-import { arrowFlight } from "../survival/perception/combat/arrow-flight.js";
+import { arrowFlight, isArrowEntity } from "../survival/perception/combat/arrow-flight.js";
 import { arrowImpactInTicks } from "../survival/perception/combat/shield-projectiles.js";
 
 /** Compact incident evidence. Freshness belongs to the production flight tracker. */
 export function projectileSnapshot(bot: Bot, entity: Bot["entity"]) {
-  if (entity.name !== "arrow" && entity.name !== "spectral_arrow") return undefined;
+  if (!isArrowEntity(bot, entity)) return undefined;
   const now = performance.now();
   const estimate = arrowFlight(bot, entity, now);
   return {

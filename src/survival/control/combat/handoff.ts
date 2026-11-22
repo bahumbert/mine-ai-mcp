@@ -93,7 +93,7 @@ export async function secureCombatHandoff(
     const scope = responseScope(bot, policy, response.kind);
     if (response.kind === "hide") {
       const result = await hideInPlace(bot, {
-        signal,
+        navigation, signal,
         threatContext: observed,
         recoverTo: recoveryHealth(policy().combat),
         maximumMs: policy().combat.recovery_timeout_ms,

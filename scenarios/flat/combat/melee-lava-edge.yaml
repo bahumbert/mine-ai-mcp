@@ -1,5 +1,5 @@
 name: melee-lava-edge
-description: Choose melee footing before an outward hit beside lava, then finish the airborne handoff safely.
+description: Choose melee footing with knockback room before swinging beside lava, then withstand a measured server impulse with the shield lowered.
 minecraft: { version: "1.21.4" }
 world:
   type: flat

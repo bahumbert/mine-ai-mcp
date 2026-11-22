@@ -4,8 +4,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { diskReport, driveLines, type DiskReport, type DiskReportDeps } from "./disk-report.ts";
 import { gb, type DiskDeps, type ModelStoreDeps } from "./disk.ts";
+import type { ServerProgram, Settings } from "../settings.ts";
 import { testContext, testManifest } from "./fixtures/install-test-support.ts";
-import type { StepFailure } from "./step.ts";
+import type { InstallContext, StepFailure } from "./step.ts";
 
 const GIB = 1024 ** 3;
 const ROOT = "C:\\MineAI";
@@ -80,6 +81,11 @@ const asReport = (result: DiskReport | StepFailure): DiskReport => {
   assert.equal(result.ok, true, JSON.stringify(result));
   return result as DiskReport;
 };
+
+/** The same context with a local server that runs `program`. */
+function withServerProgram(ctx: InstallContext, program: ServerProgram): InstallContext {
+  return { ...ctx, settings: { ...ctx.settings, server: { kind: "local", port: 25_565, memoryMb: 4096, program } } };
+}
 
 test("no Ollama and no model: each drive lists its free space and what the local model and the server put there, from the downloads' own sizes", async () => {
   const t = setup();
@@ -275,4 +281,66 @@ test("driveLines groups folders by drive, names what is on each, and says 'not f
     deps,
   );
   assert.deepEqual(lines, ["C: 115.1 GB free (app folder, data folder)", "D: 10.0 GB free (Ollama)", "X: not found (Ollama models)"]);
+});
+
+const PAPER_JAR = join(ROOT, "server", "paper-1.21.4-232.jar");
+const PAPER_PREPARED = join(ROOT, "server", "versions", "1.21.4", "paper-1.21.4.jar");
+const PAPER_BYTES = testManifest().minecraft.paper.bytes;
+const PAPER_INSTALLED = testManifest().minecraft.paper.installedBytes;
+const paperNeedsOf = (report: DiskReport) => report.drives[0]!.needs.filter((need) => need.what === "Paper");
+
+test("paper adds the jar and its installed bytes to the server's line, beside the vanilla jar", async () => {
+  const t = setup();
+  const report = asReport(await diskReport(withServerProgram(t.ctx, "paper"), { dir: undefined, noModel: true }, t.deps));
+  assert.deepEqual(paperNeedsOf(report), [
+    { what: "Paper", bytes: PAPER_BYTES },
+    { what: "Paper", bytes: PAPER_INSTALLED },
+  ]);
+  assert.equal(
+    report.detail,
+    `C: ${gb(100 * GIB)} free. A local Minecraft server needs ${gb(JAVA_ZIP + JAVA_INSTALLED + JAR + PAPER_BYTES + PAPER_INSTALLED)} here (Java ${gb(JAVA_ZIP + JAVA_INSTALLED)}, server jar ${gb(JAR)}, Paper ${gb(PAPER_BYTES + PAPER_INSTALLED)}).`,
+  );
+});
+
+test("Paper preview overrides saved none, remote and vanilla without changing settings or removing its no-model budget", async () => {
+  const t = setup();
+  const servers: Settings["server"][] = [{ kind: "none" }, { kind: "remote", host: "play.example", port: 25_565 }, withServerProgram(t.ctx, "vanilla").settings.server];
+  for (const server of servers) {
+    for (const noModel of [false, true]) {
+      const ctx = { ...t.ctx, settings: { ...t.ctx.settings, server } };
+      const before = structuredClone(ctx.settings);
+      const report = asReport(await diskReport(ctx, { dir: undefined, noModel, serverProgram: "paper" }, t.deps));
+      assert.deepEqual(paperNeedsOf(report).map((need) => need.bytes), [PAPER_BYTES, PAPER_INSTALLED]);
+      assert.equal(report.drives[0]!.needs.some((need) => need.what === "model"), !noModel);
+      assert.deepEqual(ctx.settings, before);
+    }
+  }
+  const vanilla = asReport(await diskReport(withServerProgram(t.ctx, "paper"), { dir: undefined, noModel: true, serverProgram: "vanilla" }, t.deps));
+  assert.deepEqual(paperNeedsOf(vanilla), []);
+});
+
+test("the Paper needs follow what is on disk: the first-start files count until versions holds the patched jar beside the jar", async () => {
+  const rows: [string, string[], [number, number]][] = [
+    ["the jar only: an installed jar still counts its installed bytes", [PAPER_JAR], [0, PAPER_INSTALLED]],
+    ["the jar and the patched jar: both 0", [PAPER_JAR, PAPER_PREPARED], [0, 0]],
+    ["the patched jar without the jar: both still counted", [PAPER_PREPARED], [PAPER_BYTES, PAPER_INSTALLED]],
+  ];
+  for (const [what, existing, [download, installed]] of rows) {
+    const t = setup({ existing });
+    for (const [ctx, serverProgram] of [[withServerProgram(t.ctx, "paper"), undefined], [withServerProgram(t.ctx, "vanilla"), "paper"]] as const) {
+      const report = asReport(await diskReport(ctx, { dir: undefined, noModel: true, serverProgram }, t.deps));
+      assert.deepEqual(paperNeedsOf(report), [
+        { what: "Paper", bytes: download },
+        { what: "Paper", bytes: installed },
+      ], what);
+    }
+  }
+});
+
+test("vanilla unchanged: no Paper need, and the same line as a server without a program", async () => {
+  const t = setup();
+  const vanilla = asReport(await diskReport(withServerProgram(t.ctx, "vanilla"), { dir: undefined, noModel: true }, t.deps));
+  const plain = asReport(await diskReport(t.ctx, { dir: undefined, noModel: true }, t.deps));
+  assert.deepEqual(paperNeedsOf(vanilla), []);
+  assert.equal(vanilla.detail, plain.detail);
 });

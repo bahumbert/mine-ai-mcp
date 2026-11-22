@@ -3,7 +3,7 @@ import { Vec3 } from "vec3";
 import { observedEyeHeight } from "../../../world/block-visibility.js";
 /** Vanilla's distance-dependent eye cone, with margin for look quantisation. */
 export function endermanGazeRisk(bot: Bot, feet: Vec3, yaw: number, pitch: number, selectedId?: number): boolean {
-  if (bot.game.dimension !== "the_end" || bot.inventory.slots[5]?.name === "carved_pumpkin") return false;
+  if (bot.inventory.slots[5]?.name === "carved_pumpkin") return false;
   const origin = feet.offset(0, observedEyeHeight(bot.entity), 0);
   const look = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
   return Object.values(bot.entities).some((entity) => {

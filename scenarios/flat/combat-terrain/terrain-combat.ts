@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { NAVIGATE } from "@aibengineering/mine-ai-mcp";
 import type { BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
@@ -20,7 +21,7 @@ export const run: MineAiScenario = async (context) => {
   const { bot, signal, log } = context;
   const params = paramsSchema.parse(context.scenario.params);
   if (!(await standStill(context))) return { status: "failed", detail: "Player did not settle." };
-  const started = Date.now();
+  const started = monotonicNow();
   let deaths = 0;
   let damage = 0;
   let lastHealth = bot.health;
@@ -59,7 +60,7 @@ export const run: MineAiScenario = async (context) => {
     };
   }
   const frame = () => ({
-    ms: Date.now() - started,
+    ms: monotonicNow() - started,
     position: bot.entity.position.clone(),
     velocity: bot.entity.velocity.clone(),
     onGround: bot.entity.onGround,

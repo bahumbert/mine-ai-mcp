@@ -74,7 +74,6 @@ export const run: MineAiScenario = async (context) => {
       perception,
       resolvedIds: perception.resolvedIds,
       attackerIds: new Set([skeleton.id]),
-      unreachableIds: new Set(),
     };
     log(`RETREAT_START ${JSON.stringify({ healthBefore, start, shots, skeleton: skeleton.position })}`);
     using scenarioCombat1 = new ScenarioCombat(bot, navigation);

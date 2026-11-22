@@ -11,6 +11,7 @@ import { FailedEdges } from "./failed-edges.js";
 import { createMovementCatalogue, type MovementCatalogue } from "../movements/catalogue.js";
 import type { MovementPolicy } from "../movements/policy.js";
 import type { SearchLimits } from "../search/search-result.js";
+import type { RouteAdmission, RouteAdmissionProvider } from "../route-admission.js";
 import type { StepFieldProvider } from "../step-field.js";
 import { silentTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
@@ -92,6 +93,13 @@ export interface Navigator {
    * caller to remember and for a model to get wrong.
    */
   setStepFieldProvider(provider: StepFieldProvider): void;
+  /**
+   * Register the one provider every run asks, at each route commit and step boundary, for the caller's route veto.
+   *
+   * Registered like the step field, and read afresh each time (null clears it): the obligation it enforces appears and
+   * ends outside navigation, and a run never learns who holds it.
+   */
+  setRouteAdmissionProvider(provider: RouteAdmissionProvider | null): void;
   readonly active: NavigationStatus | null;
   cancelActive(reason?: string): void;
   terminateActive(reason: string): void;
@@ -109,6 +117,8 @@ interface SharedRunState {
   readonly failedEdges: FailedEdges;
   readonly telemetry: TelemetrySink;
   readonly stepFieldProvider: StepFieldProvider | null;
+  /** Read through this each time: a provider registered after a run starts still reaches its next commit. */
+  readonly routeAdmission: () => RouteAdmission | null;
 }
 
 function createRunContext(
@@ -134,6 +144,7 @@ function createRunContext(
     // and gets whatever is registered - which is itself null until the
     // session registers one.
     stepField: request.stepField === null ? null : shared.stepFieldProvider,
+    routeAdmission: shared.routeAdmission,
   };
   return { context, revoke: scoped.revoke };
 }
@@ -158,12 +169,16 @@ export function createNavigator(dependencies: {
   const telemetry = dependencies.telemetry ?? silentTelemetry;
   const createId = dependencies.createId ?? (() => `navigation-${Date.now()}-${++sequence}`);
   let stepFieldProvider: StepFieldProvider | null = null;
+  let routeAdmissionProvider: RouteAdmissionProvider | null = null;
   return {
     get active() {
       return activeStatus;
     },
     setStepFieldProvider(provider) {
       stepFieldProvider = provider;
+    },
+    setRouteAdmissionProvider(provider) {
+      routeAdmissionProvider = provider;
     },
     startRun(request: NavigationRequest): NavigationAdmission {
       if (active) return { kind: "busy", activeRunId: active.run.context.runId };
@@ -173,7 +188,7 @@ export function createNavigator(dependencies: {
       const control = new AbortController();
       const { context, revoke } = createRunContext(
         dependencies,
-        { catalogue, ledger, failedEdges, telemetry, stepFieldProvider },
+        { catalogue, ledger, failedEdges, telemetry, stepFieldProvider, routeAdmission: () => routeAdmissionProvider?.() ?? null },
         request,
         runId,
         control,

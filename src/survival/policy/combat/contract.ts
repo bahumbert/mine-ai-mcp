@@ -15,6 +15,8 @@ export const combatPolicySchema = z.strictObject({
   melee: z.boolean(),
   bow: z.boolean(),
   shield: z.boolean(),
+  fight_margin: z.number().finite().min(0).max(10)
+    .describe("Minimum melee advantage for automatic fighting; contact defence and a hunt's quarry remain separate."),
   terrain: z
     .strictObject({ dig: z.boolean(), place: z.boolean() })
     .describe("Combat-owned terrain changes and approaches. Ordinary navigation keeps its own dig/scaffold arguments."),
@@ -36,6 +38,9 @@ export const combatPolicySchema = z.strictObject({
     .min(0)
     .max(20)
     .describe("Health sought before resuming combat; never lower than engage_min_health for hostile pursuit."),
+  quarry_wait_ticks: z.number().int().positive().describe(
+    "Server ticks of fighting without confirmed quarry damage before ending unreachable. Recovery and the guard execution phase pause this engagement window.",
+  ),
   protected_wait_ticks: z
     .number()
     .int()
@@ -52,22 +57,26 @@ export const combatPolicySchema = z.strictObject({
     .number()
     .int()
     .positive()
-    .describe("Physics ticks allowed to observe a ranged volley finish before reporting the guard exhausted."),
+    .describe("Server ticks (world age) allowed to observe a ranged volley finish before reporting the guard exhausted, with a real-time backstop."),
   recovery_timeout_ms: z
     .number()
     .int()
     .positive()
-    .describe("Milliseconds allowed for one protected recovery; routes and eating never renew this hold."),
+    .describe("Game time for one protected recovery at 20 ticks a second (90 000 = 1 800 world ticks at any server speed), with a wall-clock backstop of 3 x (ticks + 20) x 50 ms; routes and eating never renew this hold. The shelter built before it still counts real milliseconds."),
   evade_timeout_ms: z
     .number()
     .int()
     .positive()
-    .describe("Milliseconds allowed for one emergency withdrawal, including projectile defence and route changes."),
+    .describe("Time allowed for one emergency withdrawal, including projectile defence and route changes. For the on-foot evade it is game time at 20 ticks a second (15 000 ms = 300 world ticks at any server speed), with a wall-clock backstop of 3x; the seated evade and the End's withdrawal still count real milliseconds."),
   evade_safe_range: z
     .number()
     .finite()
     .positive()
     .describe("Observed block distance required from each threat before combat withdrawal counts as separation."),
+  evade_clear_range: z.number().finite().positive()
+    .describe("Block distance beyond which a threat that stopped advancing counts as unable to reach the bot; the evade uses the smaller of this and evade_safe_range."),
+  evade_cover_range: z.number().finite().positive()
+    .describe("Block distance beyond which a shooter that cannot see the bot and stopped advancing counts as unable to reach it; the evade uses the smaller of this and evade_safe_range."),
 });
 export type CombatPolicy = z.infer<typeof combatPolicySchema>;
 export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
@@ -78,14 +87,18 @@ export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
   melee: true,
   bow: true,
   shield: true,
+  fight_margin: 1.5,
   terrain: Object.freeze({ dig: true, place: true }),
   engage_min_health: 12,
   critical_health: 8,
   recover_to_health: 18,
   protected_wait_ticks: 300,
+  quarry_wait_ticks: 600,
   enderman_wait_ticks: 300,
   volley_wait_ticks: 100,
   recovery_timeout_ms: 90_000,
   evade_timeout_ms: 15_000,
   evade_safe_range: 36,
+  evade_clear_range: 16,
+  evade_cover_range: 8,
 });

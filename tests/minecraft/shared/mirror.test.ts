@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { getEventListeners } from "node:events";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { type MirrorPorts, SYNC_EXCLUDES, snapshotCwd } from "./mirror.ts";
 import { makeMirror, makeSourceRoot, rootDirOf, withTemp, write } from "./mirror-fixtures.ts";
 import type { RunResult } from "./run-bounded.ts";
@@ -24,6 +25,7 @@ const OK: RunResult = { code: 0, stderrTail: "" };
 /** A `run` that records each call and answers `answer` (exit 0 by default). */
 function recordingRun(answer: (call: Call) => Promise<RunResult> | RunResult = () => OK) {
   const calls: Call[] = [];
+  const started = Promise.withResolvers<void>();
   const run: MirrorPorts["run"] = (command, args, options) => {
     assert.equal(command, "rsync");
     const call: Call = {
@@ -36,9 +38,10 @@ function recordingRun(answer: (call: Call) => Promise<RunResult> | RunResult = (
       target: args.at(-1)!,
     };
     calls.push(call);
+    started.resolve();
     return Promise.resolve(answer(call));
   };
-  return { calls, run };
+  return { calls, run, started: started.promise };
 }
 
 /** Resolves as aborted when the call's signal aborts, like a child killed with its group. */
@@ -64,27 +67,39 @@ async function acquireSnapshot(mirror: ReturnType<typeof makeMirror>["mirror"], 
   return result;
 }
 
-test("a snapshot holds the root's files, node_modules is a link to the modules tree, .snapshot.json names the root and the lockfile hash", async () => withTemp(async dir => {
-  const root = makeSourceRoot(dir);
-  const { mirror, mirrorDir, nodeModules, lines } = makeMirror(dir);
-  const cwd = join(root, "tests", "minecraft");
-  const snapshot = await acquireSnapshot(mirror, cwd);
-  assert.equal(snapshot.dir, join(rootDirOf(mirrorDir, root), "g1"));
-  assert.equal(snapshot.generation, 1);
-  assert.equal(snapshot.root, root);
-  assert.equal(readFileSync(join(snapshot.dir, "src", "a.ts"), "utf8"), "export const a = 1;");
-  assert.equal(lstatSync(join(snapshot.dir, "node_modules")).isSymbolicLink(), true);
-  assert.equal(readlinkSync(join(snapshot.dir, "node_modules")), nodeModules);
-  const info = JSON.parse(readFileSync(join(snapshot.dir, ".snapshot.json"), "utf8")) as Record<string, string>;
-  assert.equal(info.root, root);
-  assert.equal(info.modulesHash, "hash-1");
-  assert.match(info.startedAt!, /^\d{4}-\d\d-\d\dT/u);
-  assert.match(info.finishedAt!, /^\d{4}-\d\d-\d\dT/u);
-  assert.equal(snapshot.startedAt, info.startedAt);
-  assert.equal(snapshotCwd(snapshot, cwd), join(snapshot.dir, "tests", "minecraft"), "snapshotCwd keeps the path inside the root");
-  assert.match(lines.join("\n"), /snapshot g1 of .*synced in \d+ ms/u);
-  snapshot.release();
-}));
+test("a snapshot retains files, module links and source identity with or without Git", async () => {
+  for (const hasGit of [false, true]) await withTemp(async dir => {
+    const root = makeSourceRoot(dir);
+    let head: string | null = null;
+    if (hasGit) {
+      for (const args of [["init"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-m", "source"]]) {
+        assert.equal(spawnSync("git", args, { cwd: root }).status, 0);
+      }
+      head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim();
+    }
+    const { mirror, mirrorDir, nodeModules, lines } = makeMirror(dir);
+    const cwd = join(root, "tests", "minecraft");
+    const snapshot = await acquireSnapshot(mirror, cwd);
+    assert.equal(snapshot.dir, join(rootDirOf(mirrorDir, root), "g1"));
+    assert.equal(snapshot.generation, 1);
+    assert.equal(snapshot.root, root);
+    assert.equal(readFileSync(join(snapshot.dir, "src", "a.ts"), "utf8"), "export const a = 1;");
+    assert.equal(lstatSync(join(snapshot.dir, "node_modules")).isSymbolicLink(), true);
+    assert.equal(readlinkSync(join(snapshot.dir, "node_modules")), nodeModules);
+    const info = JSON.parse(readFileSync(join(snapshot.dir, ".snapshot.json"), "utf8")) as Record<string, string>;
+    assert.equal(info.root, root);
+    assert.equal(info.modulesHash, "hash-1");
+    assert.equal(info.sourceHead, head);
+    assert.equal(snapshot.sourceHead, head);
+    assert.equal(existsSync(join(snapshot.dir, ".git")), false);
+    assert.match(info.startedAt!, /^\d{4}-\d\d-\d\dT/u);
+    assert.match(info.finishedAt!, /^\d{4}-\d\d-\d\dT/u);
+    assert.equal(snapshot.startedAt, info.startedAt);
+    assert.equal(snapshotCwd(snapshot, cwd), join(snapshot.dir, "tests", "minecraft"), "snapshotCwd keeps the path inside the root");
+    assert.match(lines.join("\n"), /snapshot g1 of .*synced in \d+ ms/u);
+    snapshot.release();
+  });
+});
 
 test("excludes: .git, .claude/worktrees, node_modules, .tmp, .agent, a .gitignore'd file are absent, tracked files stay", async () => withTemp(async dir => {
   const root = makeSourceRoot(dir);
@@ -181,24 +196,26 @@ test("exit 24 (a file vanished) from one process and 0 from the rest gives a sna
   const root = makeSourceRoot(dir);
   const { run } = recordingRun(call => (call.include === "/src/" ? { code: 24, stderrTail: "file has vanished" } : OK));
   const { mirror } = makeMirror(dir, { run });
-  const snapshot = await acquireSnapshot(mirror, root);
-  assert.equal(snapshot.kind, "snapshot");
+  await acquireSnapshot(mirror, root);
 }));
 
-test("one process exiting 23 gives in-place 'rsync exited 23: <tail>' as a fallback and kills the others still running: every signal aborted, no g dir", async () => withTemp(async dir => {
-  const root = makeSourceRoot(dir);
-  const { calls, run } = recordingRun(call => (call.include === "/src/" ? { code: 23, stderrTail: "rsync: some files could not be transferred" } : untilAborted(call)));
-  const { mirror, mirrorDir, lines } = makeMirror(dir, { run });
-  const result = await mirror.acquire(root);
-  assert.equal(result.kind, "in-place");
-  if (result.kind !== "in-place") return;
-  assert.equal(result.reason, "rsync exited 23: rsync: some files could not be transferred");
-  assert.equal(result.fallback, true);
-  assert.match(lines.join("\n"), /rsync exited 23/u);
-  assert.equal(calls.length, 3);
-  assert.ok(calls.every(call => call.signal?.aborted === true), "the others were aborted, not left running");
-  assert.deepEqual(generationsOf(rootDirOf(mirrorDir, root)), []);
-}));
+test("rsync failure keeps the short error or the long error's tail, aborts siblings and removes the partial snapshot", async () => {
+  for (const stderrTail of ["rsync: some files could not be transferred", `${"x".repeat(1_500)}END`]) await withTemp(async dir => {
+    const root = makeSourceRoot(dir);
+    const { calls, run } = recordingRun(call => (call.include === "/src/" ? { code: 23, stderrTail } : untilAborted(call)));
+    const { mirror, mirrorDir, lines } = makeMirror(dir, { run });
+    const result = await mirror.acquire(root);
+    assert.equal(result.kind, "in-place");
+    if (result.kind !== "in-place") return;
+    if (stderrTail.endsWith("END")) {
+      assert.ok(result.reason.startsWith("rsync exited 23: ") && result.reason.endsWith("xxxEND") && result.reason.length < 450, `${result.reason.length} characters`);
+    } else assert.equal(result.reason, "rsync exited 23: rsync: some files could not be transferred");
+    assert.equal(result.fallback, true);
+    assert.match(lines.join("\n"), /rsync exited 23/u);
+    assert.ok(calls.every(call => call.signal?.aborted === true), "the others were aborted, not left running");
+    assert.deepEqual(generationsOf(rootDirOf(mirrorDir, root)), []);
+  });
+});
 
 test("an rsync that never started (code -1, no flag) names rsync and says what to check, not 'exited -1'", async () => withTemp(async dir => {
   const root = makeSourceRoot(dir);
@@ -208,23 +225,14 @@ test("an rsync that never started (code -1, no flag) names rsync and says what t
   assert.equal(result.kind === "in-place" ? result.reason : "", "rsync did not run to an exit code (is rsync installed?): spawn rsync ENOENT");
 }));
 
-test("a long rsync stderr reaches the reason as its last 400 characters only", async () => withTemp(async dir => {
-  const root = makeSourceRoot(dir);
-  const { run } = recordingRun(() => ({ code: 23, stderrTail: `${"x".repeat(1_500)}END` }));
-  const { mirror } = makeMirror(dir, { run });
-  const result = await mirror.acquire(root);
-  const reason = result.kind === "in-place" ? result.reason : "";
-  assert.ok(reason.startsWith("rsync exited 23: ") && reason.endsWith("xxxEND") && reason.length < 450, `${reason.length} characters`);
-}));
-
 test("the bound counts from the first start and kills all: in-place 'the sync did not end within N s', each process given the bound", async () => withTemp(async dir => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const root = makeSourceRoot(dir);
   const { calls, run } = recordingRun(untilAborted);
   const { mirror, mirrorDir } = makeMirror(dir, { run }, { syncBoundMs: 200 });
-  const started = performance.now();
-  const result = await mirror.acquire(root);
+  const result = await clock.settle(mirror.acquire(root), 200);
   assert.equal(result.kind === "in-place" ? result.reason : "", "the sync did not end within 0.2 s");
-  assert.ok(performance.now() - started < 3_000, "ended at the bound");
   assert.ok(calls.length === 3 && calls.every(call => call.signal?.aborted === true && call.boundMs === 200));
   assert.deepEqual(generationsOf(rootDirOf(mirrorDir, root)), []);
 }));
@@ -240,11 +248,11 @@ test("a process that reports its own bound hit (timedOut) gives the same reason 
 
 test("a cancelled acquire kills the sync, deletes its partial g, says cancelled, and leaves no listener on the caller's signal", async () => withTemp(async dir => {
   const root = makeSourceRoot(dir);
-  const { calls, run } = recordingRun(untilAborted);
+  const { calls, run, started } = recordingRun(untilAborted);
   const { mirror, mirrorDir, lines } = makeMirror(dir, { run });
   const caller = new AbortController();
   const pending = mirror.acquire(root, caller.signal);
-  while (calls.length < 3) await new Promise(resolve => setTimeout(resolve, 5));
+  await started;
   caller.abort();
   const result = await pending;
   assert.equal(result.kind === "in-place" ? result.reason : "", "the submission was cancelled during the sync");
@@ -256,22 +264,22 @@ test("a cancelled acquire kills the sync, deletes its partial g, says cancelled,
 }));
 
 test("a cancel queued behind another sync of its root answers at once, starts no rsync, and the next acquire still waits for that sync", async () => withTemp(async dir => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const root = makeSourceRoot(dir);
-  const { calls, run } = recordingRun(call => (calls.length <= 3 ? untilAborted(call) : OK));
+  const { calls, run, started } = recordingRun(call => (calls.length <= 3 ? untilAborted(call) : OK));
   const { mirror } = makeMirror(dir, { run }, { syncBoundMs: 1_500 });
   const first = mirror.acquire(root);
   const caller = new AbortController();
   const second = mirror.acquire(root, caller.signal);
   const third = mirror.acquire(root);
-  await new Promise(resolve => setTimeout(resolve, 50));
-  const cancelledAt = performance.now();
+  await started;
   caller.abort();
   const cancelled = await second;
-  assert.ok(performance.now() - cancelledAt < 500, "answered at once, not when the first sync ended");
   assert.equal(cancelled.kind === "in-place" ? cancelled.reason : "", "the submission was cancelled during the sync");
   assert.equal(calls.length, 3, "only the first sync's processes ran: the third still waits for it");
   assert.equal(getEventListeners(caller.signal, "abort").length, 0);
-  const [firstResult, thirdResult] = await Promise.all([first, third]);
+  const [firstResult, thirdResult] = await clock.settle(Promise.all([first, third]), 1_500);
   assert.equal(firstResult.kind === "in-place" ? firstResult.reason : "", "the sync did not end within 1.5 s");
   assert.equal(thirdResult.kind, "snapshot");
 }));
@@ -289,14 +297,19 @@ test("an acquire whose signal is already aborted starts no rsync and makes no g 
 test("two acquires of one root at once sync in order: g1 ends before any process of g2 starts, and g2 links to g1", async () => withTemp(async dir => {
   const root = makeSourceRoot(dir);
   const events: string[] = [];
-  const { calls, run } = recordingRun(async call => {
+  const finish = Promise.withResolvers<void>();
+  const { calls, run, started } = recordingRun(async call => {
     events.push(`start ${call.target}`);
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await finish.promise;
     events.push(`end ${call.target}`);
     return OK;
   });
   const { mirror } = makeMirror(dir, { run });
-  const [a, b] = await Promise.all([mirror.acquire(root), mirror.acquire(root)]);
+  const pending = Promise.all([mirror.acquire(root), mirror.acquire(root)]);
+  await started;
+  assert.ok(calls.every(call => call.target.includes("/g1/")), "the second sync waits for the first");
+  finish.resolve();
+  const [a, b] = await pending;
   assert.deepEqual([a, b].map(result => (result.kind === "snapshot" ? result.generation : 0)), [1, 2]);
   const secondCalls = calls.filter(call => call.target.includes("/g2/"));
   assert.ok(secondCalls.length === 3 && a.kind === "snapshot" && secondCalls.every(call => call.args.includes(`--link-dest=${a.dir}`)), "g2 links to g1");
@@ -323,39 +336,40 @@ test("release of g1 while g2 exists deletes g1; release of the newest keeps it; 
 
 /** Calls `acquire` with a `notify` that records its lines; each rsync process answers ok after `heldMs`. */
 async function acquireWithHeldSync(dir: string, options: { slowSyncNoticeMs?: number }, heldMs: number) {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const root = makeSourceRoot(dir);
   const notices: string[] = [];
   const { mirror } = makeMirror(dir, { run: () => new Promise(resolve => setTimeout(() => resolve(OK), heldMs)) }, options);
-  const result = await mirror.acquire(root, undefined, line => notices.push(line));
+  const result = await clock.settle(mirror.acquire(root, undefined, line => notices.push(line)), heldMs + 1, 1);
   return { root, notices, result };
 }
 
-test("a slow sync prints its start line once, before the end, and the snapshot still comes", async () => withTemp(async dir => {
-  const { root, notices, result } = await acquireWithHeldSync(dir, { slowSyncNoticeMs: 30 }, 200);
-  assert.equal(result.kind, "snapshot");
-  assert.deepEqual(notices, [`syncing ${root} to the client mirror ...`]);
-  if (result.kind === "snapshot") result.release();
-}));
-
-test("a fast sync prints no start line", async () => withTemp(async dir => {
-  const { notices, result } = await acquireWithHeldSync(dir, {}, 0);
-  assert.equal(result.kind, "snapshot");
-  assert.deepEqual(notices, []);
-  if (result.kind === "snapshot") result.release();
-}));
+test("a snapshot prints one start notice only when its sync passes the threshold", async () => {
+  for (const heldMs of [0, 200]) await withTemp(async dir => {
+    const { root, notices, result } = await acquireWithHeldSync(dir, { slowSyncNoticeMs: 30 }, heldMs);
+    assert.equal(result.kind, "snapshot");
+    assert.deepEqual(notices, heldMs === 0 ? [] : [`syncing ${root} to the client mirror ...`]);
+    if (result.kind === "snapshot") result.release();
+  });
+});
 
 test("a sync that ends in failure leaves no timer: no line comes after the answer", async () => withTemp(async dir => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const root = makeSourceRoot(dir);
   const notices: string[] = [];
   const { mirror } = makeMirror(dir, { run: async () => ({ code: 23, stderrTail: "boom" }) }, { slowSyncNoticeMs: 30 });
   const result = await mirror.acquire(root, undefined, line => notices.push(line));
   assert.equal(result.kind, "in-place");
   const linesAtAnswer = notices.length;
-  await new Promise(resolve => setTimeout(resolve, 80));
+  await clock.advance(80);
   assert.equal(notices.length, linesAtAnswer, "the notice timer was cleared at the answer");
 }));
 
 test("a submitter who left gets no start line", async () => withTemp(async dir => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const root = makeSourceRoot(dir);
   const notices: string[] = [];
   const controller = new AbortController();
@@ -365,7 +379,7 @@ test("a submitter who left gets no start line", async () => withTemp(async dir =
     return new Promise(resolve => setTimeout(() => resolve(OK), 200));
   };
   const { mirror } = makeMirror(dir, { run }, { slowSyncNoticeMs: 30 });
-  await mirror.acquire(root, controller.signal, line => notices.push(line));
+  await clock.settle(mirror.acquire(root, controller.signal, line => notices.push(line)), 200);
   assert.deepEqual(notices, []);
 }));
 

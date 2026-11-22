@@ -7,13 +7,20 @@ import type { ClientCompletion, ScenarioDefinition } from "mine-labs/client";
 import type { Bot } from "mineflayer";
 import type { ActionOutput, ActionResult } from "@aibengineering/mine-ai-mcp";
 import type { ArenaFrame } from "./arena/frame.ts";
+import type { SurvivalReceipt } from "../../src/survival/evidence/contract.ts";
+import type { NavigationEvent } from "../../src/navigation/telemetry/index.ts";
 
 /** Action evidence, independent of the test's expectation. */
 export interface ScenarioCall extends ActionOutput<string, ActionResult> {
   readonly summary: string;
+  readonly requestId?: number;
 }
 
 export interface ScenarioContext {
+  readonly signal?: AbortSignal;
+  readonly log?: (message: string) => void;
+  readonly onSurvivalReceipt?: (observer: (receipt: SurvivalReceipt) => void) => () => void;
+  readonly onNavigationEvent?: (observer: (event: NavigationEvent, owner?: { requestId: number | null; current: string | null }) => void) => () => void;
   readonly scenario: ScenarioDefinition;
   /**
    * The lane this client runs in (`MINE_AI_ARENA`; the zero offset on a plain `mine-labs run`). A scenario's YAML `params`
@@ -23,6 +30,8 @@ export interface ScenarioContext {
   readonly arena: ArenaFrame;
   /** The bot, for reading state only (vehicle, position, inventory); every action goes through `call`. */
   readonly bot: Bot;
+  /** Server-confirmed productive evidence resets the trial's still watchdog. */
+  progress(reason: string): void;
   /** Let a fixture settle after the trial starts, before taking action. */
   waitForTicks(ticks: number): Promise<void>;
   /**

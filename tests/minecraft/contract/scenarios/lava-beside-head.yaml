@@ -1,0 +1,148 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-lava-beside-head
+tags:
+  - contract
+description: "Lava at head height beside the body, with an open cell under it, flows into the body or not: levels 0, 2, 4 and 6 are read over lava steps. Contract check tests/minecraft/contract/checks/lava-beside-head.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: lava-beside-head
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -2 -60 -5 stone
+  - setblock -1 -60 -5 stone
+  - setblock -3 -59 -5 stone
+  - setblock -3 -58 -5 stone
+  - setblock 0 -59 -5 stone
+  - setblock 0 -58 -5 stone
+  - setblock -3 -59 -6 stone
+  - setblock -3 -59 -4 stone
+  - setblock -3 -58 -6 stone
+  - setblock -3 -58 -4 stone
+  - setblock -2 -59 -6 stone
+  - setblock -2 -59 -4 stone
+  - setblock -2 -58 -6 stone
+  - setblock -2 -58 -4 stone
+  - setblock -1 -59 -6 stone
+  - setblock -1 -59 -4 stone
+  - setblock -1 -58 -6 stone
+  - setblock -1 -58 -4 stone
+  - setblock 0 -59 -6 stone
+  - setblock 0 -59 -4 stone
+  - setblock 0 -58 -6 stone
+  - setblock 0 -58 -4 stone
+  - setblock -2 -60 -2 stone
+  - setblock -1 -60 -2 stone
+  - setblock -3 -59 -2 stone
+  - setblock -3 -58 -2 stone
+  - setblock 1 -59 -2 stone
+  - setblock 1 -58 -2 stone
+  - setblock 0 -59 -2 stone
+  - setblock -3 -59 -3 stone
+  - setblock -3 -59 -1 stone
+  - setblock -3 -58 -3 stone
+  - setblock -3 -58 -1 stone
+  - setblock -2 -59 -3 stone
+  - setblock -2 -59 -1 stone
+  - setblock -2 -58 -3 stone
+  - setblock -2 -58 -1 stone
+  - setblock -1 -59 -3 stone
+  - setblock -1 -59 -1 stone
+  - setblock -1 -58 -3 stone
+  - setblock -1 -58 -1 stone
+  - setblock 0 -59 -3 stone
+  - setblock 0 -59 -1 stone
+  - setblock 0 -58 -3 stone
+  - setblock 0 -58 -1 stone
+  - setblock 1 -59 -3 stone
+  - setblock 1 -59 -1 stone
+  - setblock 1 -58 -3 stone
+  - setblock 1 -58 -1 stone
+  - setblock -2 -60 1 stone
+  - setblock -1 -60 1 stone
+  - setblock -3 -59 1 stone
+  - setblock -3 -58 1 stone
+  - setblock 2 -59 1 stone
+  - setblock 2 -58 1 stone
+  - setblock 0 -59 1 stone
+  - setblock 1 -59 1 stone
+  - setblock -3 -59 0 stone
+  - setblock -3 -59 2 stone
+  - setblock -3 -58 0 stone
+  - setblock -3 -58 2 stone
+  - setblock -2 -59 0 stone
+  - setblock -2 -59 2 stone
+  - setblock -2 -58 0 stone
+  - setblock -2 -58 2 stone
+  - setblock -1 -59 0 stone
+  - setblock -1 -59 2 stone
+  - setblock -1 -58 0 stone
+  - setblock -1 -58 2 stone
+  - setblock 0 -59 0 stone
+  - setblock 0 -59 2 stone
+  - setblock 0 -58 0 stone
+  - setblock 0 -58 2 stone
+  - setblock 1 -59 0 stone
+  - setblock 1 -59 2 stone
+  - setblock 1 -58 0 stone
+  - setblock 1 -58 2 stone
+  - setblock 2 -59 0 stone
+  - setblock 2 -59 2 stone
+  - setblock 2 -58 0 stone
+  - setblock 2 -58 2 stone
+  - setblock -2 -60 4 stone
+  - setblock -1 -60 4 stone
+  - setblock -3 -59 4 stone
+  - setblock -3 -58 4 stone
+  - setblock 3 -59 4 stone
+  - setblock 3 -58 4 stone
+  - setblock 0 -59 4 stone
+  - setblock 1 -59 4 stone
+  - setblock 2 -59 4 stone
+  - setblock -3 -59 3 stone
+  - setblock -3 -59 5 stone
+  - setblock -3 -58 3 stone
+  - setblock -3 -58 5 stone
+  - setblock -2 -59 3 stone
+  - setblock -2 -59 5 stone
+  - setblock -2 -58 3 stone
+  - setblock -2 -58 5 stone
+  - setblock -1 -59 3 stone
+  - setblock -1 -59 5 stone
+  - setblock -1 -58 3 stone
+  - setblock -1 -58 5 stone
+  - setblock 0 -59 3 stone
+  - setblock 0 -59 5 stone
+  - setblock 0 -58 3 stone
+  - setblock 0 -58 5 stone
+  - setblock 1 -59 3 stone
+  - setblock 1 -59 5 stone
+  - setblock 1 -58 3 stone
+  - setblock 1 -58 5 stone
+  - setblock 2 -59 3 stone
+  - setblock 2 -59 5 stone
+  - setblock 2 -58 3 stone
+  - setblock 2 -58 5 stone
+  - setblock 3 -59 3 stone
+  - setblock 3 -59 5 stone
+  - setblock 3 -58 3 stone
+  - setblock 3 -58 5 stone
+players:
+  - name: Actor
+    pos:
+      - 5.5
+      - -60
+      - 5.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

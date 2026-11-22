@@ -1,13 +1,14 @@
-/**
- * What a contract check acts on: the bot, time, and the two server-side means a check needs (a block edit, the
- * server's record of a rider), on the shared fake (`createFakeBot`) or on a real server through Mine Labs.
- */
+// Contract subjects supply server edits, queries and time on the shared fake or real Minecraft through Mine Labs.
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { FakeCell, FakeHarness, ShotProjectile, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
+import { createMeasureReader } from "./checks/combat-data-measure.ts";
+import { CONTRACT_STORAGE, SERVER_EDIT_WALL_MS, fakeBlockActions, fakeBodyPosition, serverBlockActions, serverBodyPosition } from "./subject-position.ts";
+
+export { blockArgument } from "./subject-position.ts";
 
 /** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
 export type LocalPoint = readonly [number, number, number];
@@ -17,6 +18,8 @@ export type ContractBot = Bot & { vehicle?: Entity | null };
 
 export interface ContractSubject {
   readonly bot: ContractBot;
+  /** The shared fake has no chunk-packet loading; a server subject can request a reload by teleport. */
+  readonly chunkPackets: "not-simulated" | "server";
   /** Where an arena-local point is in the world this subject runs in: a check names every cell and position through it, so one check runs in any lane. */
   world(local: LocalPoint): Vec3;
   /** Let `ms` pass: real time on a server, `clock.advance` on the fake. */
@@ -25,8 +28,22 @@ export interface ContractSubject {
   now(): number;
   /** Change a cell on the server's side (an op command on a real server); resolves once the client has the update. */
   setBlock(cell: Vec3, block: FakeCell): Promise<void>;
+  /** Whether the server's cell matches the block, independently of client prediction. */
+  blockIs(cell: Vec3, block: string, properties?: Readonly<Record<string, string | number | boolean>>): Promise<boolean>;
+  /** Teleport to exact world coordinates and wait for the matching forced move. */
+  teleportFeet(position: Vec3): Promise<void>;
+  /** Suspend the motion solver for the fixed-position probe and restore it on disposal. */
+  holdBodyStill(): Disposable;
+  /** Read feet and air from the server, independently of client motion and metadata. */
+  readBodyOnServer(): Promise<{ feet: Vec3; air: number }>;
   /** Whether the server still has the bot riding `vehicle`, whatever the client believes. */
   seatedOnServer(vehicle: Entity): Promise<boolean>;
+  /** The world's spawn the server told the client (the `spawn_position` packet, `bot.spawnPoint`): a world position, in the world and not in the lane. The fake sends no such packet and answers its respawn point, which a night in a bed moves. */
+  worldSpawn(): Vec3;
+  /** The server sets the bot's own spawn point at a world cell; resolves once the server ran it. */
+  setSpawnPoint(cell: Vec3): Promise<void>;
+  /** The player-data key form and coordinates the server holds for the command-set point. */
+  spawnPointKeys(): Promise<string>;
   /** Set the weather on the server (`/weather`); the levels then ramp, and the client hears each step. */
   setWeather(weather: Weather): Promise<void>;
   /** The server spawns `stack` as an item entity at `position` (a world position: `world` of a local one), pickable after `pickupDelayTicks`; resolves with it once the client has it. */
@@ -35,10 +52,14 @@ export interface ContractSubject {
   hurtBot(amount: number, sourceId: number | null): Promise<void>;
   /** The server kills a mob (`/kill`); resolves once the client heard it die. */
   kill(entityId: number): Promise<void>;
+  /** The server kills the bot (`/kill` on her name); resolves once the client heard her die (`death`). The client asks to respawn by itself, as Mineflayer's `health.js` does. */
+  killBot(): Promise<void>;
   /** A creeper ignited with no fuse explodes at `position`, breaking no block; resolves once the client heard the explosion. */
   explode(position: Vec3): Promise<void>;
   /** The server summons the mob `name` at `position` (a world position) with the raw SNBT `nbt` (the fake reads none: its mobs have no AI); resolves with it once the client has it. */
   summonMob(name: string, position: Vec3, nbt?: string): Promise<Entity>;
+  /** Wait for a mob to collect the item; the fake delivers the measured answer. */
+  mobTakesItem(mob: Entity, item: Entity, count: number): Promise<void>;
   /** The server removes a mob it summoned (`/kill`); resolves once the client no longer has it. */
   removeMob(mob: Entity): Promise<void>;
   /** A fireball (a ghast's) is summoned at `position` flying with `motion` (blocks a tick) and a small acceleration, with no block broken by its blast (the `mobGriefing` game rule is off until `clearFireballs`: a server-wide rule); resolves with it once the client has it. */
@@ -81,10 +102,6 @@ const SHOT_COST: Readonly<Record<ProjectileName, number>> = { arrow: 3, small_fi
 
 /** The line a `tellraw` of the stored game time prints: this text, then the count. */
 const GAME_TIME_LINE = "contract-gametime ";
-/** The `storage` namespace that holds each bot's last `time query gametime` (one key per bot, so lanes never read each other's). */
-const GAME_TIME_STORAGE = "mine_ai:contract";
-/** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
-const SERVER_EDIT_WALL_MS = 3_000;
 /** An item entity spawned this close to where `/summon` put it is the summoned one (the server may nudge it a tick later). */
 const SUMMON_MATCH_DISTANCE = 0.5;
 /** The server's selector for the one entity the client sees at `entity`'s place (a mob that does not move). */
@@ -159,8 +176,8 @@ function createGameTimeQueries(bot: Bot) {
         };
         if (waiting.length === 0) bot.on("messagestr", onMessage as never);
         waiting.push(query);
-        bot.chat(`/execute store result storage ${GAME_TIME_STORAGE} ${key} int 1 run time query gametime`);
-        bot.chat(`/tellraw @s {"text":"${GAME_TIME_LINE}","extra":[{"nbt":"${key}","storage":"${GAME_TIME_STORAGE}"}]}`);
+        bot.chat(`/execute store result storage ${CONTRACT_STORAGE} ${key} int 1 run time query gametime`);
+        bot.chat(`/tellraw @s {"text":"${GAME_TIME_LINE}","extra":[{"nbt":"${key}","storage":"${CONTRACT_STORAGE}"}]}`);
       }),
   };
 }
@@ -256,7 +273,7 @@ function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait"
 
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
-  const { bot, clock, combat, entities, server, world } = harness;
+  const { bot, clock, combat, entities, server } = harness;
   const wait = (ms: number) => clock.advance(ms);
   const now = () => clock.now();
   /** `run` is the server's answer; the clock runs until it has (a server answering late or stalled), as the real subject waits for the client to hear it (`spawnedNear`, `heardWithin`, `commandUntil`), within the same wall bound. Resolves with what `run` returned. */
@@ -270,6 +287,7 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     return answered.value;
   };
   return {
+    chunkPackets: "not-simulated",
     bot,
     world: (local) => new Vec3(...arena.world(local)),
     wait,
@@ -281,10 +299,20 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => server.resendTime());
       await clock.advance(50);
     },
-    async setBlock(cell, block) {
-      await afterAnswer(() => world.setCell(cell, block), "setBlock");
-    },
+    ...fakeBlockActions(harness, { now, wait }, afterAnswer),
+    ...fakeBodyPosition(harness, { now, wait }),
     seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
+    // The fake sends no `spawn_position` (no measured answer to copy): its world spawn is the point it respawns her at (`fake-harness.ts`).
+    worldSpawn: () => server.respawnPoint!.clone(),
+    async setSpawnPoint(cell) {
+      // The initial position packet is 0.1 above the cell (respawn-at-set-point, real 1.21.4, 2026-11-16).
+      await afterAnswer(() => server.setRespawnPoint(cell.offset(0.5, 0.1, 0.5)), "setSpawnPoint");
+    },
+    async spawnPointKeys() {
+      // Measured by respawn-at-set-point on real 1.21.4 (2026-11-16); the fake stores the packet position.
+      const cell = server.respawnPoint!.floored();
+      return `SpawnX:${cell.x},SpawnY:${cell.y},SpawnZ:${cell.z}`;
+    },
     async setWeather(weather) {
       server.answer(() => server.setWeather(weather));
       await clock.advance(50);
@@ -297,10 +325,16 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     async kill(entityId) {
       await afterAnswer(() => combat.kill(entityId), "kill");
     },
+    async killBot() {
+      await afterAnswer(() => combat.setHealth(0), "killBot");
+    },
     async explode(position) {
       await afterAnswer(() => combat.explode(position), "explode");
     },
     summonMob: (name, position) => afterAnswer(() => entities.spawn({ name, position }), "summonMob"),
+    async mobTakesItem(mob, item, count) {
+      await afterAnswer(() => entities.takenBy(mob, item, count), "mobTakesItem");
+    },
     async removeMob(mob) {
       await afterAnswer(() => entities.remove(mob.id), "removeMob");
     },
@@ -312,14 +346,6 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       await afterAnswer(() => Object.values(bot.entities).filter(({ name }) => name === "fireball").forEach(({ id }) => entities.remove(id)), "clearFireballs");
     },
   };
-}
-
-/** A block as the `setblock` command writes it: `name[key=value,...]`. */
-export function blockArgument(block: FakeCell): string {
-  if (typeof block === "number") throw new Error(`a state id (${block}) has no command form: name the block`);
-  if (typeof block === "string") return block;
-  const properties = Object.entries(block.properties).map(([key, value]) => `${key}=${value}`);
-  return `${block.name}[${properties.join(",")}]`;
 }
 
 /** Arena-local cells a real-server subject writes (in its lane) to answer `seatedOnServer`: a probe the server sets only for a seated rider, then a sentinel. */
@@ -339,6 +365,24 @@ async function commandUntil(bot: Bot, command: string, cell: Vec3, name: string)
   }
 }
 
+/** Wait up to 200 server ticks for the named mob's collect. */
+async function waitForMobPickup(bot: Bot, clock: Pick<ContractSubject, "now" | "wait">, mob: Entity, item: Entity): Promise<void> {
+  let collected = false;
+  let startAge: number | null = bot.time.age;
+  const onCollect = (collector: Entity, entity: Entity) => { if (collector.id === mob.id && entity.id === item.id) collected = true; };
+  bot.on("playerCollect", onCollect);
+  try {
+    const finished = await holdsWhileMoving(clock, () => {
+      const age: number | null = bot.time.age;
+      if (age !== null) startAge ??= age;
+      return collected || (age !== null && startAge !== null && age - startAge >= 219);
+    }, () => bot.time.age, 10_000);
+    if (!finished || !collected) throw new Error("mobTakesItem: no matching collect within 200 server ticks");
+  } finally {
+    bot.off("playerCollect", onCollect);
+  }
+}
+
 /** A real server's subject: wall time, and op commands sent as chat (the fixture's player is op). */
 export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubject {
   const at = (cell: Vec3) => `${cell.x} ${cell.y} ${cell.z}`;
@@ -349,20 +393,33 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
   const wait = (ms: number) => delay(ms);
   const now = () => performance.now();
   return {
+    chunkPackets: "server",
     bot,
     world,
     wait,
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
     serverGameTime: gameTimeQueries.ask,
+    ...serverBlockActions(bot, (command, cell, name) => commandUntil(bot, command, cell, name)),
+    ...serverBodyPosition(bot, { now, wait }),
     // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
     async resendTime() {
       // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.
       bot.chat(`/time set ${bot.time.time}`);
     },
-    async setBlock(cell, block) {
-      const name = typeof block === "string" ? block : typeof block === "number" ? "" : block.name;
-      await commandUntil(bot, `setblock ${at(cell)} ${blockArgument(block)}`, cell, name);
+    worldSpawn: () => bot.spawnPoint.clone(),
+    async setSpawnPoint(cell) {
+      const [answer] = await createMeasureReader(this).read([`run spawnpoint ${bot.username} ${at(cell)}`]);
+      if (!answer?.present) throw new Error(`spawnpoint ${bot.username} ${at(cell)} failed: check the cell and operator permission`);
+    },
+    async spawnPointKeys() {
+      const reader = createMeasureReader(this);
+      const keys = ["SpawnX", "SpawnY", "SpawnZ"];
+      const legacy = await reader.read(keys.map((key) => `run data get entity ${bot.username} ${key}`));
+      if (legacy.every(({ present }) => present)) return keys.map((key, index) => `${key}:${legacy[index]!.raw}`).join(",");
+      const compound = await reader.read([0, 1, 2].map((index) => `run data get entity ${bot.username} respawn.pos[${index}]`));
+      if (compound.every(({ present }) => present)) return `respawn:{pos:[I;${compound.map(({ raw }) => raw).join(",")}]}`;
+      throw new Error(`no complete SpawnX/Y/Z or respawn.pos player data for ${bot.username}: check the server version and spawnpoint command`);
     },
     async seatedOnServer() {
       // Commands run in order: once the sentinel is set, the probe holds what the `on vehicle` branch did.
@@ -382,6 +439,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
     },
+    mobTakesItem: (mob, item) => waitForMobPickup(bot, { now, wait }, mob, item),
     async hurtBot(amount, sourceId) {
       const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, "/damage");
       const source = sourceId === null ? "minecraft:generic" : `minecraft:mob_attack by ${selectorOf(bot.entities[sourceId]!)}`;
@@ -394,25 +452,33 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/kill ${selectorOf(mob)}`);
       await heard;
     },
-    async explode(position) {
-      const heard = new Promise<void>((resolve, reject) => {
-        const onExplosion = () => {
-          clearTimeout(timer);
-          resolve();
-        };
-        const timer = setTimeout(() => {
-          bot._client.off("explosion", onExplosion);
-          reject(new Error(`/summon creeper: no explosion after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
-        }, SERVER_EDIT_WALL_MS);
-        bot._client.once("explosion", onExplosion);
-      });
-      bot.chat("/gamerule mobGriefing false");
-      bot.chat(`/summon creeper ${at(position)} {Fuse:0,ignited:1b}`);
+    async killBot() {
+      const heard = heardWithin(bot, "death", () => true, "/kill");
+      bot.chat(`/kill ${bot.username}`);
       await heard;
-      bot.chat("/gamerule mobGriefing true");
     },
+    explode: (position) => explodeOnServer(bot, position, at),
     ...serverMobActions(bot, at),
   };
+}
+
+/** A creeper ignited with no fuse explodes at `position` with `mobGriefing` off; resolves once the client heard the explosion. */
+async function explodeOnServer(bot: Bot, position: Vec3, at: (cell: Vec3) => string): Promise<void> {
+  const heard = new Promise<void>((resolve, reject) => {
+    const onExplosion = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      bot._client.off("explosion", onExplosion);
+      reject(new Error(`/summon creeper: no explosion after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`));
+    }, SERVER_EDIT_WALL_MS);
+    bot._client.once("explosion", onExplosion);
+  });
+  bot.chat("/gamerule mobGriefing false");
+  bot.chat(`/summon creeper ${at(position)} {Fuse:0,ignited:1b}`);
+  await heard;
+  bot.chat("/gamerule mobGriefing true");
 }
 
 /** The subject's means on mobs, projectiles and fireballs on a real server (op commands), `at` writing a position for a command. */

@@ -3,6 +3,8 @@ set -euo pipefail
 cd /opt/mine-ai-mcp
 mkdir -p "$CLAUDE_CONFIG_DIR"
 if [[ "${RUN_MODE:-play}" == login ]]; then exec claude auth login; fi
+source /opt/mine-ai-mcp/docker/minecraft-folder.sh
+refuse_vanilla_on_paper_world || exit 1
 launch=$(bun docker/prepare.mjs)
 IFS=$'\t' read -r session attempt claude_mode <<<"$launch"
 [[ -n "$session" && -n "$attempt" && -n "$claude_mode" ]] || { echo 'Docker preparation returned an invalid launch identity' >&2; exit 1; }
@@ -36,13 +38,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+prepare_minecraft_folder || exit 1
 [[ -p /tmp/minecraft-input ]] || mkfifo /tmp/minecraft-input
 exec 3<>/tmp/minecraft-input
-cd /data/minecraft
 touch "$MINECRAFT_LOG"
-java "-Xmx${JAVA_MEMORY:-2G}" -jar /opt/server.jar nogui <&3 >"$MINECRAFT_LOG" 2>"$MINECRAFT_LOG.stderr" &
-java_pid=$!
-cd /opt/mine-ai-mcp
+launch_minecraft
 bun docker/observers.mjs &
 observer_pid=$!
 # Startup has a three-minute deadline; gameplay has no time limit.

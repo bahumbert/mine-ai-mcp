@@ -1,10 +1,11 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { sleepMs as delay } from "../../../src/utils/wall-timers.ts";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaPoint, arenaX } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { boatNamed, carriedBoats } from "./boat-state.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 const requestSchemaIn = (arena: ArenaFrame) => z.strictObject({
   /** The far land the navigate is aimed at, over a sea the bot crosses by boat. */
@@ -38,8 +39,9 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   if (settled.result.status === "succeeded") return { status: "failed", detail: `the cancelled navigate succeeded: ${settled.summary}` };
   if (waited > settleWithinMs) return { status: "failed", detail: `the navigate settled ${waited} ms after the cancel, over ${settleWithinMs} ms: ${settled.summary}` };
   if (!boatNamed(boat?.name)) return { status: "failed", detail: `the bot left its boat at the cancel (vehicle ${boat?.name ?? "none"}): ${settled.summary}; cancel: ${cancel.summary}` };
+  if (await waitServerTicks(bot, 40) === "stalled") return { status: "failed", detail: "the server's clock stood still" };
   const stoppedAt = boat!.position.clone();
-  await delay(1_000);
+  if (await waitServerTicks(bot, 20) === "stalled") return { status: "failed", detail: "the server's clock stood still" };
   const drift = bot.entity.vehicle === boat ? boat!.position.distanceTo(stoppedAt) : Number.POSITIVE_INFINITY;
   const dropped = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   if (drift > 1) return { status: "failed", detail: `the boat moved ${drift.toFixed(1)} blocks after the stop, or the bot left it: ${settled.summary}` };

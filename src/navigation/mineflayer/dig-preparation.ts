@@ -3,8 +3,29 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { DIG_REACH } from "../movements/excavation.js";
-import type { Position3 } from "../world/world.js";
+import type { BlockPosition, Position3 } from "../world/world.js";
+import type { MineflayerBotSurface } from "./bot.js";
 import { observeMineflayerBlock } from "./world.js";
+
+/** The stance and vertical aim chosen before a break's preparation begins. */
+export interface BreakAim {
+  readonly feet: BlockPosition;
+  readonly belowFeet: boolean;
+  readonly aboveHead: boolean;
+  readonly yaw: number | undefined;
+}
+
+/** Equip the planned tool, reporting its absence instead of silently digging by hand. */
+export async function equipDigTool(bot: MineflayerBotSurface, toolType: number | null): Promise<string | null> {
+  if (toolType === null) {
+    await bot.putAwayHeldTool?.().catch(() => {});
+    return null;
+  }
+  const item = bot.inventory.items().find((candidate) => candidate.type === toolType);
+  if (!item) return `The route planned to break with ${bot.itemName?.(toolType) ?? `item type ${toolType}`}, which is not in the inventory.`;
+  await bot.equip(item, "hand");
+  return null;
+}
 
 /**
  * Put a held tool (an item that wears out) away before a dig no tool speeds up: a pickaxe on dirt digs at hand speed

@@ -31,6 +31,7 @@ export type CombatDecision =
       readonly execution: CombatExecutionSnapshot;
       readonly outcome: string | null;
       readonly observation: string | null;
+      readonly quarryStopPending?: boolean;
     }
   | { readonly kind: "roof_prepared"; readonly targetId: number; readonly cell: Vec3; readonly stopped: string | null }
   | { readonly kind: "roof_provoked"; readonly targetId: number; readonly cell: Vec3; readonly plannedBlocks: number }
@@ -67,7 +68,7 @@ export type CombatOutcome =
   /** A different immediate danger must be handled before this target can be pursued. */
   | (CombatResult<"defence_required"> & { readonly observation: string })
   /** No route reached the target; the caller must decide, because retrying is being shot for nothing. */
-  | (CombatResult<"unreachable"> & { readonly observation: string })
+  | (CombatResult<"unreachable"> & { readonly observation: string; readonly premise?: "no_confirmed_damage" })
   | (CombatResult<"failed"> & { readonly observation: string });
 
 export interface CombatResult<Kind extends string> {
@@ -103,7 +104,16 @@ export interface CombatController {
     signal: AbortSignal,
   ): Promise<EndCombatResult>;
   endDanger(): boolean;
-  engage(targetId: number, signal: AbortSignal, movement: "pursue" | "hold"): Promise<CombatOutcome>;
+  /**
+   * `options.satisfied` is the caller's own goal (the hunt's carried quantity): once it holds, the engagement ends
+   * `target_lost` at its next decision, between fights and inside one. The combat layer knows no item, mob or count.
+   */
+  engage(
+    targetId: number,
+    signal: AbortSignal,
+    movement: "pursue" | "hold",
+    options?: { readonly satisfied?: () => boolean },
+  ): Promise<CombatOutcome>;
   stop(reason: string): Promise<void>;
   /** The caller retains ownership until protection/separation succeeds or its physical limits are observed. */
   finish(signal: AbortSignal): Promise<CombatHandoff>;

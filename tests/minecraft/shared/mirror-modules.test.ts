@@ -20,6 +20,7 @@ function makeRoot(dir: string): string {
   write(join(root, "package.json"), '{"name":"x"}');
   write(join(root, "bun.lock"), "lock v1");
   write(join(root, "patches", "a.patch"), "patch a");
+  write(join(root, "scripts", "modules-guard.ts"), "guard");
   write(join(root, "src", "index.ts"), "export {};");
   return root;
 }
@@ -29,13 +30,14 @@ async function withTemp(body: (dir: string) => Promise<void> | void): Promise<vo
   try { await body(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-interface RunCall { readonly command: string; readonly args: readonly string[]; readonly cwd: string; readonly boundMs: number; readonly inputsSeen: readonly string[] }
+interface RunCall { readonly command: string; readonly args: readonly string[]; readonly cwd: string; readonly boundMs: number; readonly inputsSeen: readonly string[]; readonly guardSeen: string }
 /** A `run` that records its calls and, unless `behave` says otherwise, installs a `node_modules/mine-labs` in its cwd like a good `bun install`. */
 function fakePorts(behave?: (call: RunCall) => Promise<RunResult> | RunResult, alive: (pid: number) => boolean = () => true) {
   const calls: RunCall[] = [];
   const ports: ModulesPorts = {
     async run(command, args, options) {
-      const call = { command, args, cwd: options.cwd, boundMs: options.boundMs, inputsSeen: readdirSync(options.cwd).sort() };
+      const guard = join(options.cwd, "scripts", "modules-guard.ts");
+      const call = { command, args, cwd: options.cwd, boundMs: options.boundMs, inputsSeen: readdirSync(options.cwd).sort(), guardSeen: existsSync(guard) ? readFileSync(guard, "utf8") : "" };
       calls.push(call);
       if (behave) return behave(call);
       mkdirSync(join(options.cwd, "node_modules", "mine-labs"), { recursive: true });
@@ -103,10 +105,22 @@ test("a missing tree answers installing at once, installs in <hash>.tmp-<pid>, r
   assert.deepEqual(calls[0]!.args, ["install", "--frozen-lockfile"]);
   assert.equal(calls[0]!.cwd, join(modulesDirOf(dir), `${hash}.tmp-${process.pid}`));
   assert.equal(calls[0]!.boundMs, 1_234);
-  assert.deepEqual(calls[0]!.inputsSeen, ["bun.lock", "package.json", "patches"], "the install runs on copies of the three inputs only");
+  assert.deepEqual(calls[0]!.inputsSeen, ["bun.lock", "package.json", "patches", "scripts"]);
+  assert.equal(calls[0]!.guardSeen, "guard");
   assert.deepEqual(trees.modulesFor(root), { state: "ready", hash, nodeModules: join(modulesDirOf(dir), hash, "node_modules") });
   assert.deepEqual(readdirSync(modulesDirOf(dir)), [hash], "no tmp left");
   assert.equal(readFileSync(join(modulesDirOf(dir), hash, "patches", "a.patch"), "utf8"), "patch a");
+  assert.equal(readFileSync(join(modulesDirOf(dir), hash, "scripts", "modules-guard.ts"), "utf8"), "guard");
+}));
+
+test("an older root without lifecycle hooks installs without a guard", async () => withTemp(async dir => {
+  const root = join(dir, "old-root");
+  write(join(root, "package.json"), '{"name":"legacy"}');
+  write(join(root, "bun.lock"), "fixture lock");
+  const { trees } = treesOf(dir, fakePorts().ports);
+  trees.modulesFor(root);
+  await trees.settled();
+  assert.equal(trees.modulesFor(root).state, "ready");
 }));
 
 test("a call during the install answers installing and starts none", async () => withTemp(async dir => {
@@ -144,6 +158,7 @@ test("an install that exits 1 answers failed with its stderr tail, leaves no tmp
   assert.equal(calls.length, 1);
   assert.equal(lines.length, 1, "the failure is logged once");
   assert.match(lines[0]!, /error: lockfile had changes/u);
+  assert.match(lines[0]!, /clients start from \/mnt\/d until package\.json, bun\.lock or a patch changes, or the daemon restarts/u);
 }));
 
 test("a changed bun.lock after a failure installs again", async () => withTemp(async dir => {
@@ -185,26 +200,17 @@ for (const failing of FAILING_INSTALLS) {
   }));
 }
 
-test("an install that cannot even copy its inputs (the modules path is a file) answers failed, not a rejection", async () => withTemp(async dir => {
-  const root = makeRoot(dir);
-  write(modulesDirOf(dir), "not a directory");
-  const { calls, ports } = fakePorts();
-  const { trees } = treesOf(dir, ports);
-  trees.modulesFor(root);
-  await trees.settled();
-  assert.equal(trees.modulesFor(root).state, "failed");
-  assert.equal(calls.length, 0);
-}));
-
 test("an install that fails before it waits for anything answers failed with the error at the very call that started it, not installing", async () => withTemp(async dir => {
   const root = makeRoot(dir);
   write(modulesDirOf(dir), "not a directory");
-  const { ports } = fakePorts();
+  const { calls, ports } = fakePorts();
   const { trees } = treesOf(dir, ports);
   const first = trees.modulesFor(root);
   assert.equal(first.state, "failed");
   assert.match(first.state === "failed" ? first.reason : "", /ENOTDIR|EEXIST|not a directory/iu, "the reason is the error's own message");
   await trees.settled();
+  assert.equal(trees.modulesFor(root).state, "failed");
+  assert.equal(calls.length, 0);
 }));
 
 test("a tree that appears during the install (another daemon) is used and the own tmp deleted", async () => withTemp(async dir => {
@@ -232,7 +238,7 @@ test("a tmp left by an earlier process with the same pid is replaced, not mixed 
   const { trees } = treesOf(dir, ports);
   trees.modulesFor(root);
   await trees.settled();
-  assert.deepEqual(calls[0]!.inputsSeen, ["bun.lock", "package.json", "patches"]);
+  assert.deepEqual(calls[0]!.inputsSeen, ["bun.lock", "package.json", "patches", "scripts"]);
   assert.equal(trees.modulesFor(root).state, "ready");
 }));
 
@@ -277,15 +283,6 @@ test("prune skips a tree another daemon's prune deleted between the listing and 
   const { ports } = fakePorts();
   const racing: ModulesPorts = { ...ports, now: () => { rmSync(join(modulesDirOf(dir), "gone"), { recursive: true }); return NOW_MS; } };
   assert.deepEqual(await pruneModules(join(dir, "mirror"), new Set(), 7 * DAY_MS, racing), []);
-}));
-
-test("a failed install is logged with what happens next", async () => withTemp(async dir => {
-  const root = makeRoot(dir);
-  const { ports } = fakePorts(() => ({ code: 1, stderrTail: "boom" }));
-  const { trees, lines } = treesOf(dir, ports);
-  trees.modulesFor(root);
-  await trees.settled();
-  assert.match(lines[0]!, /clients start from \/mnt\/d until package\.json, bun\.lock or a patch changes, or the daemon restarts/u);
 }));
 
 test("real install: this worktree's lockfile gives a tree whose mine-labs holds the client-ahead patch", { skip: process.env.MINE_AI_TEST_REAL_INSTALL !== "1", timeout: 180_000 }, async () => withTemp(async dir => {

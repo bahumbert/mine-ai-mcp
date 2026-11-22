@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { ollamaServeEnv } from "./install/ollama-serve.ts";
 import { saveInstallState } from "./install/state.ts";
+import type { Settings } from "./settings.ts";
 import { writeOtherAgents } from "./stack-bots.ts";
 import { hostHealth, json, stackFixture, startedFixture, type StackFixture } from "./stack-test-support.ts";
 import { bringUpStack, createStack, describeStack, realStackDeps, startBot, startStack, stopBot, stopStack } from "./stack.ts";
@@ -60,6 +61,88 @@ test("the server runs from the settings' memory with its console on a pipe", asy
   assert.deepEqual(args, ["-Xms1G", "-Xmx4096M", "-jar", "server.jar", "nogui"]);
   assert.equal(options.stdin, "pipe");
   assert.ok(options.cwd.endsWith("server"));
+});
+
+const paperServer = (settings: Settings): Settings => ({ ...settings, server: { kind: "local", port: 25_565, memoryMb: 4096, program: "paper" } });
+const paperJarName = (fixture: StackFixture): string => `paper-${fixture.manifest.minecraft.version}-${fixture.manifest.minecraft.paper.build}.jar`;
+/** Applier stand-in that records the folder it was given in the fixture's event list, so its place before the spawn is checked. */
+const recordPaperSettings = (fixture: StackFixture) => async (dir: string) => void fixture.events.push(`apply paper settings in ${dir.replaceAll("\\", "/").split("/").at(-1)}`);
+
+test("a paper server applies its settings in the server folder, then starts its jar", async () => {
+  const fixture = stackFixture(paperServer);
+  hostHealth(fixture, 25_575);
+  hostHealth(fixture, 25_576);
+  await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, { ...fixture.deps, applyPaperSettings: recordPaperSettings(fixture) });
+  assert.deepEqual(fixture.children.argsOf("server"), ["-Xms1G", "-Xmx4096M", "-jar", paperJarName(fixture), "nogui"]);
+  assert.match(paperJarName(fixture), /^paper-1\.21\.4-\d+\.jar$/u);
+  assert.ok(fixture.children.optionsOf("server").cwd.endsWith("server"));
+  const applied = fixture.events.indexOf("apply paper settings in server");
+  assert.ok(applied >= 0, "applied in <root>/server");
+  assert.ok(applied < fixture.events.indexOf("spawn server"), "before the spawn");
+});
+
+// `server.jar` in the argv of a vanilla start is held by "the server runs from the settings' memory" above.
+test("a vanilla server touches no Paper setting", async () => {
+  const fixture = stackFixture();
+  hostHealth(fixture, 25_575);
+  hostHealth(fixture, 25_576);
+  await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, { ...fixture.deps, applyPaperSettings: recordPaperSettings(fixture) });
+  assert.ok(fixture.events.includes("spawn server"));
+  assert.ok(!fixture.events.some((event) => event.startsWith("apply paper settings")));
+});
+
+for (const [label, change, jar] of [
+  ["vanilla", (settings: Settings) => settings, () => "server.jar"],
+  ["paper", paperServer, (fixture: StackFixture) => paperJarName(fixture)],
+] as const) {
+  test(`a missing ${label} jar names it and install server, and starts nothing`, async () => {
+    const fixture = stackFixture(change);
+    const name = jar(fixture);
+    const state = await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, { ...fixture.deps, fileExists: (path) => !path.endsWith(name), applyPaperSettings: recordPaperSettings(fixture) });
+    assert.match(state.problem ?? "", /install server/u);
+    assert.ok((state.problem ?? "").includes(name), `names ${name}`);
+    assert.ok(!fixture.events.includes("spawn server"));
+    assert.ok(!fixture.events.some((event) => event.startsWith("apply paper settings")));
+  });
+}
+
+test("paper settings that cannot be applied end the start with the cause and start no server", async () => {
+  const fixture = stackFixture(paperServer);
+  const failing = async () => {
+    throw new Error("Cannot parse the Paper config spigot.yml (server/spigot.yml): bad indent");
+  };
+  const state = await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, { ...fixture.deps, applyPaperSettings: failing });
+  assert.match(state.problem ?? "", /Cannot parse the Paper config spigot\.yml/u);
+  assert.match(state.problem ?? "", /Fix the file the message names, or reinstall Mine AI/u, "names a next step");
+  assert.ok(!fixture.events.includes("spawn server"));
+  assert.ok(fixture.events.includes("stop ollama"), "Ollama of the earlier step is stopped as for any failed start");
+});
+
+test("a stop asked while the Paper settings are applied starts no server and is no failed start", async () => {
+  const fixture = stackFixture(paperServer);
+  hostHealth(fixture, 25_575);
+  let stopping: Promise<void> = Promise.resolve();
+  const state = createStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, {
+    ...fixture.deps,
+    applyPaperSettings: async () => {
+      stopping = stopStack(state, "mine-ai stop");
+    },
+  });
+  await bringUpStack(state);
+  await stopping;
+  assert.ok(!fixture.events.includes("spawn server"));
+  assert.equal(state.problem, null);
+});
+
+test("a paper server is ready on Paper's own Done line", async () => {
+  const fixture = stackFixture(paperServer);
+  // Facts `paper-server.md` lines 15 and 26 (part A): Paper's stdout form is `[hh:mm:ss INFO]: <text>` and the `Done (` text is the same as vanilla's.
+  fixture.children.script("server", { lines: ["[20:34:25 INFO]: Done (9.628s)! For help, type \"help\""] });
+  hostHealth(fixture, 25_575);
+  hostHealth(fixture, 25_576);
+  const state = await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, { ...fixture.deps, applyPaperSettings: recordPaperSettings(fixture) });
+  assert.equal(state.problem, null);
+  assert.deepEqual(state.serverTarget, { host: "127.0.0.1", port: 25_565 });
 });
 
 test("a brain is spawned only after the health of its own host answers", async () => {

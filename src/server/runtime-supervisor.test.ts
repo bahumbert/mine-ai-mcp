@@ -4,12 +4,14 @@ import test, { type TestContext } from "node:test";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { blockThread } from "../test-support/block-thread.js";
 import { RUNTIME_RESTART_WINDOW_MS } from "./runtime-liveness.js";
 import { INCIDENT_HISTORY_MS } from "../diagnostics/incident-recorder.js";
 import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervisor.js";
+import { createFakeRuntimeChild } from "../test-support/fake-runtime-child.js";
+import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
+import { sleepMs } from "../utils/wall-timers.js";
+import { setImmediate as nextTurn } from "node:timers/promises";
 
 const executable = process.execPath;
 const args = [...process.execArgv, fileURLToPath(new URL("../test-support/wedged-runtime.ts", import.meta.url))];
@@ -26,6 +28,7 @@ async function supervised(
   deadlines?: McpSupervisorOptions["deadlines"],
   restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
   incidentHistoryMs?: number,
+  seams: Partial<Pick<McpSupervisorOptions, "clock" | "spawnRuntime" | "wallClock">> = {},
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
@@ -40,6 +43,7 @@ async function supervised(
       deadlines,
       restartWindowMs,
       incidentHistoryMs,
+      ...seams,
     },
     Object.getOwnPropertyDescriptors(child),
   ) as McpSupervisorOptions;
@@ -53,15 +57,34 @@ async function supervised(
   return { supervisor, url: `http://127.0.0.1:${address.port}`, directory };
 }
 
-/** The wedged runtime with child-side waits shortened (`--pause-ms=<ms>`, `--slow-ms=<ms>`). */
-const wedgedWith = (...waits: string[]) => (): { executable: string; args: string[] } => ({ executable, args: [...args, ...waits] });
-
 /** Deadlines short enough for a test: a hang is declared after one second of silence instead of five. */
 const fastDeadlines = { startupMs: 10_000, unresponsiveMs: 1_000 };
 
+/** Real HTTP and incident writes, but explicit child liveness, watchdog time and incident-ring ageing, all on one manual clock. */
+async function fakeSupervised(
+  t: TestContext,
+  instanceId: string,
+  options: { deadlines?: McpSupervisorOptions["deadlines"]; restartWindowMs?: number; historyMs?: number; slowMs?: number; startReady?: boolean } = {},
+) {
+  const clock = createFakeClock({ mode: "manual" });
+  const children: ReturnType<typeof createFakeRuntimeChild>[] = [];
+  const spawnRuntime = () => {
+    const child = createFakeRuntimeChild({ ...options, clock });
+    children.push(child);
+    if (children.length > 1) setImmediate(() => { void child.ready(); });
+    return child;
+  };
+  const result = await supervised(t, instanceId, undefined, options.deadlines ?? fastDeadlines,
+    options.restartWindowMs ?? 0, options.historyMs, { clock, wallClock: clock.now, spawnRuntime });
+  t.after(async () => { await Promise.all(children.map((child) => child.close())); });
+  const fake = children[0]!;
+  if (options.startReady !== false) await fake.ready();
+  return { ...result, clock, fake, children };
+}
+
 /** Every test acts only once the runtime is answering for itself. */
 async function whenHealthy(url: string): Promise<void> {
-  while (!(await fetch(`${url}/health`)).ok) await delay(20);
+  while (!(await fetch(`${url}/health`)).ok) await nextTurn();
 }
 
 /**
@@ -73,7 +96,8 @@ async function whenFailed(url: string, pollMs = 100) {
     const response = await fetch(`${url}/health`);
     const status = await response.json();
     if (status.runtime?.state === "failed") return { httpStatus: response.status, status };
-    await delay(pollMs);
+    if (pollMs > 0) await sleepMs(pollMs);
+    else await nextTurn();
   }
 }
 
@@ -85,63 +109,50 @@ async function whenReported(url: string) {
   while (true) {
     const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
     if (diagnostics.heartbeat && diagnostics.activity?.active.length) return diagnostics;
-    await delay(50);
+    await nextTurn();
   }
 }
 
-/** Heartbeats the supervisor read in its first moments after its own pause were sent before the runtime paused: stale. */
-const STALE_HEARTBEAT_WINDOW_MS = 250;
-
-/**
- * The runtime's diagnostics once it has sent a heartbeat that the supervisor received after `staleBefore` (a
- * `performance.now()` reading: the supervisor runs in the test's process), or once the supervisor has declared it
- * `failed` (it then ignores the runtime's messages for good, so no heartbeat would come). A heartbeat sent before the
- * runtime's pause is drained at the supervisor's resume and must not count as the runtime being back; a fixed wait
- * reads too early or accepts it. Bounded by the test's own timeout.
- */
-async function whenHeartbeatReceivedAfter(url: string, staleBefore: number) {
-  while (true) {
-    const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
-    const receivedAt = performance.now() - diagnostics.heartbeatAgeMs;
-    if (diagnostics.state === "failed" || (diagnostics.heartbeat && receivedAt > staleBefore)) return diagnostics;
-    await delay(50);
-  }
-}
-
-/** The supervisor pauses itself for `SUPERVISOR_PAUSE_MS`, starting `SUPERVISOR_PAUSE_DELAY_MS` after the runtime's `/pause` was accepted (the runtime's own pause starts 100 ms after it). */
+/** The original shared-pause case's 2.5 s blind gap and 100 ms offset, now advanced explicitly. */
 const SUPERVISOR_PAUSE_MS = 2_500;
 const SUPERVISOR_PAUSE_DELAY_MS = 100;
 /** The liveness deadline of the two pause tests below. */
 const PAUSE_TEST_UNRESPONSIVE_MS = 1_500;
 
 /**
- * The runtime pauses `pauseMs` from its `/pause` and the supervisor itself 2.5 s from 100 ms later, so the supervisor
- * resumes `pauseMs` - 2.6 s before the runtime does. Returns the diagnostics once the runtime is back or failed. Both
- * pauses are on the monotonic clock (`blockThread`): a wall-clock pause is stretched ~2 s by WSL's clock steps and made
- * this test fail once in ~70 runs (2026-10-30).
+ * One late watchdog tick models the supervisor's blind gap. A child resumes either within or past the fresh window.
  */
-async function pauseBothLoopsUntilRuntimeBack(url: string) {
-  assert.equal(await (await fetch(`${url}/pause`)).text(), "accepted");
-  await new Promise<void>((resolve) =>
-    setTimeout(() => {
-      blockThread(SUPERVISOR_PAUSE_MS);
-      resolve();
-    }, SUPERVISOR_PAUSE_DELAY_MS),
-  );
-  return whenHeartbeatReceivedAfter(url, performance.now() + STALE_HEARTBEAT_WINDOW_MS);
+async function pauseBothLoopsUntilRuntimeBack(runtime: Awaited<ReturnType<typeof fakeSupervised>>, pauseMs: number) {
+  const { clock, fake, url } = runtime;
+  const heartbeatMs = 250;
+  const blindGap = heartbeatMs + SUPERVISOR_PAUSE_MS;
+  await clock.advance(blindGap, blindGap);
+  assert.equal(await stateOf(url), "ready", "a late tick starts a fresh window");
+  const paused = await (await fetch(`${url}/diagnostics/runtime`)).json();
+  assert.equal(paused.heartbeatAgeMs, blindGap);
+  if (pauseMs - blindGap >= PAUSE_TEST_UNRESPONSIVE_MS) {
+    await clock.advance(PAUSE_TEST_UNRESPONSIVE_MS - 1);
+    assert.equal(await stateOf(url), "ready", "the entire fresh liveness window must elapse before failure");
+    await clock.advance(1);
+    await whenFailed(url);
+  } else {
+    await clock.advance(pauseMs - blindGap);
+    fake.beat();
+  }
+  return (await fetch(`${url}/diagnostics/runtime`)).json();
 }
 
 test(
   "a shared scheduling pause gets a fresh liveness window when the supervisor resumes",
-  { timeout: 15_000 },
   async (t) => {
     // The child pauses 3 s, the supervisor 2.5 s: past its 1.5 s deadline, so it sees its own blind gap. The child
     // resumes half a second after it, inside the fresh 1.5 s window. The supervisor cannot diagnose a child-only hang
     // during its own blind gap.
-    const { url } = await supervised(t, "observer-stall", wedgedWith("--pause-ms=3000"), { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS });
+    const runtime = await fakeSupervised(t, "observer-stall", { deadlines: { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS } });
+    const { url } = runtime;
     await whenHealthy(url);
 
-    const diagnostics = await pauseBothLoopsUntilRuntimeBack(url);
+    const diagnostics = await pauseBothLoopsUntilRuntimeBack(runtime, 3_000);
 
     assert.equal(diagnostics.state, "ready", "The supervisor must not blame the child for its own blind gap.");
     assert.equal((await fetch(`${url}/health`)).status, 200);
@@ -154,19 +165,23 @@ test(
 
 test(
   "a runtime still paused when the fresh liveness window after the supervisor's blind gap ends is declared hung",
-  { timeout: 15_000 },
   async (t) => {
     // The child pauses 5 s: 2.4 s after the supervisor resumes, past the fresh 1.5 s window.
-    const { url } = await supervised(t, "observer-stall-hang", wedgedWith("--pause-ms=5000"), { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS });
+    const runtime = await fakeSupervised(t, "observer-stall-hang", { deadlines: { startupMs: 10_000, unresponsiveMs: PAUSE_TEST_UNRESPONSIVE_MS } });
+    const { url, clock } = runtime;
     await whenHealthy(url);
 
-    const pausedAt = performance.now();
-    const diagnostics = await pauseBothLoopsUntilRuntimeBack(url);
-    const failedSeenAfterMs = performance.now() - pausedAt;
+    const pausedAt = clock.now();
+    const diagnostics = await pauseBothLoopsUntilRuntimeBack(runtime, 5_000);
+    const failedSeenAfterMs = clock.now() - pausedAt;
 
     assert.equal(diagnostics.state, "failed");
-    const { runtime } = await (await fetch(`${url}/health`)).json();
-    assert.equal(runtime.failure.code, "RUNTIME_UNRESPONSIVE");
+    const { runtime: failedRuntime } = await (await fetch(`${url}/health`)).json();
+    assert.equal(failedRuntime.failure.code, "RUNTIME_UNRESPONSIVE");
+    const records = await readFile(failedRuntime.failure.incident.artifact.path, "utf8");
+    const resumed = records.trim().split("\n").map((line) => JSON.parse(line)).find((row) => row.kind === "supervisor_observation_resumed");
+    assert.equal(resumed.supervisorTickDelayMs, SUPERVISOR_PAUSE_MS);
+    assert.equal(resumed.heartbeatAgeMs, 250 + SUPERVISOR_PAUSE_MS);
     // Timed here, not read from the message ("absent for N ms" counts from the last heartbeat the supervisor holds, and
     // one drained at its resume is as late as the resume itself): the failure may come no sooner than the supervisor's
     // own pause plus the fresh window after it, whichever heartbeat it holds.
@@ -175,29 +190,33 @@ test(
   },
 );
 
-/** The attribution test's incident ring age, short so the rows age out in seconds; the child waits it too (`--history-ms`). */
+/** The attribution test's incident ring age, short so the rows age out in seconds of fake clock; the child waits it too (`historyMs`). */
 const SHORT_HISTORY_MS = 3_000;
 
 test(
   "retains active request and restored phase after the client and entry event are gone",
-  { timeout: 15_000 },
   async (t) => {
-    const { url } = await supervised(
-      t,
-      "attribution",
-      wedgedWith(`--history-ms=${SHORT_HISTORY_MS}`),
-      fastDeadlines,
-      0,
-      SHORT_HISTORY_MS,
-    );
+    const { url, clock, fake, directory } = await fakeSupervised(t, "attribution", { historyMs: SHORT_HISTORY_MS });
+    // The runtime beats every 250 ms of the clock the watchdog ticks on; the beat is a no-op once the child is silent.
+    t.after(clock.every(() => fake.beat(), 250));
     await whenHealthy(url);
     assert.equal(await (await fetch(`${url}/background`)).text(), "accepted");
+    fake.beat();
     const diagnostics = await whenReported(url);
     assert.equal(diagnostics.activity.active[0].owner.requestId, 812);
     assert.ok(diagnostics.heartbeat.memory.rss > 0);
 
+    // The ring holds the transitions before they age: a fault capture now carries them.
+    fake.fault(aFault("before ageing"));
+    const [early] = await processFaultIncidents(directory);
+    assert.ok(early!.some((row) => row.kind === "execution"), "The ring held the original transitions.");
+
     // The runtime wedges on its own timer, after the ring's age; the supervisor then declares the failure itself.
-    const { httpStatus, status } = await whenFailed(url);
+    await clock.advance(SHORT_HISTORY_MS + 2_000 - 250, 250);
+    assert.equal(await stateOf(url), "ready", "The runtime wedges only after the ring's age.");
+    // Last beat at 5 000 ms, failure at 6 000 ms of clock.
+    await clock.advance(250 + fastDeadlines.unresponsiveMs + 250, 250);
+    const { httpStatus, status } = await whenFailed(url, 0);
 
     assert.equal(httpStatus, 503);
     const reference = status.runtime.failure.incident;
@@ -224,15 +243,19 @@ test(
 );
 
 for (const fault of ["hang", "microtask", "sse-hang", "crash"] as const) {
-  test(`supervisor returns a saved failure when the runtime ${fault}s`, { timeout: 8_000 }, async (t) => {
-    const { url } = await supervised(t, fault, undefined, fastDeadlines);
+  test(`supervisor returns a saved failure when the runtime ${fault}s`, async (t) => {
+    const { url, fake, clock } = await fakeSupervised(t, fault);
     await whenHealthy(url);
 
-    const response = await fetch(`${url}/${fault}`, {
+    const request = fetch(`${url}/${fault}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 73, method: "tools/call", params: { name: fault } }),
     });
+    await fake.arrived(`/${fault}`);
+    if (fault !== "crash") await clock.advance(1_250);
+    await whenFailed(url);
+    const response = await request;
     const body = await response.text();
     assert.equal(response.status, 200, "MCP errors must remain protocol responses, not transport errors.");
     assert.match(body, fault === "crash" ? /RUNTIME_EXITED/ : /RUNTIME_UNRESPONSIVE/);
@@ -266,19 +289,25 @@ for (const fault of ["hang", "microtask", "sse-hang", "crash"] as const) {
   });
 }
 
-test("a long operation with a live event loop is not timed out", { timeout: 8_000 }, async (t) => {
+test("a long operation with a live event loop is not timed out", async (t) => {
   // The operation (2 s) outlasts the silence deadline (1 s).
-  const { supervisor, url } = await supervised(t, "healthy", wedgedWith("--slow-ms=2000"), fastDeadlines);
+  const { supervisor, url, fake, clock } = await fakeSupervised(t, "healthy", { slowMs: 2_000 });
   await whenHealthy(url);
 
   const cancellation = new AbortController();
   const cancelled = fetch(`${url}/slow`, { signal: cancellation.signal });
-  await delay(50);
+  await fake.arrived("/slow");
   cancellation.abort();
   await assert.rejects(cancelled);
 
   assert.equal((await fetch(`${url}/health`)).status, 200, "Client cancellation must not kill a healthy runtime.");
-  assert.equal(await (await fetch(`${url}/slow`)).text(), "finished");
+  // The forwarded request is present before watchdog time moves beyond its liveness deadline.
+  const finished = fetch(`${url}/slow`);
+  await fake.arrived("/slow");
+  const removeBeat = clock.every(() => fake.beat(), 250);
+  await clock.advance(2_000);
+  removeBeat();
+  assert.equal(await (await finished).text(), "finished");
   assert.equal((await fetch(`${url}/health`)).status, 200);
   await supervisor.close();
   assert.ok(supervisor.child.exitCode !== null || supervisor.child.signalCode !== null, "close must reap its runtime.");
@@ -296,22 +325,39 @@ test("a runtime launch failure stays observable and can be closed", { timeout: 5
   await Promise.all([supervisor.close(), supervisor.close()]);
 });
 
-const slowStart = (blockMs: number) => (): { executable: string; args: string[] } => ({
-  executable,
-  args: [...process.execArgv, fileURLToPath(new URL("../test-support/slow-start-runtime.ts", import.meta.url)), String(blockMs)],
-});
-
-test("a runtime silent before ready for longer than the heartbeat deadline is not killed", { timeout: 15_000 }, async (t) => {
+test("a runtime silent before ready for longer than the heartbeat deadline is not killed", async (t) => {
   // Live 2026-10-11: a host was killed at start while its module graph loaded.
-  const { url } = await supervised(t, "slow-start", slowStart(1_500), { startupMs: 4_000, unresponsiveMs: 1_000 });
+  const { url, clock, fake } = await fakeSupervised(t, "slow-start", { startReady: false, deadlines: { startupMs: 4_000, unresponsiveMs: 1_000 } });
+  await clock.advance(1_500);
+  assert.equal(await stateOf(url), "starting");
+  await fake.ready();
   await whenHealthy(url);
   assert.equal((await fetch(`${url}/health`)).status, 200);
 });
 
-test("a runtime silent past the startup deadline before ready is killed as unresponsive", { timeout: 15_000 }, async (t) => {
-  const { url } = await supervised(t, "stuck-start", slowStart(8_000), { startupMs: 2_000, unresponsiveMs: 1_000 });
+test("a runtime silent past the startup deadline before ready is killed as unresponsive", async (t) => {
+  const { url, clock } = await fakeSupervised(t, "stuck-start", { startReady: false, deadlines: { startupMs: 2_000, unresponsiveMs: 1_000 } });
+  await clock.advance(2_000);
   const { status } = await whenFailed(url);
   assert.match(JSON.stringify(status), /RUNTIME_UNRESPONSIVE/);
+});
+
+test("a ready runtime's heartbeat deadline counts from ready, not from the silence before it", async (t) => {
+  // The silence before ready (1.5 s) is past the 1 s heartbeat deadline, so the last heartbeat the supervisor holds is
+  // from its own start. Kept, it would declare the runtime hung at the first watchdog tick after ready.
+  const { supervisor, url, clock, fake } = await fakeSupervised(t, "ready-clock", { startReady: false, deadlines: { ...fastDeadlines, heartbeatMs: 1 } });
+  await clock.advance(1_500);
+  await fake.ready();
+  await clock.advance(500);
+  assert.equal(await stateOf(url), "ready", "Half the heartbeat deadline after ready the runtime is still ready: the clock starts at ready.");
+  await clock.advance(499);
+  assert.equal(await stateOf(url), "ready");
+  await clock.advance(2);
+  const { status } = await whenFailed(url);
+  assert.match(JSON.stringify(status), /RUNTIME_UNRESPONSIVE/);
+  assert.deepEqual(fake.kills, ["SIGKILL"]);
+  await supervisor.close();
+  assert.equal(clock.pendingTimers(), 0);
 });
 
 const mcpCall = (url: string, id: number, tool: string) =>
@@ -322,21 +368,40 @@ const mcpCall = (url: string, id: number, tool: string) =>
   });
 const stateOf = async (url: string): Promise<string> => (await (await fetch(`${url}/diagnostics/runtime`)).json()).state;
 
+test("a heartbeat at 900 ms resets the window", async (t) => {
+  const clock = createFakeClock({ mode: "manual" });
+  const fake = createFakeRuntimeChild();
+  const { url } = await supervised(t, "fake-beat", undefined, fastDeadlines, 0, undefined, { clock, spawnRuntime: () => fake });
+  t.after(() => fake.close());
+  await fake.ready();
+  await clock.advance(900);
+  fake.beat();
+  await clock.advance(999);
+  assert.equal(await stateOf(url), "ready");
+});
+
 test("a runtime killed as unresponsive is started again and answers", { timeout: 25_000 }, async (t) => {
   const { url } = await supervised(t, "restart", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
   await whenHealthy(url);
   assert.match(await (await mcpCall(url, 90, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
-  while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
+  while ((await fetch(`${url}/health`)).status !== 200) await nextTurn();
   assert.equal(await stateOf(url), "ready");
 });
 
-test("a second failure inside the restart window stays down and says it restarted before", { timeout: 25_000 }, async (t) => {
-  const { url } = await supervised(t, "restart-twice", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+test("a second failure inside the restart window stays down and says it restarted before", async (t) => {
+  const { url, clock, fake, children } = await fakeSupervised(t, "restart-twice", { restartWindowMs: RUNTIME_RESTART_WINDOW_MS });
   await whenHealthy(url);
-  await mcpCall(url, 91, "hang");
-  while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
-  assert.match(await (await mcpCall(url, 92, "hang")).text(), /RUNTIME_UNRESPONSIVE/);
-  await delay(1_500);
+  const first = mcpCall(url, 91, "hang");
+  await fake.arrived("/hang");
+  await clock.advance(1_250);
+  await first;
+  while ((await fetch(`${url}/health`)).status !== 200) await nextTurn();
+  const second = mcpCall(url, 92, "hang");
+  await children.at(-1)!.arrived("/hang");
+  await clock.advance(1_250);
+  assert.match(await (await second).text(), /RUNTIME_UNRESPONSIVE/);
+  await whenFailed(url);
+  await clock.advance(1_500);
   const health = await fetch(`${url}/health`);
   assert.equal(health.status, 503);
   const status = await health.json();
@@ -358,20 +423,26 @@ const sigtermIgnoringRuntime = (): { executable: string; args: string[] } => ({
 
 test("a runtime that ignores SIGTERM is killed once the kill grace has passed", { timeout: 8_000 }, async (t) => {
   const { supervisor, url } = await supervised(t, "kill-grace", sigtermIgnoringRuntime, { startupMs: 60_000, unresponsiveMs: 60_000, killGraceMs: 200 });
-  while ((await stateOf(url)) !== "ready") await delay(20);
+  while ((await stateOf(url)) !== "ready") await nextTurn();
   const closing = performance.now();
   await supervisor.close();
   const closedAfterMs = performance.now() - closing;
   assert.ok(closedAfterMs < 2_000, `close took ${Math.round(closedAfterMs)} ms with a 200 ms kill grace`);
 });
 
-test("the watchdog judges the runtime only on its own ticks, every heartbeatMs", { timeout: 8_000 }, async (t) => {
-  const started = performance.now(); // Before the supervisor starts: its first tick comes 3 s later at the earliest.
+test("the watchdog judges the runtime only on its own ticks, every heartbeatMs", async (t) => {
   // A watchdog interval past the silence deadline: a gap of one interval is the watchdog's own rhythm, not a blind gap.
-  const { url } = await supervised(t, "heartbeat-interval", undefined, { startupMs: 10_000, unresponsiveMs: 500, heartbeatMs: 3_000 });
+  const { url, clock, fake } = await fakeSupervised(t, "heartbeat-interval", { deadlines: { startupMs: 10_000, unresponsiveMs: 500, heartbeatMs: 3_000 } });
+  const started = clock.now();
   await whenHealthy(url);
-  assert.match(await (await mcpCall(url, 98, "hang")).text(), /RUNTIME_UNRESPONSIVE/);
-  const declaredAfterMs = performance.now() - started;
+  const request = mcpCall(url, 98, "hang");
+  await fake.arrived("/hang");
+  await clock.advance(2_999);
+  assert.equal(await stateOf(url), "ready");
+  await clock.advance(1);
+  await whenFailed(url);
+  assert.match(await (await request).text(), /RUNTIME_UNRESPONSIVE/);
+  const declaredAfterMs = clock.now() - started;
   assert.ok(declaredAfterMs >= 2_950, `the hang was declared ${Math.round(declaredAfterMs)} ms after start, before the first 3 s tick`);
 });
 
@@ -384,29 +455,25 @@ test("a supervisor stopped during a restart leaves no runtime behind", { timeout
   assert.ok(restarted.exitCode !== null || restarted.signalCode !== null, "close must reap the restarted runtime");
 });
 
-const faultingRuntime = (...mode: string[]) => (): { executable: string; args: string[] } => ({
-  executable,
-  args: [...process.execArgv, fileURLToPath(new URL("../test-support/faulting-runtime.ts", import.meta.url)), ...mode],
-});
 const aFault = (message: string) => ({ kind: "unhandled_rejection" as const, message, stack: null, observedAt: new Date().toISOString(), repeats: 0 });
 
 type IncidentRecord = Record<string, any>;
 /** The records of each incident file in the directory that holds a `process_fault` record, waited for up to 5 s. */
 async function processFaultIncidents(directory: string, wanted = 1): Promise<IncidentRecord[][]> {
-  const deadline = Date.now() + 5_000;
+  const deadline = performance.now() + 5_000;
   for (;;) {
     const incidents: IncidentRecord[][] = [];
     for (const name of await readdir(directory).catch(() => [] as string[])) {
       const records: IncidentRecord[] = (await readFile(path.join(directory, name), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
       if (records.some((row) => row.kind === "process_fault")) incidents.push(records);
     }
-    if (incidents.length >= wanted || Date.now() > deadline) return incidents;
-    await delay(50);
+    if (incidents.length >= wanted || performance.now() > deadline) return incidents;
+    await nextTurn();
   }
 }
 
-test("a fault message from the runtime records a process_fault incident", { timeout: 15_000 }, async (t) => {
-  const { url, directory } = await supervised(t, "fault-ready", faultingRuntime());
+test("a fault message from the runtime records a process_fault incident", async (t) => {
+  const { url, directory } = await fakeSupervised(t, "fault-ready");
   await whenHealthy(url);
   await fetch(`${url}/fault`);
 
@@ -419,8 +486,8 @@ test("a fault message from the runtime records a process_fault incident", { time
   assert.equal(await stateOf(url), "ready");
 });
 
-test("a fault while an action runs names that request in the incident", { timeout: 15_000 }, async (t) => {
-  const { url, directory } = await supervised(t, "fault-request", faultingRuntime());
+test("a fault while an action runs names that request in the incident", async (t) => {
+  const { url, directory } = await fakeSupervised(t, "fault-request");
   await whenHealthy(url);
   await fetch(`${url}/fault-during-request`);
 
@@ -428,8 +495,10 @@ test("a fault while an action runs names that request in the incident", { timeou
   assert.equal(incident?.[0]?.requestId, 812);
 });
 
-test("a fault reported before the runtime is ready is recorded without a request", { timeout: 15_000 }, async (t) => {
-  const { url, directory } = await supervised(t, "fault-start", faultingRuntime("before-ready"));
+test("a fault reported before the runtime is ready is recorded without a request", async (t) => {
+  const { url, directory, fake } = await fakeSupervised(t, "fault-start", { startReady: false });
+  fake.fault(aFault("raised before ready"));
+  await fake.ready();
   await whenHealthy(url);
 
   const [incident] = await processFaultIncidents(directory);
@@ -438,18 +507,19 @@ test("a fault reported before the runtime is ready is recorded without a request
   assert.equal(await stateOf(url), "ready");
 });
 
-test("two distinct faults are both recorded", { timeout: 15_000 }, async (t) => {
-  const { url, directory } = await supervised(t, "fault-twice", faultingRuntime());
+test("two distinct faults are both recorded", async (t) => {
+  const { url, directory, clock } = await fakeSupervised(t, "fault-twice");
   await whenHealthy(url);
   await fetch(`${url}/fault-twice`);
 
-  await delay(500);
-  const messages = (await processFaultIncidents(directory)).flat().filter((row) => row.kind === "process_fault").map((row) => row.fault.message);
+  await clock.advance(500);
+  const messages = (await processFaultIncidents(directory, 2)).flat().filter((row) => row.kind === "process_fault").map((row) => row.fault.message);
   assert.ok(messages.includes("first distinct fault"), `recorded: ${messages.join(", ")}`);
+  assert.ok(messages.includes("second distinct fault"), `recorded: ${messages.join(", ")}`);
 });
 
-test("a fault reported by the supervisor's own process is recorded as such", { timeout: 15_000 }, async (t) => {
-  const { supervisor, url, directory } = await supervised(t, "fault-own", faultingRuntime());
+test("a fault reported by the supervisor's own process is recorded as such", async (t) => {
+  const { supervisor, url, directory } = await fakeSupervised(t, "fault-own");
   await whenHealthy(url);
   supervisor.reportProcessFault(aFault("host promise rejected"));
 
@@ -459,35 +529,44 @@ test("a fault reported by the supervisor's own process is recorded as such", { t
   assert.equal(record?.fault.message, "host promise rejected");
 });
 
-test("a fault reported after the supervisor closed writes no new incident", { timeout: 15_000 }, async (t) => {
-  const { supervisor, url, directory } = await supervised(t, "fault-closed", faultingRuntime());
+test("a fault reported after the supervisor closed writes no new incident", async (t) => {
+  const { supervisor, url, directory, clock } = await fakeSupervised(t, "fault-closed");
   await whenHealthy(url);
   await supervisor.close();
   const before = (await readdir(directory).catch(() => [] as string[])).length;
   assert.doesNotThrow(() => supervisor.reportProcessFault(aFault("late")));
-  await delay(300);
+  await clock.advance(300);
   assert.equal((await readdir(directory).catch(() => [] as string[])).length, before);
 });
 
-test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RESTART_FAILED, not failing", { timeout: 25_000 }, async (t) => {
+test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RESTART_FAILED, not failing", async (t) => {
   let starts = 0;
+  const clock = createFakeClock({ mode: "manual" });
+  const fake = createFakeRuntimeChild();
   const { url } = await supervised(
     t,
     "restart-spawn-throws",
-    () => ({
-      // The first start is the wedged runtime; the restart gets an executable Node refuses to spawn (it throws, it does not emit).
-      get executable() { return starts++ === 0 ? executable : (42 as unknown as string); },
-      args,
-    }),
+    undefined,
     fastDeadlines,
     RUNTIME_RESTART_WINDOW_MS,
+    undefined,
+    { clock, spawnRuntime: () => {
+      if (starts++ > 0) throw new TypeError("runtime spawn failed");
+      return fake;
+    } },
   );
+  t.after(() => fake.close());
+  await fake.ready();
   await whenHealthy(url);
-  assert.match(await (await mcpCall(url, 96, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
+  const request = mcpCall(url, 96, "hang");
+  await fake.arrived("/hang");
+  await clock.advance(1_250);
+  await whenFailed(url);
+  assert.match(await (await request).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
 
   let body: string;
   do {
-    await delay(50);
+    await nextTurn();
     body = await (await fetch(`${url}/health`)).text();
   } while (body.includes('"state":"failing"') || body.includes('"state":"starting"'));
   assert.match(body, /"state":"failed"/);
@@ -500,8 +579,8 @@ test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RES
   assert.match(await afterwards.text(), /RUNTIME_RESTART_FAILED/, "later calls get the restart failure, not a hang");
 });
 
-test("the chat command routes answer 403 to a request whose Host is not local, even with the control header", { timeout: 15_000 }, async (t) => {
-  const { url } = await supervised(t, "chat-commands-host");
+test("the chat command routes answer 403 to a request whose Host is not local, even with the control header", async (t) => {
+  const { url } = await fakeSupervised(t, "chat-commands-host");
   const status = (path: string, method: string, host: string) =>
     new Promise<number>((resolve, reject) => {
       const request = httpRequest(`${url}${path}`, { method, headers: { host, "x-mine-ai-control": "1" } }, (response) => {

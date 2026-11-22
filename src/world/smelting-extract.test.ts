@@ -30,6 +30,19 @@ test("smelting recipes resolve ids, tags, nested tags and lists, and skip other 
   ]);
 });
 
+test("a 1.20 jar keeps recipes in data/minecraft/recipes/, tags in tags/items/, and writes ingredients as { item } or { tag } and results as strings", () => {
+  const jar = zip({
+    "data/minecraft/recipes/cooked_beef.json": JSON.stringify({ type: "minecraft:smelting", cookingtime: 200, ingredient: { item: "minecraft:beef" }, result: "minecraft:cooked_beef" }),
+    "data/minecraft/recipes/glass.json": JSON.stringify({ type: "minecraft:smelting", cookingtime: 200, ingredient: { tag: "minecraft:smelts_to_glass" }, result: "minecraft:glass" }),
+    "data/minecraft/recipes/oak_planks.json": JSON.stringify({ type: "minecraft:crafting_shapeless", ingredients: [{ tag: "minecraft:oak_logs" }], result: { item: "minecraft:oak_planks", count: 4 } }),
+    "data/minecraft/tags/items/smelts_to_glass.json": JSON.stringify({ values: ["minecraft:sand", "minecraft:red_sand"] }),
+  });
+  assert.deepEqual(extractSmeltingRecipes(jar), [
+    { output: "cooked_beef", count: 1, inputs: ["beef"], cookingTicks: 200 },
+    { output: "glass", count: 1, inputs: ["sand", "red_sand"], cookingTicks: 200 },
+  ]);
+});
+
 test("a recipe naming a tag the jar lacks is reported, not silently emptied", () => {
   const jar = zip({
     "data/minecraft/recipe/glass.json": JSON.stringify({ type: "minecraft:smelting", cookingtime: 200, ingredient: "#minecraft:missing", result: { id: "minecraft:glass" } }),

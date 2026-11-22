@@ -18,11 +18,13 @@ import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { type MineflayerBlock, blockClass } from "../../navigation/mineflayer/world.js";
+import { hasItemFamily, signBlockFor } from "../../world/item-families.js";
 import type { FakeBot } from "./fake-bot.js";
 import { FACE_VECTORS } from "./fake-bot-look.js";
 import type { FakeClock } from "./fake-clock.js";
 import { EQUIPMENT_SLOTS, type FakeInventory, itemOf } from "./fake-inventory.js";
 import type { FakeServer } from "./fake-server.js";
+import type { FakeSigns } from "./fake-bot-signs.js";
 import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeCell, type FakeWorld, blockUpdateEventOf } from "./fake-world.js";
 
@@ -66,7 +68,7 @@ type Outcome =
   | { readonly kind: "timeout" }
   | { readonly kind: "ended" };
 
-type PlacementParts = { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; windows: FakeWindows };
+type PlacementParts = { clock: FakeClock; server: FakeServer; world: FakeWorld; inventory: FakeInventory; windows: FakeWindows; signs: FakeSigns };
 
 /** What `place_block.js` listens to while a placement runs, and what it learns from it. */
 interface PlacementWatch {
@@ -200,6 +202,15 @@ function blockWith(bot: FakeBot, name: string, states: Record<string, string>): 
 
 /** The cells a held block item fills at `destination`: a slab or stair in the half the click was in, a bed whole, any other block in its default state. */
 function placedCells(bot: FakeBot, name: string, destination: Vec3, face: Vec3, cursorY: number): PlacedCell[] {
+  if (hasItemFamily(bot, name, "sign")) {
+    // Underside refusal is unmeasured; T1 measured top and side only (2026-11-15).
+    if (face.y < 0) return [];
+    const block = signBlockFor(bot, name, face.y > 0 ? "ground" : "wall");
+    if (block === null) return [];
+    const facing = face.x > 0 ? "east" : face.x < 0 ? "west" : face.z > 0 ? "south" : "north";
+    const rotation = String(((Math.round(-bot.entity.yaw * 8 / Math.PI) % 16) + 16) % 16);
+    return [{ cell: destination, block: blockWith(bot, block, face.y > 0 ? { rotation } : { facing }) }];
+  }
   if (name.endsWith("_slab")) return [{ cell: destination, block: blockWith(bot, name, { type: halfClicked(face, cursorY) }) }];
   if (name.endsWith("_stairs")) return [{ cell: destination, block: blockWith(bot, name, { half: halfClicked(face, cursorY) }) }];
   if (name.endsWith("_bed")) {
@@ -217,10 +228,28 @@ function placedCells(bot: FakeBot, name: string, destination: Vec3, face: Vec3, 
  * emits a `blockUpdate` for it, changed or not. The update of the first packet that changes the cell is `setCell`'s own,
  * so only a packet that repeats the state the world already has (`repeats`) emits its update here.
  */
-function sendBlockChange(bot: FakeBot, world: FakeWorld, cell: Vec3, repeats: boolean): void {
+export function sendBlockChange(bot: FakeBot, world: FakeWorld, cell: Vec3, repeats: boolean): void {
   // Mineflayer's own `block_change` listener (the world and its update) runs before `place_block.js`'s.
   if (repeats) world.resend(cell);
   bot._client.emit("block_change", { location: { x: cell.x, y: cell.y, z: cell.z }, type: world.getBlockStateId(cell) });
+}
+
+/** Deliver the remaining sign packets on the next server tick, including through a stall. */
+function afterNextTick(server: FakeServer, answer: () => void): void {
+  const remove = server.onTick(() => { remove(); answer(); });
+}
+
+/** Deliver the sign's later block, entity, slot and acknowledgement packets. */
+function finishSignPlacement(bot: FakeBot, parts: PlacementParts, destination: Vec3, held: NonNullable<FakeInventory["heldItem"]>, acknowledge: () => void): void {
+  sendBlockChange(bot, parts.world, destination, true);
+  parts.signs.sendText(destination);
+  if (bot.game.gameMode !== "creative") {
+    const Item = require("prismarine-item")(bot.registry);
+    const remaining = held.count > 1 ? itemOf(bot.registry, held.name, held.count - 1) : null;
+    bot.updateHeldItem();
+    bot._client.emit("set_slot", { windowId: 0, stateId: 0, slot: held.slot, item: Item.toNotch(remaining) });
+  }
+  acknowledge();
 }
 
 /** The server's side of a click on a block's face: the held block put in an empty destination, one taken from the stack outside creative, then the acknowledgement. */
@@ -230,6 +259,13 @@ function answerPlacement(bot: FakeBot, parts: PlacementParts, click: BlockPlaceC
   const held = click.hand === OFF_HAND ? (inventory.slots[EQUIPMENT_SLOTS["off-hand"]] ?? null) : inventory.heldItem;
   const block = held === null ? undefined : bot.registry.blocksByName[held.name];
   const acknowledge = () => void bot._client.emit("acknowledge_player_digging", { sequenceId: click.sequence });
+  if (parts.signs.isSign(click.location)) {
+    sendBlockChange(bot, world, click.location, true);
+    parts.signs.open(click.location);
+    sendBlockChange(bot, world, click.location, true);
+    sendBlockChange(bot, world, click.location, true);
+    return afterNextTick(parts.server, acknowledge);
+  }
   // 1.21.4 sends the cursor as a share of the face; older versions as sixteenths.
   const cursorY = bot.supportFeature("blockPlaceHasHandAndIntCursor") ? click.cursorY / 16 : click.cursorY;
   const placed = held === null || block === undefined ? [] : placedCells(bot, block.name, destination, face, cursorY);
@@ -240,12 +276,18 @@ function answerPlacement(bot: FakeBot, parts: PlacementParts, click: BlockPlaceC
   if (held === null || !free) return acknowledge();
   sendBlockChange(bot, world, click.location, true);
   for (const { cell, block: placedBlock } of placed) world.setCell(cell, placedBlock);
+  const isSign = parts.signs.isSign(destination);
+  if (isSign) parts.signs.open(destination);
   // A block put alone is announced twice (the chunk's change and the click's resend), the cell hearing two `blockUpdate`s
   // within the tick (contract check `placement-block-update`, 10 of 10); a bed's halves go in one `multi_block_change`
   // (`setCell`'s updates stand for it), then the destination's `block_change` repeats the foot: the foot hears two, the head one.
   const bed = placed.length > 1;
   sendBlockChange(bot, world, destination, bed);
   if (!bed) sendBlockChange(bot, world, destination, true);
+  if (isSign) {
+    afterNextTick(parts.server, () => finishSignPlacement(bot, parts, destination, held, acknowledge));
+    return;
+  }
   if (bot.game.gameMode !== "creative") inventory.updateSlot(held.slot, held.count > 1 ? itemOf(bot.registry, held.name, held.count - 1) : (null as never));
   acknowledge();
 }

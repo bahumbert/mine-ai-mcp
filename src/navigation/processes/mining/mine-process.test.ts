@@ -1,13 +1,22 @@
 import { MemoryWorld as GoalTestWorld } from "../../world/memory-world.js";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { occupyGoal } from "../../index.js";
 import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { createNavigationRuntime } from "../../runtime.js";
+import { createMovementPolicy } from "../../movements/policy.js";
+import { createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
+import { footprintColumns } from "../../../world/player-physics.js";
+import { waterStancesHeld } from "../../steering/hold-water-position.js";
+import { WORKING_OFFSETS } from "./drowned-target.js";
 import { DROP_PICKUP_TIMEOUT_MS } from "./mine-drops.js";
-import { mine, type MineRequest } from "./mine-process.js";
+import { mine, type MineRequest, type MineScan, type MineTarget } from "./mine-process.js";
+import { MineTargeting } from "./mine-targeting.js";
+import { standsOnBlock } from "./target-safety.js";
 
 const goalTestWorld = new GoalTestWorld();
 
@@ -24,40 +33,28 @@ function satisfiedAt(feet: Vec3, target: Vec3, levels: 2 | 3): boolean {
   return snapshot.isSatisfied({ feet, remainingScaffolds: [], overlayId: "overlay:0" } as never, goalTestWorld);
 }
 
-test("occupying a target means standing in its cell", () => {
-  assert.equal(satisfiedAt(new Vec3(5, 64, -2), new Vec3(5, 64, -2), 3), true);
-});
-
-test("a player standing below a target occupies it, because it is two blocks tall", () => {
-  assert.equal(satisfiedAt(new Vec3(5, 63, -2), new Vec3(5, 64, -2), 3), true);
-  assert.equal(satisfiedAt(new Vec3(5, 62, -2), new Vec3(5, 64, -2), 3), true);
-});
-
-test("two-level occupancy excludes the cell two below the target", () => {
-  assert.equal(satisfiedAt(new Vec3(5, 63, -2), new Vec3(5, 64, -2), 2), true);
-  assert.equal(satisfiedAt(new Vec3(5, 62, -2), new Vec3(5, 64, -2), 2), false);
-});
-
-test("a target in another column is never occupied", () => {
-  assert.equal(satisfiedAt(new Vec3(0, 64, 0), new Vec3(5, 64, -2), 3), false);
-});
-
-/**
- * The consequence worth stating, because it is a trap rather than a bug: a
- * target in the bot's own column at head height is *already* occupied, so the
- * planner reports the goal reached without moving or breaking anything.
- * Baritone answers this in `MineProcess.onTick`, which breaks a known location
- * directly above or below the player itself rather than pathing to it.
- */
-test("a target at head height is already occupied, so pathing to it does nothing", () => {
-  assert.equal(satisfiedAt(new Vec3(5, 64, -2), new Vec3(5, 65, -2), 3), true);
-  assert.equal(satisfiedAt(new Vec3(5, 66, -2), new Vec3(5, 66, -2), 3), true);
+test("occupancy includes the same cell and headroom, excludes other columns and respects its level bound", () => {
+  const cases = [
+    { feet: new Vec3(5, 64, -2), target: new Vec3(5, 64, -2), levels: 3, occupied: true },
+    { feet: new Vec3(5, 63, -2), target: new Vec3(5, 64, -2), levels: 3, occupied: true },
+    { feet: new Vec3(5, 62, -2), target: new Vec3(5, 64, -2), levels: 3, occupied: true },
+    { feet: new Vec3(5, 63, -2), target: new Vec3(5, 64, -2), levels: 2, occupied: true },
+    { feet: new Vec3(5, 62, -2), target: new Vec3(5, 64, -2), levels: 2, occupied: false },
+    { feet: new Vec3(0, 64, 0), target: new Vec3(5, 64, -2), levels: 3, occupied: false },
+    { feet: new Vec3(5, 64, -2), target: new Vec3(5, 65, -2), levels: 3, occupied: true },
+    { feet: new Vec3(5, 66, -2), target: new Vec3(5, 66, -2), levels: 3, occupied: true },
+  ] as const;
+  for (const { feet, target, levels, occupied } of cases) {
+    assert.equal(satisfiedAt(feet, target, levels), occupied);
+  }
 });
 
 /** Ticks a drop waits before the server lets the bot take it: the scene's item stays on the ground. */
 const STAYS_ON_THE_GROUND_TICKS = 1_000_000;
 /** Clock the process may use in one test, ms; every wait of a run is a tick or a timer of this clock. */
 const RUN_BOUND_MS = 60_000;
+/** When the caller of `onArrival` cancels in the test of a wait with physics stopped: after the dig wait's own bound. */
+const CALLER_CANCEL_MS = 4_000;
 
 /** The entity id of the scene's `index`th drop: past the bot's own id. */
 const dropId = (index: number) => 100 + index;
@@ -136,6 +133,12 @@ function mineScene(options: SceneOptions = {}): MineScene {
       await options.onWaitForTicks!(scene);
       await waitForTicks(ticks);
     };
+    // The miner's own tick wait listens to `physicsTick` itself (`waitForPhysicsTicks`, so a cancel ends it when physics
+    // stops): the hook runs on the tick such a wait consumes, before the wait hears it (this listener is the first). Our
+    // listener is the only one when nothing waits.
+    bot.on("physicsTick", () => {
+      if (bot.listenerCount("physicsTick") > 1) void options.onWaitForTicks!(scene);
+    });
   }
   return scene;
 }
@@ -234,6 +237,338 @@ test("a non-exploratory run with nothing matching in range stops", async () => {
 
   assert.equal(result.status, "no_targets");
   assert.deepEqual(result.broken, []);
+});
+
+test("no targetCost keeps today's order and cut", async () => {
+  const blocks = Array.from({ length: 70 }, (_, index) => new Vec3(index + 5, 64, 0));
+  using scene = mineScene({ blocks });
+  let satisfied = false;
+  let offered: number[] = [];
+  await runMine(scene, {
+    isSatisfied: () => satisfied,
+    onTargets: (targets) => { offered = targets.map((target) => target.position.x); },
+    route: async () => {
+      satisfied = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.deepEqual(offered, Array.from({ length: 64 }, (_, index) => index + 5));
+});
+
+test("targetCost reorders blocks, never drops", async () => {
+  using scene = mineScene({ blocks: [new Vec3(5, 64, 0), new Vec3(7, 64, 0)], drops: [new Vec3(9, 64, 0)] });
+  let satisfied = false;
+  let begun = false;
+  const scans: MineScan[] = [];
+  const result = await runMine(scene, {
+    isSatisfied: () => satisfied,
+    targetCost: {
+      beginScan: () => { begun = true; },
+      cost: (position) => { assert.equal(begun, true); return position.x === 5 ? 4 : 0; },
+    },
+    onScan: (scan) => { scans.push(scan); },
+    onTargets: (targets) => { assert.deepEqual(targets.map((target) => target.kind), ["drop"]); },
+    route: async () => { satisfied = true; return { status: "completed", elapsedMs: 0 }; },
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(scans[0]!.targets.map((target) => [target.kind, target.position.x]), [["drop", 9], ["block", 7], ["block", 5]]);
+  assert.equal(result.passedOver, 0);
+});
+
+test("with a cost the scan looks past the 64 nearest and passedOver is the run's largest; onScan sees every scan", async () => {
+  const blocks = Array.from({ length: 70 }, (_, index) => new Vec3(index + 5, 64, 0));
+  using scene = mineScene({ blocks });
+  let satisfied = false;
+  let scans = 0;
+  let begins = 0;
+  const announcements: number[][] = [];
+  const result = await runMine(scene, {
+    isSatisfied: () => satisfied,
+    targetCost: {
+      beginScan: () => { begins += 1; },
+      cost: (position) => scans === 0 && position.x !== 74 ? 100 : 0,
+    },
+    onScan: (scan) => {
+      scans += 1;
+      assert.equal(scan.candidates.length, 70);
+      if (scans === 1) {
+        assert.deepEqual(scan.targets.map((target) => target.position.x), [74]);
+        assert.equal(scan.passedOver.length, 69);
+      } else assert.deepEqual(scan.targets.map((target) => target.position.x), [5, 6, 7, 8, 9]);
+    },
+    onTargets: (targets) => { announcements.push(targets.map((target) => target.position.x)); },
+    route: async ({ goal }) => {
+      const observation = { position: scene.bot.entity.position, entities: new Map() } as never;
+      goal.resolve(observation); // Cached: this is not another scan.
+      await scene.clock.sleep(260);
+      goal.resolve(observation);
+      await scene.clock.sleep(260);
+      goal.resolve(observation); // Unchanged targets still produce a fresh scan observation.
+      satisfied = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(scans, 3);
+  assert.equal(begins, 3);
+  assert.deepEqual(announcements, [[74], [5, 6, 7, 8, 9]]);
+  assert.equal(result.passedOver, 69);
+  assert.deepEqual(result.passedOverNearest, { x: 5, y: 64, z: 0, distance: Math.sqrt(30.75) });
+});
+
+test("the under-water rejection count covers the widened scan", async () => {
+  const blocks = Array.from({ length: 1030 }, (_, index) => new Vec3(index + 5, 64, 0));
+  using scene = mineScene({ blocks });
+  let inspected = false;
+  const result = await runMine(scene, {
+    targetCost: { beginScan() {}, cost: () => 0 },
+    canMine: () => ({ kind: "prohibited", reason: "in water: no dry ground", underWater: true }),
+    onScan: (scan) => {
+      inspected = true;
+      assert.equal(scan.underWaterRejections, 1024);
+      assert.deepEqual(scan.candidates, []);
+    },
+    route: noRouteNeeded,
+  });
+  assert.equal(inspected, true);
+  assert.equal(result.underWater, true);
+});
+
+test("a drained target excludes wet stances with and without weighing, preserving weighed identity and metadata", async () => {
+  for (const weighed of [false, true]) {
+    const target = new Vec3(1, 64, 0);
+    const wet = new Vec3(2, 64, 0);
+    using scene = mineScene({ blocks: [target], water: [wet], feet: new Vec3(8.5, 64, 0.5) });
+    let satisfied = false;
+    let inspected = false;
+    const result = await runMine(scene, {
+      isSatisfied: () => satisfied,
+      targetCost: weighed ? { beginScan() {}, cost: () => 0 } : undefined,
+      canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [wet] } }),
+      onScan: (scan) => {
+        if (!weighed) return;
+        inspected = true;
+        const kept = scan.targets[0];
+        assert.equal(kept, scan.candidates[0]);
+        assert.equal(kept?.kind, "block");
+        if (kept?.kind !== "block") throw new Error("expected the drained block");
+        assert.equal(kept.drained, true);
+        assert.deepEqual([...kept.excludedStances], ["2,64,0"]);
+      },
+      route: async ({ goal }) => {
+        const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+        assert.equal(resolved.kind, "active");
+        if (resolved.kind !== "active") throw new Error("expected a dry working stance");
+        const at = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+        assert.equal(resolved.isSatisfied(at(wet), goalTestWorld), false);
+        assert.equal(resolved.isSatisfied(at(new Vec3(0, 64, 0)), goalTestWorld), true);
+        satisfied = true;
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.equal(result.status, "satisfied");
+    assert.equal(inspected, weighed);
+  }
+});
+
+test("support exclusions cover the occupied edge stance and refresh away while explicit failures persist (P4-34)", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], feet: new Vec3(0.85, 65, 0.5) });
+  let excluded: string[] | null = null;
+  await runMine(scene, {
+    isSatisfied: () => excluded !== null,
+    targetCost: { beginScan() {}, cost: () => 0 },
+    onScan: (scan) => {
+      const kept = scan.targets[0];
+      if (kept?.kind === "block") excluded = [...kept.excludedStances];
+    },
+    route: async () => ({ status: "completed", elapsedMs: 0 }),
+  });
+  assert.deepEqual(excluded, ["1,65,0", "0,65,0"]);
+  const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: target }));
+  const first = targeting.targets()[0];
+  assert.ok(first?.kind === "block");
+  targeting.excludeBlockStance(first, new Vec3(3, 65, 0));
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+  const second = targeting.refresh()[0];
+  assert.ok(second?.kind === "block");
+  assert.deepEqual([...second.excludedStances], ["3,65,0"]);
+  targeting.excludeBlockStance(second, new Vec3(4, 65, 0));
+  const third = targeting.refresh()[0];
+  assert.ok(third?.kind === "block");
+  assert.deepEqual([...third.excludedStances], ["3,65,0", "4,65,0"]);
+});
+
+test("sealed edge work reapproaches a stone bank without dispatching a support dig", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], lava: [new Vec3(1, 64, 1)], feet: new Vec3(0.85, 65, 0.5) });
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  let broken = false;
+  let routed = false;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => broken,
+    placeInto: async (_bot, cell) => {
+      assert.deepEqual(cellAt(cell), new Vec3(1, 64, 1));
+      scene.world.setCell(cellAt(cell), "cobblestone");
+      return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+    },
+    route: async () => {
+      assert.equal(broken, false);
+      scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+      assert.equal(scene.bot.blockAt(new Vec3(2, 64, 0))?.name, "stone");
+      assert.equal(standsOnBlock(scene.bot, target), false);
+      routed = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+    breakInPlace: async (options) => {
+      assert.equal(routed, true, "the original edge stance cannot dispatch a break");
+      assert.equal(options.retainSupport, true);
+      scene.world.setCell(target, "air");
+      broken = true;
+      return { status: "broken" };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(result.broken, [target]);
+});
+
+test("alternative centre support permits sealed in-place work without routing", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], solids: [new Vec3(0, 64, 0)], feet: new Vec3(0.85, 65, 0.5) });
+  const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: target }));
+  const kept = targeting.targets()[0];
+  assert.ok(kept?.kind === "block");
+  assert.deepEqual([...kept.excludedStances], []);
+  let broken = false;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => broken,
+    route: noRouteNeeded,
+    breakInPlace: async ({ retainSupport }) => {
+      assert.equal(retainSupport, true);
+      scene.world.setCell(target, "air");
+      broken = true;
+      return { status: "broken" };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+});
+
+test("motion to sole edge support during settle, water clearing or sealing returns to a safe bank", async () => {
+  for (const preparation of ["settle", "water", "seal"] as const) {
+    const target = new Vec3(1, 64, 0);
+    const face = new Vec3(1, 64, 1);
+    using scene = mineScene({
+      blocks: [target], feet: new Vec3(2.5, preparation === "settle" ? 65.2 : 65, 0.5),
+      onGround: preparation !== "settle", isInWater: preparation === "settle",
+      water: preparation === "water" ? [face] : [], lava: preparation === "seal" ? [face] : [],
+    });
+    scene.world.setCell(new Vec3(2, 64, 0), "stone");
+    const displace = () => {
+      scene.bot.entity.position = new Vec3(0.85, 65, 0.5);
+      Object.assign(scene.bot.entity, { onGround: true, isInWater: false });
+      assert.equal(standsOnBlock(scene.bot, target), true);
+    };
+    if (preparation === "settle") scene.bot.once("physicsTick", displace);
+    let broken = false;
+    let routed = false;
+    const result = await runMine(scene, {
+      exactTarget: target,
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      isSatisfied: () => broken,
+      placeInto: async (_bot, cell) => {
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        displace();
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      route: async () => {
+        assert.equal(broken, false, preparation);
+        routed = true;
+        scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: async () => {
+        assert.equal(routed, true, `${preparation} must not dispatch from the displaced edge`);
+        scene.world.setCell(target, "air");
+        broken = true;
+        return { status: "broken" };
+      },
+    });
+    assert.equal(result.status, "satisfied", preparation);
+    assert.deepEqual(result.broken, [target]);
+    assert.equal(scene.bot.listenerCount("physicsTick"), 0);
+  }
+});
+
+test("a late support refusal refreshes the stance without blacklisting the unbroken target", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], feet: new Vec3(2.5, 65, 0.5) });
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  let attempts = 0;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => attempts === 2,
+    breakInPlace: async () => {
+      if (++attempts === 1) {
+        scene.bot.entity.position = new Vec3(0.85, 65, 0.5);
+        return { status: "failed", cause: "support", reason: "support changed; approach from a safe bank" };
+      }
+      scene.world.setCell(target, "air");
+      return { status: "broken" };
+    },
+    route: async () => {
+      assert.equal(scene.bot.blockAt(target)?.name, "stone");
+      scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(result.broken, [target]);
+});
+
+test("cancel or death during preparation prevents later placement and swing, then a fresh action succeeds", async () => {
+  for (const interruption of ["cancel", "death"] as const) {
+    const target = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [target], lava: [new Vec3(1, 64, 1), new Vec3(2, 64, 0)], feet: new Vec3(0.5, 64, 0.5) });
+    const lifetime = new AbortController();
+    // Runtime action ownership aborts the request on death; this is the process's signal port.
+    scene.bot.once("death", () => lifetime.abort(new Error("death")));
+    let placements = 0;
+    await assert.rejects(runMine(scene, {
+      signal: lifetime.signal,
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      placeInto: async (_bot, cell) => {
+        assert.equal(++placements, 1, "no second preparation after interruption");
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        if (interruption === "death") scene.bot.emit("death");
+        else lifetime.abort(new Error("cancel"));
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      breakInPlace: async () => { throw new Error("unexpected swing after interruption"); },
+      route: noRouteNeeded,
+    }), new RegExp(interruption));
+    let broken = false;
+    const next = await runMine(scene, {
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      isSatisfied: () => broken,
+      placeInto: async (_bot, cell) => {
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      breakInPlace: async () => {
+        scene.world.setCell(target, "air");
+        broken = true;
+        return { status: "broken" };
+      },
+      route: noRouteNeeded,
+    });
+    assert.equal(next.status, "satisfied");
+    assert.equal(scene.bot.listenerCount("physicsTick"), 0);
+  }
 });
 
 test("nearby drops are recovered before another source is offered for mining", async () => {
@@ -366,6 +701,33 @@ test("an anticipated drop follows Mineflayer's item entity before its metadata a
   });
 
   assert.equal(result.status, "satisfied");
+});
+
+/** Mine one stone that comes down with no item entity ever spawning; returns how many lost drops the process reported. */
+async function lostDropsOfUnspawnedBreak(carrying: Record<string, number>): Promise<number> {
+  const target = new Vec3(5, 64, 0);
+  using scene = mineScene({ blocks: [target], carrying });
+  let lost = 0;
+  await runMine(scene, {
+    onLostDrop: () => { lost += 1; },
+    route: async (options) => {
+      const observation = { position: scene.bot.entity.position, entities: new Map() } as never;
+      options.goal.resolve(observation);
+      scene.world.setCell(target, "air");
+      await scene.clock.sleep(300);
+      options.goal.resolve(observation);
+      await scene.clock.sleep(5_500);
+      options.goal.resolve(observation);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  return lost;
+}
+
+test("a missing stone drop is reported lost with a pickaxe, but never when broken by hand", async () => {
+  for (const expected of [1, 0]) {
+    assert.equal(await lostDropsOfUnspawnedBreak(expected ? { wooden_pickaxe: 1 } : {}), expected);
+  }
 });
 
 test("an occupied drop arrival yields a server pickup interval before continuing", async () => {
@@ -661,12 +1023,12 @@ test("a dry-eyed body in water over a solid floor lands on it before the dig in 
     isInWater: true,
     physics: true,
   });
-  let groundedAtDig: boolean | undefined;
+  let stanceAtDig: { grounded: boolean; y: number } | undefined;
   const result = await runMine(scene, {
     canMine: () => ({ kind: "mineable", routeMayBreak: false }),
-    isSatisfied: () => groundedAtDig !== undefined,
+    isSatisfied: () => stanceAtDig !== undefined,
     breakInPlace: async () => {
-      groundedAtDig = scene.bot.entity.onGround;
+      stanceAtDig = { grounded: scene.bot.entity.onGround, y: scene.bot.entity.position.y };
       scene.world.setCell(target, "air");
       return { status: "broken" };
     },
@@ -675,7 +1037,7 @@ test("a dry-eyed body in water over a solid floor lands on it before the dig in 
     },
   });
   assert.equal(result.status, "satisfied");
-  assert.equal(groundedAtDig, true, "the dig waited for the floor: off the ground it is x5 slower");
+  assert.deepEqual(stanceAtDig, { grounded: true, y: 64 }, "the dig waited for the floor: off the ground it is x5 slower");
 });
 
 test("incidental inventory gain cannot satisfy an unbroken exact target", async () => {
@@ -723,6 +1085,141 @@ test("failed water preparation excludes the attempted working cell even after th
     },
   });
   assert.equal(inspected, true);
+});
+
+test("a drained target whose drain fails with water left is blacklisted once and keeps its reason beside a drowned top", async () => {
+  for (const top of [false, true]) {
+    const target = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [target, ...(top ? [target.offset(0, 1, 0)] : [])], water: [new Vec3(2, 64, 0)] });
+    const result = await runMine(scene, {
+      canMine: (block) => block.position.y === 65
+        ? { kind: "prohibited", reason: "the block is under water", underWater: true }
+        : { kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } },
+      placeInto: async () => ({ kind: "failed", error: "placement refused" }),
+      breakInPlace: async () => { throw new Error("a failed drain must never mine wet"); },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, undefined);
+    assert.match(result.reason ?? "", /in water: the drain failed:.*placement refused/);
+  }
+});
+
+test("a drain that fails with the faces dry tries another stance", async () => {
+  const target = new Vec3(1, 64, 0);
+  const face = new Vec3(2, 64, 0);
+  using scene = mineScene({ blocks: [target], water: [face], isInWater: true });
+  let inspected = false;
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+    isSatisfied: () => inspected,
+    placeInto: async () => {
+      scene.world.setCell(face, "air");
+      return { kind: "failed", error: "a late placement answer" };
+    },
+    route: async ({ goal }) => {
+      const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+      assert.equal(resolved.kind, "active");
+      if (resolved.kind !== "active") throw new Error("the target must remain available");
+      const at = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+      assert.equal(resolved.isSatisfied(at(new Vec3(0, 64, 0)), goalTestWorld), false);
+      assert.equal(resolved.isSatisfied(at(face), goalTestWorld), true);
+      inspected = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+});
+
+for (const [rate, stopped] of [[20, false], [10, false], [20, true]] as const)
+  test(`a failed wading drain excludes that stance and tries another (${rate} tps, stopped ${stopped})`, async () => {
+    const target = new Vec3(1, 64, 0);
+    const feet = new Vec3(0, 65, 0);
+    using scene = mineScene({ blocks: [target], solids: [new Vec3(0, 64, 0), new Vec3(1, 64, 1)], water: [feet, new Vec3(1, 65, 0), new Vec3(2, 65, 0)], feet: new Vec3(0.5, 65, 0.5), isInWater: true });
+    scene.world.setCell(feet, { name: "water", properties: { level: 1 } });
+    scene.world.setCell(new Vec3(1, 65, 0), { name: "water", properties: { level: 1 } });
+    scene.server.setTickRate(rate);
+    if (stopped) scene.server.stop();
+    const other = new Vec3(1, 65, 1);
+    const result = await runMine(scene, {
+      canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+      isSatisfied: () => scene.bot.blockAt(target)?.name === "air",
+      placeInto: async (_bot, position) => {
+        const cell = new Vec3(position.x, position.y, position.z);
+        scene.world.setCell(cell, "cobblestone");
+        return { kind: "placed", block: scene.bot.blockAt(cell)! };
+      },
+      route: async ({ goal }) => {
+        const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+        assert.equal(resolved.kind, "active");
+        if (resolved.kind !== "active") throw new Error("expected a remaining target");
+        assert.equal(resolved.isSatisfied({ feet, remainingScaffolds: 0, overlayId: "overlay:0" }, goalTestWorld), false);
+        assert.equal(resolved.isSatisfied({ feet: other, remainingScaffolds: 0, overlayId: "overlay:0" }, goalTestWorld), true);
+        scene.bot.entity.position = other.offset(0.5, 0, 0.5);
+        Reflect.set(scene.bot.entity, "isInWater", false);
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: breakingInPlace(scene, () => {}),
+    });
+    assert.equal(result.status, "unreachable");
+    assert.ok(result.reason, "the bounded stop explains why work could not continue");
+    assert.equal(scene.bot.blockAt(target)?.name, "stone");
+  });
+
+test("only in-water targets settle unreachable with underWater and no route; mixed refusals do not", async () => {
+  for (const mixed of [false, true]) {
+    using scene = mineScene({ blocks: [new Vec3(1, 64, 0), new Vec3(2, 64, 0)] });
+    const result = await runMine(scene, {
+      canMine: (block) => mixed && block.position.x === 2
+        ? { kind: "prohibited", reason: "protected region" }
+        : { kind: "prohibited", reason: "in water: no dry ground beside it to drain it from", underWater: true },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, mixed ? undefined : true);
+  }
+});
+
+test("a target refresh that satisfies the request settles satisfied despite its remaining water rejections", async () => {
+  using scene = mineScene({ blocks: [new Vec3(1, 64, 0)] });
+  let satisfied = false;
+  const result = await runMine(scene, {
+    isSatisfied: () => satisfied,
+    canMine: () => {
+      satisfied = true;
+      return { kind: "prohibited", reason: "in water: no dry ground", underWater: true };
+    },
+    route: noRouteNeeded,
+  });
+  assert.equal(result.status, "satisfied");
+  assert.equal(result.underWater, undefined);
+});
+
+test("remaining water refusals never claim no target was walked to after a dry route, pickup or in-place break", async () => {
+  for (const work of ["route", "pickup", "break"]) {
+    const dry = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [...(work === "pickup" ? [] : [dry]), new Vec3(3, 64, 0)], drops: work === "pickup" ? [dry] : [], feet: new Vec3(0.5, 64, 0.5) });
+    let gained = 0;
+    const removeDry = () => scene.world.setCell(dry, "air");
+    const result = await runMine(scene, {
+      observedInventoryGain: () => gained,
+      canMine: (block) => block.position.x === 1
+        ? { kind: "mineable", routeMayBreak: work === "route" }
+        : { kind: "prohibited", reason: "in water: no dry ground", underWater: true },
+      route: async () => {
+        if (work === "pickup") { scene.entities.remove(dropId(0)); gained = 1; }
+        else removeDry();
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: async () => {
+        removeDry();
+        return { status: "broken" };
+      },
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, undefined);
+    assert.deepEqual(result.broken, work === "pickup" ? [] : [dry]);
+  }
 });
 
 test("a collected item disappearing from a route does not blacklist its remaining block target", async () => {
@@ -1087,6 +1584,42 @@ test("a lava face that will not close blacklists the target instead of breaking 
   assert.match(result.reason ?? "", /the lava at 2,64,0 could not be closed: no carried item is a full block/);
 });
 
+test("water returning during lava sealing refuses the swing and the next target is tried", async () => {
+  const first = new Vec3(1, 64, 0);
+  const next = new Vec3(-1, 64, 0);
+  const water = new Vec3(1, 65, 0);
+  const lava = new Vec3(2, 64, 0);
+  using scene = mineScene({ blocks: [first, next], solids: [new Vec3(0, 63, 0), new Vec3(1, 63, 0), new Vec3(-1, 63, 0)],
+    water: [water], lava: [lava], feet: new Vec3(0.5, 64, 0.5) });
+  const navigation = createNavigationRuntime(scene.bot);
+  const attempts: string[] = [];
+  let finished = false;
+  try {
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+    movements: createMineflayerMovementPolicy(scene.bot),
+    isSatisfied: () => finished,
+    placeInto: async (_bot, position) => {
+      const cell = cellAt(position);
+      scene.world.setCell(cell, "cobblestone");
+      if (cell.equals(lava)) scene.world.setCell(water, "water");
+      return { kind: "placed", block: scene.bot.blockAt(cell)! };
+    },
+    breakInPlace: async (options) => {
+      attempts.push(cellAt(options.position).toString());
+      if (cellAt(options.position).equals(next)) { finished = true; return { status: "broken" }; }
+      return navigation.breakBlockInPlace(options);
+    },
+    route: noRouteNeeded,
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(attempts, [first.toString(), next.toString()]);
+  assert.equal(scene.bot.blockAt(first)?.name, "stone");
+  assert.equal(scene.server.packets.filter((packet) => packet.name === "block_dig" &&
+    (packet.data as { location: { x: number; y: number; z: number } }).location.x === first.x).length, 0);
+  } finally { await navigation.close(); }
+});
+
 /** Obsidian beside an unconverted lava source, with the bot on the working cell west of it. */
 function obsidianBesideSource(carrying: Record<string, number>): MineScene {
   return mineScene({
@@ -1269,14 +1802,6 @@ test("a route that arrives without breaking anything cannot loop forever", async
   assert.equal(result.reason, "no route was found");
 });
 
-test("an unreachable target is reported as found-but-unreachable, not as absent", async () => {
-  using scene = mineScene({ blocks: [new Vec3(5, 64, 0)] });
-  const result = await runMine(scene, { route: async () => ({ status: "stopped", reason: "no path", elapsedMs: 0 }) });
-
-  assert.notEqual(result.status, "no_targets");
-  assert.equal(result.status, "unreachable");
-});
-
 test("an exact target remains available beyond the general scan's nearest-match limit", async () => {
   const target = new Vec3(15, 64, 15);
   const nearer = Array.from(
@@ -1377,24 +1902,29 @@ test("an unreachable drop is blacklisted without delaying the remaining block ta
   assert.equal(ticks, 0);
 });
 
-test("an unreachable live drop does not wait forever for a packet transition", async () => {
-  using scene = mineScene({
-    drops: [new Vec3(3, 61, 0)],
-    onWaitForTicks: () => {
-      throw new Error("a live unreachable drop must not loiter");
-    },
-  });
-  let failures = 0;
-  const result = await runMine(scene, {
-    route: async (options) => {
-      failures += 1;
-      const resolution = await options.onCalculationFailure?.(noPath(scene, { x: 0, y: 64, z: 0 }, 3));
-      assert.equal(resolution?.kind, "completed");
-      return { status: "completed", elapsedMs: 0 };
-    },
-  });
-  assert.equal(failures, 1);
-  assert.equal(result.status, "unreachable");
+test("an unreachable live drop never loiters, whether stationary in air or moving in lava", async () => {
+  for (const inLava of [false, true]) {
+    const cell = new Vec3(3, 61, 0);
+    using scene = mineScene({
+      drops: [cell],
+      lava: inLava ? [cell] : [],
+      onWaitForTicks: () => {
+        throw new Error("a live unreachable drop must not loiter, including in lava");
+      },
+    });
+    if (inLava) scene.bot.entities[dropId(0)]!.velocity = new Vec3(0, -0.2, 0);
+    let failures = 0;
+    const result = await runMine(scene, {
+      route: async (options) => {
+        failures += 1;
+        const resolution = await options.onCalculationFailure?.(noPath(scene, { x: 0, y: 64, z: 0 }, 3));
+        assert.equal(resolution?.kind, "completed");
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.equal(failures, 1);
+    assert.equal(result.status, "unreachable");
+  }
 });
 
 test("a failed pickup search waits for a falling log to land before judging its reachability", async () => {
@@ -1420,26 +1950,6 @@ test("a failed pickup search waits for a falling log to land before judging its 
     },
   });
   assert.equal(result.status, "satisfied");
-});
-
-test("a moving drop in lava does not receive the free-flight wait", async () => {
-  const cell = new Vec3(3, 61, 0);
-  using scene = mineScene({
-    drops: [cell],
-    lava: [cell],
-    onWaitForTicks: () => {
-      throw new Error("lava is not free flight");
-    },
-  });
-  scene.bot.entities[dropId(0)]!.velocity = new Vec3(0, -0.2, 0);
-  const result = await runMine(scene, {
-    route: async (options) => {
-      const resolution = await options.onCalculationFailure?.(noPath(scene, { x: 0, y: 64, z: 0 }, 3));
-      assert.equal(resolution?.kind, "completed");
-      return { status: "completed", elapsedMs: 0 };
-    },
-  });
-  assert.equal(result.status, "unreachable");
 });
 
 test("a failed block cell does not hide an item that later lands there", async () => {
@@ -1491,14 +2001,16 @@ async function arrivalsAcrossSlowTick(change: (scene: MineScene, cell: Vec3) => 
   return { status: result.status, ticks };
 }
 
-test("an old item does not hide a later item entering the same cell", async () => {
-  const outcome = await arrivalsAcrossSlowTick(({ entities, dropAt }, cell) => {
-    entities.remove(dropId(0));
-    dropAt(1, cell);
-  });
-
-  assert.equal(outcome.status, "satisfied");
-  assert.equal(outcome.ticks, 2);
+test("a live or replacement item remains a target across a slow tick past the settlement window", async () => {
+  for (const replacement of [false, true]) {
+    const outcome = await arrivalsAcrossSlowTick(({ entities, dropAt }, cell) => {
+      if (!replacement) return;
+      entities.remove(dropId(0));
+      dropAt(1, cell);
+    });
+    assert.equal(outcome.status, "satisfied");
+    assert.equal(outcome.ticks, 2);
+  }
 });
 
 test("the 64-target goal width is not a lifetime calculation-failure limit", async () => {
@@ -1523,13 +2035,6 @@ test("the 64-target goal width is not a lifetime calculation-failure limit", asy
   assert.equal(result.status, "unreachable");
   assert.equal(routes, 1);
   assert.equal(failures, 65);
-});
-
-test("a live drop remains a target after the vanished-item settlement window", async () => {
-  const outcome = await arrivalsAcrossSlowTick(() => undefined);
-
-  assert.equal(outcome.status, "satisfied");
-  assert.equal(outcome.ticks, 2);
 });
 
 /**
@@ -1619,21 +2124,25 @@ test("target observers see block removal and pickup during a route without an ar
 test("a swimmer waiting to settle while physics has stopped gives up on the arrival dig within seconds", async () => {
   const target = new Vec3(1, 64, 0);
   const feet = new Vec3(0.5, 64, 0.5);
-  // The first tick the process waits for comes after the settle wait gave up on the dig.
-  let tickWaitAtMs: number | undefined;
   using scene = mineScene({
     blocks: [target],
-    // The eye cell: the eyes rule reads whole cells.
+    // At this stance the eyes are below the source's surface in the upper cell.
     water: [feet.offset(0, 1.62, 0).floored()],
     feet,
     onGround: false,
     isInWater: true,
-    onWaitForTicks: ({ clock }) => {
-      tickWaitAtMs ??= clock.now();
-    },
+  });
+  // The last wait for a physics tick starts after the settle wait gave up on the dig; the process waits on it until the caller cancels.
+  let lastTickWaitAtMs: number | undefined;
+  // `newListener` is the emitter's own event, not one of the bot's typed events.
+  EventEmitter.prototype.on.call(scene.bot, "newListener", (event: string | symbol) => {
+    if (event === "physicsTick") lastTickWaitAtMs = scene.clock.now();
   });
   // Before the wall bound this wait ended only with the caller's abort.
   scene.bot.physicsEnabled = false;
+  const callerCancel = new AbortController();
+  scene.clock.after(CALLER_CANCEL_MS, () => callerCancel.abort(new Error("the caller cancelled")));
+  let arrivalEnd: unknown;
   let breakAttempts = 0;
   let arrivalOver = false;
   await runMine(scene, {
@@ -1647,18 +2156,20 @@ test("a swimmer waiting to settle while physics has stopped gives up on the arri
       const observation = { position: scene.bot.entity.position, entities: new Map() } as never;
       const node = { feet: scene.bot.entity.position.floored(), remainingScaffolds: 0, overlayId: "overlay:0" };
       try {
-        await options.onArrival?.({ goalRevision: "test", node, observation, signal: new AbortController().signal });
-      } catch {
-        // Known code bug, not asserted: `waitForProcessTick` waits on a bare `bot.waitForTicks(1)`, which Mineflayer
-        // rejects at 5050 ms when physics sends no tick (`physics.js:456-475`, facts runtime-pitfalls.md "waitForTicks").
-        // The old fake resolved that wait at once; this test is about the dig wait before it.
+        await options.onArrival?.({ goalRevision: "test", node, observation, signal: callerCancel.signal });
+      } catch (cause) {
+        arrivalEnd = cause;
       }
       arrivalOver = true;
       return { status: "completed", elapsedMs: 0 };
     },
   });
   assert.equal(breakAttempts, 0);
-  assert.ok(tickWaitAtMs !== undefined && tickWaitAtMs < 3_000, `the dig wait gave up after ${tickWaitAtMs} ms`);
+  assert.ok(lastTickWaitAtMs !== undefined && lastTickWaitAtMs < 3_000, `the dig wait gave up after ${lastTickWaitAtMs} ms`);
+  // `waitForProcessTick` listens to the tick itself, so the caller's cancel ends it with physics stopped: a bare
+  // `bot.waitForTicks(1)` here ended only at Mineflayer's own 5050 ms timeout (`physics.js:462`) with its own error.
+  assert.match(String(arrivalEnd), /the caller cancelled/);
+  assert.equal(scene.bot.listenerCount("physicsTick"), 0, "the cancelled wait left no tick listener");
 });
 
 /**
@@ -1685,4 +2196,481 @@ test("a bot standing on the only match steps off it and mines it from the side",
 
   assert.equal(result.status, "satisfied");
   assert.deepEqual(stancesAtBreak, ["1,0"]);
+});
+
+/**
+ * `collect/coal-under-sand` (2026-11-16): the stance was judged at its cell centre, the body ended 0.1 into the next
+ * column, and the coal's sand landed in cells it occupied. The last check before the swing now refuses that, and with
+ * steering blocked (a body that cannot centre) the route replans from the observed body instead of digging.
+ */
+test("a coal swing refused for the sand column over the body replans from the observed body and never digs over that column", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  // The scenario's corridor (`collect/falling-column-trailing-edge`): a bedrock box round a one-wide corridor whose
+  // coal, above head height, carries a sand column hidden behind it, so the plan digs the coal first.
+  const cells: Record<string, string> = {};
+  for (let x = -1; x <= 1; x++) for (let y = 63; y <= 70; y++) for (let z = -2; z <= 2; z++) cells[`${x},${y},${z}`] = "bedrock";
+  for (let y = 63; y <= 64; y++) for (let z = -1; z <= 1; z++) cells[`0,${y},${z}`] = "air";
+  cells["0,65,-1"] = "coal_ore";
+  for (let y = 66; y <= 69; y++) cells[`0,${y},-1`] = "sand";
+  const { bot, world } = createFakeBot({
+    clock, simulatePhysics: true, position: new Vec3(0.5, 63, 0.5), groundY: 62, carried: { diamond_pickaxe: 1 }, cells,
+  });
+  const coal = new Vec3(0, 65, -1);
+  const navigation = createNavigationRuntime(bot);
+  const swings: { columnZ: number[]; z: number }[] = [];
+  const dig = bot.dig.bind(bot);
+  bot.dig = async (block, ...rest) => {
+    if (block.position.equals(coal)) swings.push({ columnZ: [...footprintColumns(bot.entity.position)].map(({ z }) => z), z: bot.entity.position.z });
+    return dig(block, ...rest);
+  };
+  // The body is pushed 0.1 into the next column once the plan exists, and it cannot steer back.
+  let pushed = false;
+  let searches = 0;
+  navigation.onEvent((event) => {
+    if (event.kind === "search_started") searches++;
+    if (event.kind === "search_slice" && !pushed) { pushed = true; bot.entity.position.z = 0.10; bot.setControlState = () => undefined; }
+  });
+  const coalState = bot.registry.blocksByName.coal_ore!.defaultState!;
+  const mining = mine(bot, {
+    matches: (block) => block.name === "coal_ore",
+    canMine: () => ({ kind: "mineable", routeMayBreak: true }),
+    matchingStateIds: new Set([coalState]),
+    collects: () => true,
+    isSatisfied: () => world.blockAt(coal)?.name !== "coal_ore",
+    observedInventoryGain: () => 0,
+    movements: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }),
+    castSearchRadius: 64,
+    explore: false,
+    maximumBreaks: 2,
+    route: (options) => navigation.navigate({ ...options }),
+    breakInPlace: (options) => navigation.breakBlockInPlace(options),
+    placeInto: async () => ({ kind: "failed", error: "the fake bot places nothing" }),
+    cast: null,
+  });
+  try {
+    const result = await clock.settle(mining, RUN_BOUND_MS);
+    assert.equal(pushed, true, "the plan was made before the body moved");
+    assert.deepEqual(swings.filter(({ columnZ }) => columnZ.includes(-1)), [], `a swing with the footprint over column z -1: ${JSON.stringify(swings)}`);
+    assert.ok(searches >= 2, `the refused swing invalidated the route and a new search started from the observed body (${searches} searches)`);
+    assert.equal(result.status, "unreachable", "the body can neither centre nor move to a clear stance: a bounded failure");
+    assert.equal(swings.length, 0, "no swing at the coal at all");
+    assert.equal(world.blockAt(coal)?.name, "coal_ore");
+    assert.deepEqual(Object.entries(bot.controlState).filter(([, held]) => held), [], "no control is held");
+    assert.equal(waterStancesHeld(bot), 0, "no stance hold outlives the run (checked before close() could release it)");
+  } finally {
+    await clock.settle(navigation.close(), 5_000);
+  }
+});
+
+/**
+ * D39/D40: a dig or seal that only this stance cannot do refuses the stance, after a re-read of the target, the body and
+ * the sight line; the block stays a target. The target is beside the working cell west of it, a source face east of it.
+ */
+const STANCE_TARGET = new Vec3(1, 64, 0);
+const STANCE_FACE = new Vec3(2, 64, 0);
+const STANCE_CELL = new Vec3(0, 64, 0);
+const STANCE_RATES = [[20, false], [10, false], [20, true]] as const;
+const HIDDEN_DIG = "The required dig at 1,64,0 cannot be seen within reach from this position.";
+const drainableTarget: MineRequest["canMine"] = () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } });
+const dryStanceTarget: MineRequest["canMine"] = () => ({ kind: "mineable", routeMayBreak: false });
+const plainStance = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+
+/** What the goal the route is handed says about each cell: whether standing there would finish the work. */
+function acceptedStances(scene: MineScene, goal: Parameters<MineRequest["route"]>[0]["goal"], cells: readonly Vec3[]): boolean[] {
+  const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+  assert.equal(resolved.kind, "active", "the target is still in the goal");
+  if (resolved.kind !== "active") throw new Error("the target left the goal");
+  return cells.map((feet) => resolved.isSatisfied(plainStance(feet), goalTestWorld));
+}
+
+/** A plug that lands: the cell becomes cobblestone, then `afterPlug` changes what the server did next. */
+function pluggingInto(scene: MineScene, plugs: string[], afterPlug: (cell: Vec3) => void): MineRequest["placeInto"] {
+  return async (_bot, position) => {
+    const cell = cellAt(position);
+    plugs.push(cell.toString());
+    scene.world.setCell(cell, "cobblestone");
+    afterPlug(cell);
+    return { kind: "placed", block: scene.bot.blockAt(cell)! };
+  };
+}
+
+/** The lava face south of the target: the seal's cell. The second working cell is the one north of it. */
+const STANCE_LAVA = new Vec3(1, 64, 1);
+const OTHER_STANCE = new Vec3(1, 64, -1);
+
+/** The drain tests' scene: the target, a water source face east of it and a lava face south of it, at a server rate. */
+function drainScene(rate: number, stopped: boolean, extra: Partial<SceneOptions> = {}): MineScene {
+  const scene = mineScene({ blocks: [STANCE_TARGET], water: [STANCE_FACE], lava: [STANCE_LAVA], feet: STANCE_CELL.offset(0.5, 0, 0.5), ...extra });
+  scene.server.setTickRate(rate);
+  if (stopped) scene.server.stop();
+  return scene;
+}
+
+/**
+ * The server's answer to a ray at a hidden block: it hits what hides it, and `visibleBlockAim` refuses a hit anywhere else
+ * (`block-visibility.ts`). An eye's own cells cannot be filled, so the occluder is answered here, not laid by `setCell`.
+ */
+function hideTargetBehind(scene: MineScene, occluder: Vec3): void {
+  scene.bot.world.raycast = () => scene.bot.blockAt(occluder) as never;
+}
+
+for (const [rate, stopped] of STANCE_RATES)
+  test(`a drain that plugs the only ray refuses the live stance after a re-read, spends no seal and keeps the target (t00780, ${rate} tps, stopped ${stopped})`, async () => {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: pluggingInto(scene, plugs, (plug) => hideTargetBehind(scene, plug)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], "the drain's plug is the only block placed: the lava face is not sealed for a dig this stance cannot make");
+    assert.equal(swings, 0);
+    assert.deepEqual(seen, [false, true], "the live feet cell is refused and the target stays in the goal for another cell");
+    assert.equal(result.status, "satisfied");
+    assert.match(result.reason ?? "", /is occluded from 0,64,0/);
+  });
+
+test("a seal that hides the only ray refuses the live stance and the swing is never made", async () => {
+  for (const [rate, stopped] of STANCE_RATES) {
+    using scene = drainScene(rate, stopped, { water: [] });
+    const placed: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: pluggingInto(scene, placed, (cell) => hideTargetBehind(scene, cell)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(placed, [STANCE_LAVA.toString()], `${rate} tps, stopped ${stopped}`);
+    assert.equal(swings, 0, "the re-read after the seal ends the step before the swing");
+    assert.deepEqual(seen, [false, true]);
+  }
+});
+
+test("a body moved during the drain refuses no stance; one moved to another working cell refuses that cell", async () => {
+  for (const [rate, stopped] of STANCE_RATES) for (const [name, moved, expected, refused] of [
+    ["not a working cell", new Vec3(5.5, 64, 5.5), [true, true], false],
+    ["another working cell", OTHER_STANCE.offset(0.5, 0, 0.5), [true, false], true],
+  ] as const) {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    const offered: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      isSatisfied: () => seen.length > 0,
+      onTargets: (targets) => offered.push(...targets.map((target) => (target.kind === "block" ? [...target.excludedStances].join(";") : ""))),
+      placeInto: pluggingInto(scene, plugs, (plug) => {
+        scene.bot.entity.position = moved.clone();
+        hideTargetBehind(scene, plug);
+      }),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    const label = `${name} (${rate} tps, stopped ${stopped})`;
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], label);
+    assert.equal(swings, 0, label);
+    assert.deepEqual(seen, expected, label);
+    if (refused) assert.match(result.reason ?? "", /is occluded from 1,64,-1/, label);
+    else {
+      assert.doesNotMatch(result.reason ?? "", /occluded/, label);
+      assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], `${label}: no stance was refused`);
+    }
+  }
+});
+
+test("a target removed, replaced or unloaded between the drain and the seal ends the step with no refusal and no swing", async () => {
+  for (const [rate, stopped] of STANCE_RATES) for (const after of ["air", "dirt", "void"] as const) {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      placeInto: pluggingInto(scene, plugs, () => scene.world.setCell(STANCE_TARGET, after)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: noRouteNeeded,
+    });
+    const label = `${after} (${rate} tps, stopped ${stopped})`;
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], `${label}: no seal for a target that is gone`);
+    assert.equal(swings, 0, label);
+    assert.doesNotMatch(result.reason ?? "", /occluded|cannot be seen/, label);
+    assert.equal(result.status, "no_targets", label);
+  }
+});
+
+test("a seal cell that overlaps the bot's own body refuses the live stance; another body in the cell blacklists the target", async () => {
+  const lava = new Vec3(1, 64, 1);
+  const overlapped = "Placement cell (1, 64, 1) overlaps the bot's own body.";
+  const occupied = "Placement cell (1, 64, 1) overlaps player Steve at (1.5, 64, 1.5): ask Steve to step out.";
+  // The body straddles x 0.6-1.2, z 0.6-1.2, so the lava cell overlaps it; the other bot stands apart from the lava.
+  {
+    using own = mineScene({ blocks: [STANCE_TARGET], lava: [lava], feet: new Vec3(0.9, 64, 0.9) });
+    let seen: boolean[] = [];
+    let swings = 0;
+    await runMine(own, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: async () => ({ kind: "failed", error: overlapped, cause: "entity" }),
+      breakInPlace: async () => { swings += 1; return { status: "broken" }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(own, goal, [STANCE_CELL, new Vec3(1, 64, -1)]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(seen, [false, true], "the body's own cell is refused, the target stays");
+    assert.equal(swings, 0);
+  }
+  {
+    using other = mineScene({ blocks: [STANCE_TARGET], lava: [lava], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const result = await runMine(other, {
+      canMine: dryStanceTarget,
+      placeInto: async () => ({ kind: "failed", error: occupied, cause: "entity" }),
+      breakInPlace: async () => { throw new Error("a seal that failed must not be followed by a swing"); },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.match(result.reason ?? "", /could not be closed: Placement cell \(1, 64, 1\) overlaps player Steve/);
+  }
+});
+
+test("a swing refused for the stance refuses the live cell, a policy refusal blacklists, a support one re-reads", async () => {
+  const refusal = (cause: "stance" | "policy" | "support" | undefined) =>
+    ({ status: "failed", reason: `the ${cause ?? "plain"} refusal`, ...(cause && { cause }) }) as const;
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      breakInPlace: async () => refusal("stance"),
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, new Vec3(1, 64, 1)]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(seen, [false, true]);
+    assert.match(result.reason ?? "", /the stance refusal/);
+  }
+  for (const cause of ["policy", undefined] as const) {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const result = await runMine(scene, { canMine: dryStanceTarget, breakInPlace: async () => refusal(cause), route: noRouteNeeded });
+    assert.equal(result.status, "unreachable", String(cause));
+    assert.match(result.reason ?? "", /the (policy|plain) refusal/);
+  }
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => scene.bot.blockAt(STANCE_TARGET)?.name === "air",
+      breakInPlace: async (options) => {
+        swings += 1;
+        if (swings === 1) return refusal("support");
+        scene.world.setCell(cellAt(options.position), "air");
+        return { status: "broken" };
+      },
+      route: noRouteNeeded,
+    });
+    assert.equal(swings, 2, "the support refusal re-reads and the same stance digs again");
+    assert.equal(result.status, "satisfied");
+    assert.deepEqual(result.broken, [STANCE_TARGET]);
+  }
+});
+
+// A guard, not a red proof: the old code also rejects an abort raised in the plug (`throwIfAborted` after the drain).
+test("an abort at the plug or in the swing rejects with no swing after the plug and no exclusion; the next call reads the world fresh", async () => {
+  using scene = drainScene(20, false);
+  const dead = new AbortController();
+  const worldRay = scene.bot.world.raycast;
+  const offered: string[] = [];
+  let swings = 0;
+  const observed = { onTargets: (targets: readonly MineTarget[]) => offered.push(...targets.map((target) => (target.kind === "block" ? [...target.excludedStances].join(";") : ""))) };
+  await assert.rejects(
+    runMine(scene, {
+      canMine: drainableTarget,
+      signal: dead.signal,
+      ...observed,
+      placeInto: pluggingInto(scene, [], (plug) => {
+        hideTargetBehind(scene, plug);
+        dead.abort(new Error("the bot died"));
+      }),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: noRouteNeeded,
+    }),
+    /the bot died/,
+  );
+  assert.equal(swings, 0);
+  assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], "no stance was refused after the abort");
+
+  // An abort that lands in the swing, which answers a stance refusal: the refusal is not recorded.
+  scene.bot.world.raycast = worldRay;
+  const dying = new AbortController();
+  offered.length = 0;
+  await assert.rejects(
+    runMine(scene, {
+      canMine: dryStanceTarget,
+      signal: dying.signal,
+      ...observed,
+      placeInto: pluggingInto(scene, [], () => {}),
+      breakInPlace: async () => { dying.abort(new Error("died in the swing")); return { status: "failed", reason: HIDDEN_DIG, cause: "stance" }; },
+      route: noRouteNeeded,
+    }),
+    /died in the swing/,
+  );
+  assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], "no stance was refused after the abort in the swing");
+
+  // The plug stays in the world; a new call reads it and credits only what it sees break.
+  scene.bot.world.raycast = worldRay;
+  assert.equal(scene.bot.blockAt(STANCE_FACE)?.name, "cobblestone");
+  const next = await runMine(scene, {
+    canMine: dryStanceTarget,
+    isSatisfied: () => scene.bot.blockAt(STANCE_TARGET)?.name === "air",
+    breakInPlace: breakingInPlace(scene, () => {}),
+    route: noRouteNeeded,
+  });
+  assert.equal(next.status, "satisfied");
+  assert.deepEqual(next.broken, [STANCE_TARGET]);
+});
+
+test("a scan refuses a target whose every working stance was refused, but keeps one the route may break", () => {
+  for (const [routeMayBreak, kept] of [[false, 0], [true, 1]] as const) {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: STANCE_TARGET, canMine: () => ({ kind: "mineable", routeMayBreak }) }));
+    const first = targeting.targets()[0];
+    assert.ok(first?.kind === "block");
+    for (const offset of WORKING_OFFSETS) {
+      targeting.excludeBlockStance(first, cellAt({ x: STANCE_TARGET.x + offset.x, y: STANCE_TARGET.y + offset.y, z: STANCE_TARGET.z + offset.z }), "the swing refused it");
+    }
+    assert.equal(targeting.refresh().length, kept, `routeMayBreak ${routeMayBreak}`);
+    assert.deepEqual([...targeting.rejections.keys()], routeMayBreak ? [] : ["every working stance was refused: the swing refused it"]);
+    assert.equal(targeting.blacklisted, 0, "refused for the scan, not blacklisted");
+  }
+});
+
+test("a target with no open working cell at all is refused in the scan with its own text, and no search is asked for it", async () => {
+  using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+  // Every working cell's head is in a chunk the server has not sent: `workingCells` offers none.
+  for (const offset of WORKING_OFFSETS) scene.world.setCell(new Vec3(STANCE_TARGET.x + offset.x, STANCE_TARGET.y + offset.y + 1, STANCE_TARGET.z + offset.z), "void");
+  const result = await runMine(scene, { canMine: dryStanceTarget, route: noRouteNeeded });
+  assert.equal(result.status, "unreachable");
+  assert.match(result.reason ?? "", /1 loaded matching block\(s\) cannot be mined: no working stance beside it is open/);
+});
+
+test("exhaustion of a lone target's stances ends an exploring request like any rejected target: unreachable, no branch search", async () => {
+  using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+  const moves: Vec3[] = [];
+  const result = await runMine(scene, {
+    canMine: dryStanceTarget,
+    explore: true,
+    breakInPlace: async () => ({ status: "failed", reason: "no face in view", cause: "stance" }),
+    route: toNextAcceptedCell(scene, [STANCE_TARGET], moves),
+  });
+  assert.equal(result.status, "unreachable");
+  assert.match(result.reason ?? "", /every working stance was refused: no face in view/);
+});
+
+/**
+ * New end state: a target with its stance refused and a block over it. The real goal, rescan and route (the real
+ * navigation on the fake) take another working cell, or, once the target is dry, its excavate route, and the dig lands.
+ */
+for (const dry of [false, true])
+  test(`a stance-refused target is broken from its next approach (${dry ? "dry, the route may break it" : "another working cell"})`, async () => {
+    const target = new Vec3(2, 64, 0);
+    const floor = Array.from({ length: 9 * 7 }, (_, index) => new Vec3((index % 9) - 3, 63, Math.floor(index / 9) - 3));
+    using scene = mineScene({ blocks: [target], solids: [...floor, new Vec3(2, 65, 0)], physics: true, feet: new Vec3(0.5, 64, 0.5) });
+    const navigation = createNavigationRuntime(scene.bot);
+    const refused: string[] = [];
+    let mayBreak = false;
+    try {
+      const result = await runMine(scene, {
+        canMine: () => ({ kind: "mineable", routeMayBreak: mayBreak }),
+        movements: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }),
+        isSatisfied: () => scene.bot.blockAt(target)?.name === "air",
+        route: (options) => navigation.navigate({ ...options }),
+        breakInPlace: async (options) => {
+          if (refused.length > 0) return navigation.breakBlockInPlace(options);
+          refused.push(scene.bot.entity.position.floored().toString());
+          mayBreak = dry;
+          return { status: "failed", reason: "No face of the block is in view from here.", cause: "stance" };
+        },
+      });
+      assert.equal(result.status, "satisfied");
+      assert.equal(refused.length, 1, "the refused stance was asked once");
+      assert.equal(scene.bot.blockAt(target)?.name, "air");
+      assert.ok(scene.server.packets.some((packet) => packet.name === "block_dig"), "a dig packet was sent");
+      // A target the route may break is dug by the route's own excavation, which owns its stance; otherwise by the next cell.
+      if (!dry) assert.notEqual(scene.bot.entity.position.floored().toString(), refused[0], "another working cell dug it");
+    } finally {
+      await scene.clock.settle(navigation.close(), 5_000);
+    }
+  });
+
+/** A route that walks the body to the first working cell its goal still accepts, as the real route does. */
+function toNextAcceptedCell(scene: MineScene, targets: readonly Vec3[], moves: Vec3[]): MineRequest["route"] {
+  return async ({ goal, onArrival }) => {
+    const cells = targets.flatMap((target) => WORKING_OFFSETS.map((o) => new Vec3(target.x + o.x, target.y + o.y, target.z + o.z)));
+    const accepted = acceptedStances(scene, goal, cells);
+    const cell = cells.find((_, index) => accepted[index]);
+    assert.ok(cell, "the goal always holds a working cell: an empty goal never reaches the search");
+    moves.push(cell);
+    scene.bot.entity.position = cell.offset(0.5, 0, 0.5);
+    await onArrival?.(arrival(scene));
+    return { status: "completed", elapsedMs: 0 };
+  };
+}
+
+test("every working stance refused in turn leaves the scan: a second target is mined, a lone one ends the request", async () => {
+  const other = new Vec3(-4, 64, 0);
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const moves: Vec3[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: "no face in view", cause: "stance" }; },
+      route: toNextAcceptedCell(scene, [STANCE_TARGET], moves),
+    });
+    assert.equal(result.status, "unreachable");
+    assert.match(result.reason ?? "", /every working stance was refused: no face in view/);
+    // One refused dig per working cell at most. The cell on top of the target is the scan's temporary exclusion (only
+    // while the body stands on it, 2026-11-15), so each refusal may be followed by one step-off visit there.
+    assert.ok(swings <= WORKING_OFFSETS.length, `${swings} swings: one refusal per working cell at most`);
+    assert.ok(moves.length <= 2 * WORKING_OFFSETS.length, `${moves.length} moves ${moves.join(" ")}`);
+  }
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET, other], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const moves: Vec3[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => scene.bot.blockAt(other)?.name === "air",
+      breakInPlace: async ({ position }) => {
+        swings += 1;
+        if (!cellAt(position).equals(other)) return { status: "failed", reason: "no face in view", cause: "stance" };
+        scene.world.setCell(other, "air");
+        return { status: "broken" };
+      },
+      route: toNextAcceptedCell(scene, [STANCE_TARGET, other], moves),
+    });
+    assert.equal(result.status, "satisfied");
+    assert.deepEqual(result.broken, [other]);
+    assert.ok(swings <= WORKING_OFFSETS.length + 1, `${swings} swings`);
+  }
 });

@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS bot_status (
   time_of_day INTEGER NOT NULL CHECK (time_of_day BETWEEN 0 AND 23999),
   is_sleeping INTEGER NOT NULL CHECK (is_sleeping IN (0, 1)),
   is_raining INTEGER NOT NULL CHECK (is_raining IN (0, 1)),
+  item_families_json TEXT CHECK (item_families_json IS NULL OR json_valid(item_families_json)),
   updated_at TEXT NOT NULL
 ) STRICT;
 
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS bot_inventory (
   item_name TEXT NOT NULL,
   count INTEGER NOT NULL CHECK (count > 0),
   held INTEGER NOT NULL CHECK (held IN (0, 1)),
+  families TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(families)),
   PRIMARY KEY (bot_id, slot)
 ) STRICT;
 
@@ -98,7 +100,7 @@ CREATE TABLE IF NOT EXISTS bot_tools (
   bot_id TEXT NOT NULL,
   class TEXT NOT NULL,
   category TEXT NOT NULL CHECK (category IN ('tool', 'armour')),
-  tier TEXT NOT NULL,
+  rank INTEGER NOT NULL,
   item_name TEXT,
   slot INTEGER,
   durability_left INTEGER,
@@ -201,6 +203,19 @@ CREATE TABLE IF NOT EXISTS frontier_chunk_biomes (
   FOREIGN KEY (chunk_key)
     REFERENCES frontier_chunks (chunk_key)
     ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS observed_signs (
+  sign_key TEXT PRIMARY KEY CHECK (sign_key = dimension || '|' || block_x || '|' || block_y || '|' || block_z),
+  dimension TEXT NOT NULL,
+  block_x INTEGER NOT NULL,
+  block_y INTEGER NOT NULL,
+  block_z INTEGER NOT NULL,
+  block_name TEXT NOT NULL,
+  front_json TEXT NOT NULL CHECK (json_valid(front_json) AND json_type(front_json) = 'array'),
+  back_json TEXT NOT NULL CHECK (json_valid(back_json) AND json_type(back_json) = 'array'),
+  placed_by_bot_id TEXT,
+  observed_at TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS observed_containers (
@@ -404,6 +419,7 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'bot_status', 'time_of_day', 'World clock in ticks from 0 (sunrise) to 23999; beds accept the bot from 12542 to 23458.'),
   ('main', 'bot_status', 'is_sleeping', '1 while the bot lies in a bed, else 0.'),
   ('main', 'bot_status', 'is_raining', '1 while it is raining or thundering in the world, else 0.'),
+  ('main', 'bot_status', 'item_families_json', 'JSON {source, version, overrides}: where item families come from, server (the server''s tags packet), shipped (tags shipped for the version) or none, with the version and the override namespaces in use. NULL only in a row written before this column existed or by a test fixture.'),
   ('main', 'bot_status', 'updated_at', 'UTC timestamp when this situation record and bot_inventory were refreshed.'),
   ('main', 'bot_last_death', NULL, 'Most recently observed death retained across respawn and reconnect for recovery planning.'),
   ('main', 'bot_last_death', 'bot_id', 'Bot whose most recent death this row records.'),
@@ -417,7 +433,7 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'bot_tools', 'bot_id', 'Bot whose current equipment snapshot this row belongs to.'),
   ('main', 'bot_tools', 'class', 'Tool or armour class such as pickaxe, helmet, water_bucket, or lava_bucket.'),
   ('main', 'bot_tools', 'category', 'Whether this row describes a tool or armour.'),
-  ('main', 'bot_tools', 'tier', 'Material label. Harvest capability is separate: a golden pickaxe has wooden harvest capability despite its speed.'),
+  ('main', 'bot_tools', 'rank', 'Place of the item in its family''s order among the registry''s items of that family (harvest capability, then maximum durability, then mining speed): higher is better, equal items share a number, 0 when none is carried, 1 for a bucket. Compare ranks of one class only.'),
   ('main', 'bot_tools', 'item_name', 'Registry item name, or null when none is carried.'),
   ('main', 'bot_tools', 'slot', 'Current player inventory slot, or null when none is carried.'),
   ('main', 'bot_tools', 'durability_left', 'Observed remaining durability, or null when not applicable or unavailable.'),
@@ -430,6 +446,7 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'bot_inventory', 'item_name', 'Registry item name, matching knowledge.items.name.'),
   ('main', 'bot_inventory', 'count', 'Items in the stack.'),
   ('main', 'bot_inventory', 'held', '1 for the hotbar stack currently in the bot''s hand, else 0.'),
+  ('main', 'bot_inventory', 'families', 'JSON array of the item''s families (sword, pickaxe, helmet, food, bed...), sorted; ''[]'' when it has none.'),
   ('main', 'events', NULL, 'Durable chronology of model-relevant observations for bots using this data store.'),
   ('main', 'events', 'event_id', 'Monotonic event chronology and per-bot read cursor.'),
   ('main', 'events', 'bot_id', 'Bot that observed and receives this event.'),
@@ -464,6 +481,17 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'action_executions', 'action_id', 'Stable execution identity used for waiting and cancellation.'),
   ('main', 'action_executions', 'submission_id', 'Caller retry key; repeating it returns this execution without repeating world effects.'),
   ('main', 'action_executions', 'record_json', 'Original request identity, arguments, rationale, admission time, checkpoint, terminal output and resultRetrieved flag. Checkpoints can be stale; terminal null means settlement is not durably recorded.'),
+  ('main', 'observed_signs', NULL, 'Last observed sign text and conservative attribution at a world location.'),
+  ('main', 'observed_signs', 'sign_key', 'World-relative key formatted as dimension|block_x|block_y|block_z.'),
+  ('main', 'observed_signs', 'dimension', 'Dimension containing the sign.'),
+  ('main', 'observed_signs', 'block_x', 'Sign block X coordinate.'),
+  ('main', 'observed_signs', 'block_y', 'Sign block Y coordinate.'),
+  ('main', 'observed_signs', 'block_z', 'Sign block Z coordinate.'),
+  ('main', 'observed_signs', 'block_name', 'Observed sign block name.'),
+  ('main', 'observed_signs', 'front_json', 'Four observed front text lines as a JSON array.'),
+  ('main', 'observed_signs', 'back_json', 'Four observed back text lines as a JSON array.'),
+  ('main', 'observed_signs', 'placed_by_bot_id', 'Bot that placed the sign, null if unknown or the observation changed.'),
+  ('main', 'observed_signs', 'observed_at', 'UTC timestamp of the latest observation.'),
   ('main', 'observed_containers', NULL, 'Last complete occupied-slot layout observed when a bot opened each location-owned storage container.'),
   ('main', 'observed_containers', 'container_key', 'Stable world-relative key formatted as dimension|block_x|block_y|block_z.'),
   ('main', 'observed_containers', 'dimension', 'Mineflayer dimension containing the container.'),

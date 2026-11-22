@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import { boatUnderFeet, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong } from "./boat-crossing.js";
-import { takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
+import { boatUnderFeet, carriesBoat, crossByBoat, cutStep, deepWaterOnTheWay, launchBoat, lowBankAlong } from "./boat-crossing.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
+import { takeBoatBack } from "./boat-take-back.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
@@ -12,6 +13,8 @@ import { boatsCarried, farBankSea, mountedSea, seaHarness, settled, shifts, shor
 import { getOff } from "./boat-get-off.js";
 import { freeHeldSeat, watchServerSeat } from "./server-seat-watch.js";
 import { watchVehicle } from "./vehicle-sync.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
 
 const AHEAD = { x: 0, z: 1 };
 const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
@@ -65,13 +68,6 @@ test("a boat she stands on out at sea is found, carried boats or not; not one sh
   assert.equal(boatUnderFeet(shoreSea({ feet: new Vec3(0.5, 63.05, 0.5), boat: new Vec3(0.5, 62.49, 0.5) }).bot), null);
 });
 
-test("a boat taken back is broken by hand and its item picked up", async () => {
-  const world = shoreSea({ feet: new Vec3(20.5, 63.05, 0.5), boat: new Vec3(20.5, 62.49, 0.5), mocked: true, physics: true });
-  using _timers = world.clock.install();
-const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 })); assert.equal(report.carried, true); assert.equal(report.goneAfterHit, report.hits, "the report names the hit after which the boat left her view"); assert.equal(world.bot.entities[7], undefined);
-  assert.equal(boatsCarried(world), 1);
-});
-
 test("a ride over open sea with no land stops at the distance asked for and stays mounted there: no ride back, the boat not broken", async () => {
   // Live 2026-10-16 (run 13): Vex explored 4 chunks north, rode 103 blocks, then back to where the boat went in.
   const world = seaHarness();
@@ -94,20 +90,22 @@ test("a ride over open sea with no land stops at the distance asked for and stay
 });
 
 test("the next movement from a bot mounted at sea takes the boat back, so the route goes in where she floats", async () => {
-  const world = seaHarness();
-  using _timers = world.clock.install();
-  await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
-  const boat = theBoat(world);
-  assert.equal(carriesBoat(world.bot), false);
-  // The server answers the shift with a position (contract check boat-get-off-by-shift): Mineflayer's physics, off since the mount, is switched on by it.
-  const positions = recordPositions(world);
-  await settled(world, prepareBotForMovement(world.bot, navigation));
-  assert.deepEqual(shifts(world), [true, false], "shift is pressed then released to get off a boat; a jump input does not");
-  assert.equal(positions.length, 1, "physics is switched back on where she stands");
-  assert.deepEqual(hitBoats(world), [boat.id], "the boat she rode is broken by hand");
-  assert.equal(carriesBoat(world.bot), true);
-  assert.equal(world.bot.vehicle, null);
-  assert.equal(world.bot.entity.vehicle, null);
+  for (const initial of [1, 2]) {
+    const world = seaHarness({ boatsCarried: initial });
+    using _timers = world.clock.install();
+    await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
+    const boat = theBoat(world);
+    assert.equal(boatsCarried(world), initial - 1);
+    // The server answers shift with a position (contract boat-get-off-by-shift), resuming Mineflayer physics.
+    const positions = recordPositions(world);
+    await settled(world, prepareBotForMovement(world.bot, navigation));
+    assert.deepEqual(shifts(world), [true, false]);
+    assert.equal(positions.length, 1, "physics is switched back on where she stands");
+    assert.deepEqual(hitBoats(world), [boat.id], "the ridden boat is recovered even with another carried");
+    assert.equal(boatsCarried(world), initial);
+    assert.equal(world.bot.vehicle, null);
+    assert.equal(world.bot.entity.vehicle, null);
+  }
 });
 
 // Run 14b: a ride that ended this way (Theo: "rode back to where the boat went in") left physics off; his next navigate
@@ -140,26 +138,21 @@ test("a ride that ends on the water gets off with shift held until the server le
 test("a ride end the server does not answer releases shift after the wait, forgets the boat and still turns physics back on", async () => {
   const world = seaHarness({ loadedTo: 12 });
   using _timers = world.clock.install();
-  world.bot.once("mount", () => world.server.stop());
+  world.server.onPacket("entity_action", () => world.server.stop());
   const positions = recordPositions(world);
   const result = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 40));
   assert.match(result.detail, /rode back to where the boat went in/u);
+  assert.match(result.detail, /may still be seated/u);
   assert.deepEqual(shifts(world), [true, false]);
   assert.equal(positions.length, 1, "physics is switched back on where she is");
   assert.equal(world.bot.vehicle, null);
 });
 
-test("a ride whose get-off went unanswered says she may still be seated", async () => {
-  const world = seaHarness({ loadedTo: 12 });
-  using _timers = world.clock.install();
-  world.bot.once("mount", () => world.server.stop());
-  const result = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 40, { getOffWallMs: 200 }));
-  assert.match(result.detail, /may still be seated/u);
-});
-
 test("a boat she could not get into is left with no listener behind and taken back", async () => {
   const world = seaHarness({ physics: true });
   using _timers = world.clock.install();
+  using _pace = serverTickPace(world.bot);
+  using _readiness = swingReadiness(world.bot);
   // The boat is full when she tries (two other riders: the server refuses with silence, contract check boat-mount-refused).
   world.bot.on("entitySpawn", (entity) => {
     if (entity.name !== "oak_boat") return;
@@ -198,19 +191,6 @@ test("a seat the server gives after the wait gave up: the boat she sits in is ta
   assert.ok(ticks >= 10, `${ticks} physics ticks in a second after the boat broke`);
   assert.equal(carriesBoat(world.bot), true);
   stopWatch();
-});
-
-// B4: with a second boat carried nothing broke the boat she left, and the server kept her seated while her client walked.
-test("the next movement after a stay at sea with two boats carried gets her off and takes back the boat she left", async () => {
-  const world = seaHarness({ boatsCarried: 2 });
-  using _timers = world.clock.install();
-  await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
-  const boat = theBoat(world);
-  assert.equal(boatsCarried(world), 1, "one of the two boats is the one she sits in");
-  await settled(world, prepareBotForMovement(world.bot, navigation));
-  assert.deepEqual(hitBoats(world), [boat.id], "the boat she left is hit until it breaks, though another boat is carried");
-  assert.equal(boatsCarried(world), 2);
-  assert.equal(world.bot.vehicle, null);
 });
 
 describe("a seat the server still holds", () => {
@@ -254,7 +234,7 @@ describe("a seat the server still holds", () => {
     setTimeout(() => world.server.sendPosition(world.bot.entity.position), 20_000);
     await settled(world, freeHeldSeat(world.bot));
     assert.equal(watch.heldAt(), null, "the answer came and the seat is forgotten");
-    assert.ok(attackedIds(world.server).length >= 30, "the hits went on for the whole 10 s");
+    assert.equal(attackedIds(world.server).length, 1, "the stopped server gets no queued swings during the 10 s wait");
     assert.ok(performance.now() - startedAt >= 20_000, "past the 15 s the whole freeing used to be given");
     watch.stop();
   });
@@ -265,8 +245,8 @@ describe("a seat the server still holds", () => {
     const { watch } = await heldAfterAStay(world);
     const before = attackedIds(world.server).length;
     world.server.stop();
-    await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 })), /SERVER_HELD_POSITION/u);
-    assert.equal(attackedIds(world.server).length - before, 15, "15 hits, not the 10 s of hits");
+    await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 0 })), /SERVER_HELD_POSITION/u);
+    assert.equal(attackedIds(world.server).length - before, 0, "the held-seat path also respects the caller's hit cap");
     watch.stop();
   });
 
@@ -303,29 +283,19 @@ describe("a ride that is interrupted stays seated (ACT-01)", () => {
     assert.equal(new Set(moves.slice(-4)).size, 1, "the last 4 moves are the same stopped place");
   };
 
-  test("a ride cancelled over deep water stops the boat and stays seated: no shift, no hit, the boat where it stopped", async () => {
-    const world = seaHarness();
-    using _timers = world.clock.install();
-    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
-    const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
-    assert.equal(result.status, "failed");
-    assert.equal(result.atSea, true);
-    assert.equal(result.interrupted, true);
-    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
-    assert.match(result.detail, /cancelled by the brain/u);
-    stillSeated(world);
-  });
-
-  test("a ride cancelled in shallows stays seated too", async () => {
-    const world = seaHarness({ waterDepth: 2 });
-    using _timers = world.clock.install();
-    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
-    const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
-    assert.equal(result.status, "failed");
-    assert.equal(result.atSea, false);
-    assert.equal(result.interrupted, true);
-    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
-    stillSeated(world);
+  test("a ride cancelled over deep water or shallows stops the boat and stays seated", async () => {
+    for (const { waterDepth, atSea } of [{ waterDepth: 13, atSea: true }, { waterDepth: 2, atSea: false }]) {
+      const world = seaHarness({ waterDepth });
+      using _timers = world.clock.install();
+      const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+      const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
+      assert.equal(result.status, "failed");
+      assert.equal(result.atSea, atSea);
+      assert.equal(result.interrupted, true);
+      assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
+      assert.match(result.detail, /cancelled by the brain/u);
+      stillSeated(world);
+    }
   });
 
   test("a cancel during the ride back still stays seated", async () => {
@@ -480,6 +450,39 @@ test("a crossing that starts seated and reaches the far bank takes the same boat
   assert.deepEqual(hitBoats(world), [boat.id], "the boat she rode is broken at the bank");
   assert.equal(boatsCarried(world), 2, "the boat she carried and the one she rode");
   assert.equal(world.bot.vehicle, null);
+});
+
+/** Protected regions at the boat crossing's own digs (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+const regionOver = (owner: string, min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }) => ({
+  regionId: 11, dimension: "overworld", owner, label: "Tom's bank", min, max,
+});
+const BANK = { min: { x: 41, y: 50, z: -3 }, max: { x: 47, y: 70, z: 3 } };
+const digPackets = (world: FakeHarness) => world.server.packets.filter((packet) => packet.name === "block_dig").length;
+
+test("the step cut into a bank of another owner's region is refused naming it: nothing dug, the crossing told why", async () => {
+  const world = farBankSea(200);
+  setProtectedRegionsProvider(world.bot, () => [regionOver("Tom", BANK.min, BANK.max)]);
+  const cut = await settled(world, cutStep(world.bot, { x: 39.5, z: 0.5 }, { x: 1, z: 0 }, 62));
+  assert.match(cut, /^the bank ahead \(dirt\) cannot be cut: Dig cell \(41, 64, 0\) is inside protected region #11 'Tom's bank' \(owner Tom\)/u);
+  assert.equal(digPackets(world), 0);
+  assert.equal(world.bot.blockAt(new Vec3(41, 64, 0))?.name, "dirt");
+});
+
+test("the step cut into a bank of the bot's own region is dug", async () => {
+  const world = farBankSea(200);
+  setProtectedRegionsProvider(world.bot, () => [regionOver(world.bot.username, BANK.min, BANK.max)]);
+  const cut = await settled(world, cutStep(world.bot, { x: 39.5, z: 0.5 }, { x: 1, z: 0 }, 62));
+  assert.equal(cut, "");
+  assert.equal(world.bot.blockAt(new Vec3(41, 64, 0))?.name, "air");
+});
+
+test("a plant at the feet in another owner's region is left standing by the launch, one outside it is cleared", async () => {
+  const foreign = shoreSea({ carried: { oak_boat: 1 }, mocked: true, cells: { "0,63,0": "short_grass", "0,64,0": "short_grass" } });
+  setProtectedRegionsProvider(foreign.bot, () => [regionOver("Tom", { x: 0, y: 63, z: 0 }, { x: 0, y: 63, z: 0 })]);
+  using _timers = foreign.clock.install();
+  await settled(foreign, launchBoat(foreign.bot, foreign.bot.inventory.items()[0]!, { x: 1, z: 0 }));
+  assert.equal(foreign.bot.blockAt(new Vec3(0, 63, 0))?.name, "short_grass", "the plant in the region stays");
+  assert.equal(foreign.bot.blockAt(new Vec3(0, 64, 0))?.name, "air", "the plant at the head, outside the region, was cleared");
 });
 
 test("a boat taken back is swum after when its item floated off, though another boat is carried", async () => {

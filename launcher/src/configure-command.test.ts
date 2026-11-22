@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import { UsageError } from "./cli-context.ts";
 import { cliContext } from "./cli-test-support.ts";
 import { runConfigureCommand } from "./configure-command.ts";
 import { fakeKeyCipher, unreadingCipher } from "./key-cipher-test-support.ts";
+import { worldRanOnPaper } from "./install/world-layout.ts";
 import { loadManifest } from "./manifest.ts";
 
 function setup() {
@@ -48,7 +49,7 @@ test("--server-local sets the heap from the machine's RAM with the manifest's ru
   const t = setup();
   assert.equal(await runConfigureCommand(["--server-local"], t.context, { totalRamBytes: () => 32 * GIB }), 0);
   const { min, perRamGb, max } = loadManifest().minecraft.memoryMb;
-  assert.deepEqual(t.settings().server, { kind: "local", port: 25_565, memoryMb: Math.min(max, Math.max(min, perRamGb * 32)) });
+  assert.deepEqual(t.settings().server, { kind: "local", port: 25_565, memoryMb: Math.min(max, Math.max(min, perRamGb * 32)), program: "paper" });
 });
 
 test("--server-local keeps the port an earlier local server already had", async () => {
@@ -231,4 +232,191 @@ test("--llm-remote with a new key over a key in clear says nothing about encrypt
   writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKey: "sk-old" } }));
   await t.run("--llm-remote", "https://x.test/v1", "sk-new", "m");
   assert.equal(t.out.some((line) => line.includes("encrypted")), false);
+});
+
+const LOCAL_8GB = { totalRamBytes: () => 8 * GIB, settings: { platform: "linux", cipher: null } } as const;
+
+function writeServerSetting(t: ReturnType<typeof setup>, server: Record<string, unknown>): string {
+  const text = JSON.stringify({ server });
+  writeFileSync(join(t.root, "settings.json"), text);
+  return text;
+}
+
+test("--server-local on settings without a local server writes paper", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "paper");
+});
+
+test("--server-local keeps the program of an existing local server", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "vanilla" });
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048 }); // a file of an earlier launcher: no program is vanilla
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+});
+
+test("--server-local with --server-program in one call sets the chosen program on a new local server", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--server-local", "--server-program", "vanilla"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+});
+
+test("--server-program without a local server (remote, none, no file, or --server-remote/--server-none in the same call) is refused, names --server-local and writes nothing", async () => {
+  const remote = { kind: "remote", host: "play.example", port: 25_565 };
+  const rows: { saved: Record<string, unknown> | null; args: string[] }[] = [
+    { saved: remote, args: ["--server-program", "paper"] },
+    { saved: { kind: "none" }, args: ["--server-program", "paper"] },
+    { saved: null, args: ["--server-program", "paper"] },
+    { saved: { kind: "none" }, args: ["--server-remote", "play.example", "25565", "--server-program", "paper"] },
+    { saved: remote, args: ["--server-none", "--server-program", "paper"] },
+  ];
+  for (const { saved, args } of rows) {
+    const t = setup();
+    const before = saved === null ? null : writeServerSetting(t, saved);
+    await assert.rejects(runConfigureCommand(args, t.context, LOCAL_8GB), (error: unknown) => error instanceof UsageError && /--server-local/u.test(error.message), JSON.stringify({ saved, args }));
+    if (before === null) assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
+    else assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  }
+});
+
+test("--server-program bogus is refused naming both values; a missing or repeated one is a usage error; nothing is written", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  await assert.rejects(runConfigureCommand(["--server-program", "bogus"], t.context, LOCAL_8GB), (error: unknown) => error instanceof UsageError && /"bogus"/u.test(error.message) && /paper/u.test(error.message) && /vanilla/u.test(error.message));
+  await assert.rejects(runConfigureCommand(["--server-program"], t.context, LOCAL_8GB), UsageError);
+  await assert.rejects(runConfigureCommand(["--server-program", "paper", "--server-program", "vanilla"], t.context, LOCAL_8GB), UsageError);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+});
+
+const NO_LAUNCHER = { ...LOCAL_8GB, findRunningLauncher: async () => null };
+const LAUNCHER_RUNS = { ...LOCAL_8GB, findRunningLauncher: async () => ({ pid: 4242, controlPort: 5151, startedAt: 0 }) };
+const LAYOUT_NOTICE = "To use vanilla, Mine AI puts Paper's Nether and End folders back inside the world folder.";
+const RETENTION_NOTICE = "Paper's downloaded server files are kept for a switch back. They still use disk space; nothing is deleted.";
+
+/** A server folder as Paper leaves it: `world` for the Overworld, the Nether (and the End when asked) in folders of their own. */
+function paperServerFolder(t: ReturnType<typeof setup>, { withEnd }: { withEnd: boolean }): string {
+  const server = join(t.root, "server");
+  mkdirSync(join(server, "world"), { recursive: true });
+  mkdirSync(join(server, "world_nether", "DIM-1"), { recursive: true });
+  writeFileSync(join(server, "world_nether", "DIM-1", "nether.txt"), "nether");
+  if (withEnd) {
+    mkdirSync(join(server, "world_the_end", "DIM1"), { recursive: true });
+    writeFileSync(join(server, "world_the_end", "DIM1", "end.txt"), "end");
+  }
+  return server;
+}
+
+// Covers the plan's `paper to vanilla moves the dimensions back` and `configure says what it moved`.
+test("configure explains the automatic layout change before its move lines", async () => {
+  const rows = [
+    { saved: { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" }, args: ["--server-program", "vanilla"] },
+    { saved: { kind: "none" }, args: ["--server-local", "--server-program", "vanilla"] },
+  ];
+  for (const { saved, args } of rows) {
+    const t = setup();
+    writeServerSetting(t, saved);
+    const server = paperServerFolder(t, { withEnd: true });
+    assert.equal(await runConfigureCommand(args, t.context, NO_LAUNCHER), 0, JSON.stringify({ saved, args }));
+    assert.equal(t.settings().server.program, "vanilla");
+    assert.equal(readFileSync(join(server, "world", "DIM-1", "nether.txt"), "utf8"), "nether");
+    assert.equal(readFileSync(join(server, "world", "DIM1", "end.txt"), "utf8"), "end");
+    assert.equal(worldRanOnPaper(server), false);
+    const said = t.out.join("\n");
+    assert.equal(t.out[0], LAYOUT_NOTICE);
+    assert.match(said, /Moved world_nether\/DIM-1 to world\/DIM-1\./u);
+    assert.match(said, /Moved world_the_end\/DIM1 to world\/DIM1\./u);
+    assert.match(said, /Saved /u);
+    assert.equal(t.out.includes(RETENTION_NOTICE), saved.kind === "local");
+    if (saved.kind === "local") assert.ok(t.out.indexOf(RETENTION_NOTICE) < t.out.findIndex((line) => line.startsWith("Saved ")));
+  }
+});
+
+test("refuses while a launcher runs", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  const server = paperServerFolder(t, { withEnd: true });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LAUNCHER_RUNS), 1);
+  assert.match(t.out.join("\n"), /mine-ai stop/u);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  assert.equal(worldRanOnPaper(server), true);
+});
+
+test("a launcher that runs does not block a switch that moves nothing", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  mkdirSync(join(t.root, "server", "world"), { recursive: true });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LAUNCHER_RUNS), 0);
+});
+
+test("retry after a failed save saves vanilla without moving dimensions twice", async () => {
+  for (const withEnd of [false, true]) {
+    const t = setup();
+    const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+    const server = paperServerFolder(t, { withEnd });
+    mkdirSync(join(t.root, "settings.json.tmp")); // the real save fails because its temporary file is a directory
+    assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, NO_LAUNCHER), 1);
+    const said = t.out.join("\n");
+    assert.equal(t.out[0], LAYOUT_NOTICE);
+    assert.match(said, /Moved world_nether\/DIM-1 to world\/DIM-1\./u);
+    assert.match(said, /settings\.json is unchanged/u);
+    assert.ok(t.out.includes(RETENTION_NOTICE));
+    assert.ok(said.indexOf(RETENTION_NOTICE) > said.indexOf("Moved "));
+    assert.ok(said.indexOf(RETENTION_NOTICE) < said.indexOf("settings.json is unchanged"));
+    assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+    assert.equal(worldRanOnPaper(server), false);
+    rmdirSync(join(t.root, "settings.json.tmp"));
+    t.out.length = 0;
+    assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, NO_LAUNCHER), 0);
+    assert.equal(t.settings().server.program, "vanilla");
+    assert.deepEqual(t.out.slice(0, -1), [RETENTION_NOTICE]);
+    assert.match(t.out.at(-1)!, /^Saved /u);
+    assert.equal(readFileSync(join(server, "world", "DIM-1", "nether.txt"), "utf8"), "nether");
+    if (withEnd) assert.equal(readFileSync(join(server, "world", "DIM1", "end.txt"), "utf8"), "end");
+  }
+});
+
+test("vanilla to vanilla and remote choices give no retention notice", async () => {
+  for (const [program, args] of [["vanilla", ["--server-program", "vanilla"]], ["paper", ["--server-remote", "play.example", "25565"]], ["paper", ["--server-none"]], ["paper", ["--server-program", "paper"]]] as const) {
+    const t = setup();
+    writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program });
+    assert.equal(await runConfigureCommand(args, t.context, NO_LAUNCHER), 0);
+    assert.equal(t.out.includes(RETENTION_NOTICE), false);
+    assert.equal(t.out.includes(LAYOUT_NOTICE), false);
+  }
+});
+
+test("a move that fails leaves settings.json as it was and names the folder", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  const server = join(t.root, "server");
+  mkdirSync(join(server, "world_nether", "DIM-1"), { recursive: true });
+  writeFileSync(join(server, "world"), "a file where the world folder should be"); // the move into world/DIM-1 cannot work
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, NO_LAUNCHER), 1);
+  assert.match(t.out.join("\n"), /world_nether\/DIM-1/u);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  assert.equal(worldRanOnPaper(server), true);
+});
+
+test("vanilla to paper on any world is allowed", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "vanilla" });
+  mkdirSync(join(t.root, "server", "world_nether"), { recursive: true });
+  assert.equal(await runConfigureCommand(["--server-program", "paper"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "paper");
+});
+
+test("Paper to vanilla says downloaded files are retained even without dimensions", async () => {
+  for (const emptyWorld of [false, true]) {
+    const t = setup();
+    writeServerSetting(t, { kind: "local", port: 25_570, memoryMb: 2048, program: "paper" });
+    if (emptyWorld) mkdirSync(join(t.root, "server", "world"), { recursive: true });
+    assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LOCAL_8GB), 0);
+    assert.deepEqual(t.settings().server, { kind: "local", port: 25_570, memoryMb: 2048, program: "vanilla" });
+    assert.equal(t.out[0], RETENTION_NOTICE);
+    assert.equal(t.out.includes(LAYOUT_NOTICE), false);
+    assert.match(t.out[1]!, /^Saved /u);
+  }
 });

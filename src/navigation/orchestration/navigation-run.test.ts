@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
-import { createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import { timeoutSignal } from "../../utils/wall-timers.js";
 import { walking } from "./navigation-run-fixtures.test.js";
 
@@ -249,6 +249,68 @@ for (const cancelled of [false, true]) {
     assert.equal(outcome.kind, cancelled ? "stopped" : "completed");
     assert.equal(landed, true);
     assert.equal(holding, false);
+  });
+}
+
+for (const duringLanding of [false, true]) {
+  test(`a stationary search terminated ${duringLanding ? "during" : "before"} the landing wait releases without another physics tick`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const bot = new FakeNavigationBot();
+    const world = flatWorld();
+    let holding = false;
+    let releases = 0;
+    let settlements = 0;
+    let landingWaits = 0;
+    let finishLanding!: () => void;
+    const landing = new Promise<void>(resolve => { finishLanding = resolve; });
+    bot.holdPosition = () => {
+      holding = true;
+      return () => { holding = false; releases++; };
+    };
+    // Like MineflayerBot.stabilize: reject an already-aborted signal and remove the pending wait on abort.
+    bot.stabilize = async (signal) => {
+      signal!.throwIfAborted();
+      landingWaits++;
+      let aborted!: () => void;
+      const stop = new Promise<never>((_resolve, reject) => {
+        aborted = () => reject(signal!.reason);
+        signal!.addEventListener("abort", aborted, { once: true });
+      });
+      try { await Promise.race([landing, stop]); return { kind: "stable" }; }
+      finally { signal!.removeEventListener("abort", aborted); }
+    };
+    const navigator = createNavigator({ world, bot, telemetry: onEvent(event => {
+      if (event.kind === "search_started") {
+        bot.current = { ...bot.current, stance: "airborne" };
+        if (!duringLanding) navigator.terminateActive("footing takeover");
+      }
+      if (event.kind === "run_settled") settlements++;
+    }) });
+    const admission = navigator.startRun({ goal: nearGoal({ x: 5, y: 63, z: 0 }, 0), policy: createMovementPolicy() });
+    if (admission.kind !== "started") assert.fail("navigation was not admitted");
+    try {
+      await flush();
+      if (duringLanding) {
+        assert.equal(landingWaits, 1);
+        assert.equal(holding, true, "the landing wait still owns the stationary hold");
+        navigator.terminateActive("footing takeover");
+      }
+      const outcome = await clock.settle(admission.handle.outcome, 1, 1);
+      assert.equal(outcome.kind, "stopped");
+      assert.equal(holding, false);
+      assert.equal(landingWaits, duringLanding ? 1 : 0);
+      assert.equal(releases, 1);
+      assert.equal(settlements, 1);
+      assert.equal(navigator.active, null);
+      assert.equal(world.listenerCount, 0);
+      assert.equal(bot.ticks.size, 0);
+      assert.equal(clock.pendingGlobalTimers(), 0);
+      finishLanding();
+      await clock.advance(2_050);
+      assert.deepEqual({ holding, releases, settlements }, { holding: false, releases: 1, settlements: 1 });
+      assert.equal(clock.pendingGlobalTimers(), 0);
+    } finally { finishLanding(); await admission.handle.outcome; }
   });
 }
 

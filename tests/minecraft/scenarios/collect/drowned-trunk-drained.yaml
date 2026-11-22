@@ -1,0 +1,32 @@
+template: ../../templates/flat-single-action.yaml
+name: drowned-trunk-drained
+tags: [regression]
+description: >-
+  A drowned trunk with a bank beside its lower log is drainable. The west water face
+  must be filled before mining, with full health; water directly over the upper log stays refused.
+geometry:
+  - fill: { block: grass_block, from: [-4, -60, -4], to: [16, -60, 4] }
+  - setblock: { block: oak_log, at: [6, -59, 0] }
+  - setblock: { block: oak_log, at: [6, -58, 0] }
+  - fill: { block: glass, from: [5, -57, -1], to: [7, -57, 1] }
+  - setblock: { block: water, at: [6, -57, 0] }
+  - setblock: { block: water, at: [5, -59, 0] }
+  - setblock: { block: glass, at: [4, -59, 0] }
+  - setblock: { block: glass, at: [5, -59, -1] }
+  - setblock: { block: glass, at: [5, -59, 1] }
+  - setblock: { block: glass, at: [5, -58, 0] }
+players:
+  - name: Actor
+    pos: [12.5, -59, 0.5]
+    inventory: [{ item: iron_axe, count: 1 }, { item: cobblestone, count: 16 }]
+params:
+  action: collect_block
+  input: { block_name: oak_log, count: 1, max_distance: 16 }
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: hasItem, who: Actor, item: oak_log, count: 1 }
+    - { kind: blockAt, block: cobblestone, pos: [5, -59, 0] }
+    - { kind: health, who: Actor, health: 20 }
+    - { kind: completion }

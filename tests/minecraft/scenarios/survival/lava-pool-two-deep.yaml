@@ -1,0 +1,51 @@
+template: ../../templates/flat-single-action.yaml
+
+name: lava-pool-two-deep
+tags: [regression]
+description: >-
+  Live run 17 (2026-10-20, Tom): a parkour landing put him on the floor of a lava pool two deep. The fire escape scanned
+  one row above the feet, found no bank, and answered no_escape three times while he burned. A bot with nothing to build
+  with stands on the floor of a 3 x 3 lava pool two deep, the bank two cells above its feet: the fire reflex must keep
+  the body for the whole swim up (no stand-down while it is in lava) and the bot ends on the bank within ten seconds.
+  Peaceful, regeneration on and absorption as a margin: only the escape is checked, a death after it does not fail.
+
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -12 12 -40 12 air"
+
+geometry:
+  # The ground to y -61 (its surface block), the pool dug into it two cells deep: lava at y -62 and -61, floor -63.
+  - fill: { block: stone, from: [-9, -63, -9], to: [9, -61, 9] }
+  - fill: { block: lava, from: [-1, -62, -1], to: [1, -61, 1] }
+
+players:
+  - { name: Actor, pos: [4.5, -60, 0.5], op: true }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/lava-pool-escape.ts
+
+params:
+  poolFloor: [0.5, -62, 0.5]
+  bankRise: 2
+  deadlineMs: 10000
+  absorptionAmplifier: 4
+
+goal:
+  kind: all
+  timeout: 40
+  goals:
+    - { kind: completion, who: Actor }

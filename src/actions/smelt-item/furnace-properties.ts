@@ -44,10 +44,20 @@ export async function openFurnaceWithProperties(bot: Bot, block: Parameters<Bot[
   };
   const client = bot._client;
   client.on("craft_progress_bar", onProperty);
-  const stop = () => client.removeListener("craft_progress_bar", onProperty);
+  // A window the server closes (a `close_window` packet) only emits `windowClose` on the bot, never `close` on the window
+  // (mineflayer `inventory.js:800-807`), so both end the listener.
+  let closedWindow: ((closed: unknown) => void) | undefined;
+  const stop = () => {
+    client.removeListener("craft_progress_bar", onProperty);
+    if (closedWindow !== undefined) bot.removeListener("windowClose", closedWindow);
+  };
   try {
     const window = await bot.openFurnace(block);
     window.once("close", stop);
+    closedWindow = (closed) => {
+      if (closed === window) stop();
+    };
+    bot.on("windowClose", closedWindow);
     return Object.assign(window, { properties: (): FurnaceProperties | null => byWindow.get(window.id) ?? null });
   } catch (cause) {
     stop();

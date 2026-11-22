@@ -2,8 +2,13 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { JsonSchemaValidator, jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/types.js";
 import { z } from "zod";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
+import type { CarriedStack } from "./carried-stack.ts";
+import type { LastDeath } from "./last-death.ts";
+import { snapshotOf } from "./status-snapshot.ts";
+import { positionSchema, viewStatusSchema } from "./status-schema.ts";
 
 export interface Position {
   readonly x: number;
@@ -39,12 +44,7 @@ export interface NearbyPlayer {
   readonly position: Position | null;
 }
 
-/** A carried stack; `durability` only for items that wear out (tools, armour), as the runtime reports it. */
-export interface CarriedStack {
-  readonly name: string;
-  readonly count: number;
-  readonly durability?: { readonly remaining: number; readonly maximum: number } | null;
-}
+export type { CarriedStack };
 
 /** A carried food kind and what one restores (game data). */
 export interface CarriedFood {
@@ -71,6 +71,17 @@ export interface BotSnapshot {
   readonly dimension: string;
   readonly health: number;
   readonly food: number;
+  readonly saturation?: number;
+  readonly armourPoints?: number | null;
+  readonly armourToughness?: number | null;
+  readonly burn?: { readonly ticks: number; readonly hp: number } | null;
+  readonly armour?: {
+    readonly worn: readonly { readonly slot: string; readonly item: string | null }[];
+    readonly carried: readonly { readonly item: string; readonly count: number }[];
+  };
+  readonly light?: { readonly sky: number | null; readonly block: number | null; readonly openSkyAbove: number | null };
+  readonly combat?: { readonly melee: string | null; readonly bow: string | null; readonly arrows: number; readonly shield: string | null; readonly exposure?: number };
+  readonly respawn?: { readonly kind: "bed" | "world_spawn" | "last_wake"; readonly position: Position; readonly distance: number | null } | null;
   /** The server difficulty (`peaceful`...); `unknown` or unset when the runtime did not say. */
   readonly difficulty?: string;
   readonly inventory: readonly CarriedStack[];
@@ -80,14 +91,34 @@ export interface BotSnapshot {
   readonly mobs: readonly NearbyMob[];
   readonly players: readonly NearbyPlayer[];
   /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
-  readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[] } | null;
+  readonly policy: {
+    readonly revision: string;
+    readonly digStraightDown: boolean;
+    readonly scaffoldBlocks?: readonly string[];
+    readonly reportOpenSky?: boolean;
+    /** The effective health at or below which the bot is in danger (the survival policy's `combat.critical_health`). */
+    readonly criticalHealth?: number;
+  } | null;
+  readonly coverExit?: { readonly at: Position; readonly plannedAt: string; readonly reached: boolean } | null;
   /** The overworld's day or night (null elsewhere) and minutes until it changes; unset when the runtime did not say. */
-  readonly clock?: { readonly phase: "day" | "night" | null; readonly minutesUntilChange: number | null };
-  /** Her best carried tool and worn armour per class (`view_status` tools; item null: none); unset when not reported. */
+  readonly clock?: {
+    readonly phase: "day" | "night" | null;
+    readonly minutesUntilChange: number | null;
+    /** Game time of day in ticks (0-24000); unset when an older runtime does not send it. */
+    readonly timeOfDay?: number;
+    readonly sleeping?: boolean;
+  };
+  /** The vehicle she rides (a boat, a minecart...); null when on foot; unset when an older runtime does not send it. */
+  readonly vehicle?: { readonly name: string } | null;
+  /** Whether she stands on the ground, in water or in lava; unset when the runtime does not report both onGround and inWater. */
+  readonly footing?: { readonly onGround: boolean; readonly inWater: boolean; readonly inLava: boolean | null };
+  /** Her best carried tool and armour per class, worn or not (`view_status` tools; item null: none). */
   readonly gear?: {
     readonly tools: readonly { readonly class: string; readonly item: string | null }[];
     readonly armour: readonly { readonly class: string; readonly item: string | null }[];
   };
+  /** Null: never died; unset: an older runtime sends none. */
+  readonly lastDeath?: LastDeath | null;
 }
 
 export interface PlayerMessage {
@@ -104,7 +135,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
   | "use_container" | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
-  | "tend_crops" | "use_bucket" | "raw_action";
+  | "tend_crops" | "use_bucket" | "raw_action" | "place_sign";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -205,20 +236,38 @@ export interface BlockKind {
   /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's geometry. */
   readonly fullCube?: boolean;
   readonly harvest: readonly string[] | null;
-  /** The game's block tags it belongs to (`logs`, `crops`...); only a `blockKinds` lookup reports them. */
+  /** The game's block tags it belongs to (`logs`, `crops`...); a `blockKinds` lookup and a box read (`blocksIn`) report them. */
   readonly tags?: readonly string[];
+  /** The registry's break hardness; null when the block cannot be dug. Optional: an older runtime omits it. */
+  readonly hardness?: number | null;
+  /** Whether the block holds a fluid in its default state (water, lava, a water plant, a waterlogged state). Optional: an older runtime omits it. */
+  readonly fluid?: boolean;
+  /** False for the fallback kind of a name the registry does not know (an unloaded cell). Only a box read (`blocksIn`) reports it. */
+  readonly known?: boolean;
 }
 
-/** Where a block was seen: the middle of an explored chunk holding it, at the height asked from. */
+/** The name `view_blocks` gives a cell in a chunk that is not loaded (`src/actions/view-blocks/view-blocks.ts`). */
+const UNLOADED_CELL = "unloaded";
+
+/** One exact cell, read by `cellsAt`: what it is, whether it holds water (liquid, a water plant, a waterlogged block) and whether its chunk was loaded. */
+export interface BlockCell {
+  readonly name: string;
+  readonly holdsWater: boolean;
+  readonly loaded: boolean;
+}
+
+/** Where a block was seen: the middle of an explored chunk holding it, with no known height. */
 export interface SeenBlock {
   readonly dimension: string;
   readonly x: number;
   readonly z: number;
+  readonly waterShare?: number;
 }
 
 /** A block found by name or selector: where, and which block it is. */
 export interface FoundBlock extends Position {
   readonly name: string;
+  readonly situation?: "under_water" | "roofed";
 }
 
 /** The blocks of a box as read by the runtime: name by position, and what each name is. */
@@ -267,6 +316,10 @@ export function firstUnseen(from: { readonly x: number; readonly z: number }, ch
 
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
+  /** Registry members of an item family, in registry order. */
+  itemFamily(family: string): Promise<readonly string[]>;
+  /** Read a sign at one loaded cell. */
+  readSigns(at: Position): Promise<readonly SignReading[]>;
   /**
    * What crafting these items would take from the current inventory; crafts nothing. `prefer`: materials to plan with,
    * in order, where recipes accept several and none is carried (the woods growing nearby).
@@ -302,6 +355,8 @@ export interface BotRuntime {
    * (0..1, the bot data's frontier map); null when it crosses none it has explored.
    */
   waterAlong(from: Position, to: Position): Promise<WaterShare | null>;
+  /** Surface water share of this position's explored chunk, null when unknown. */
+  chunkWater(position: Position): Promise<number | null>;
   /** The middle of the nearest explored chunk (in the dimension she is in) whose surface is mostly land; null when it knows none. */
   nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null>;
   /**
@@ -309,6 +364,8 @@ export interface BotRuntime {
    * chunk's middle); null when every chunk on the line is explored.
    */
   unseenAlong(from: Position, to: Position): Promise<number | null>;
+  /** Exact cells (`view_blocks` cells, at most 32), in the order asked: a waterlogged block is a per-cell fact the per-name kinds cannot see. */
+  cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]>;
   /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
   blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
@@ -319,6 +376,11 @@ export interface BotRuntime {
    * resets every override on death and dimension change, so the brain checks it again from each snapshot.
    */
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
+  /**
+   * Whether `view_status` reports where a foreground route first goes under the open sky (`navigation.report_open_sky`);
+   * the route is never changed by it. Read back as `BotSnapshot.coverExit`.
+   */
+  setReportOpenSky(on: boolean, revision: string): Promise<boolean>;
   /** The blocks routes may place as scaffolding (runtime survival policy `navigation.scaffold_blocks`). */
   setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean>;
   /**
@@ -350,36 +412,6 @@ export interface BotRuntime {
 
 /** The part of a tool's JSON input schema that tells the values a property accepts. */
 const toolSchemaSchema = z.object({ properties: z.record(z.string(), z.object({ enum: z.array(z.string()).optional() })).optional() });
-
-const positionSchema = z.object({ x: z.number(), y: z.number(), z: z.number() });
-
-const viewStatusSchema = z.object({
-  result: z.object({
-    situation: z.object({
-      position: positionSchema,
-      dimension: z.string().default("minecraft:overworld"),
-      difficulty: z.string().optional(),
-      vitals: z.object({ health: z.number(), food: z.number() }),
-      inventory: z.object({
-        stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null) })),
-        foods: z.array(z.object({ name: z.string(), count: z.number(), points: z.number(), saturation: z.number() })).default([]),
-      }),
-      nearby: z.object({
-        players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })),
-        mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number(), position: positionSchema.optional() }) })).default([]),
-      }),
-      clock: z.object({ phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable() }).optional(),
-      tools: z.object({
-        tools: z.array(z.object({ class: z.string(), item: z.string().nullable() })),
-        armour: z.array(z.object({ class: z.string(), item: z.string().nullable() })),
-      }).optional(),
-    }),
-  }),
-  survivalPolicy: z.object({
-    revision: z.string(),
-    effective: z.object({ navigation: z.object({ dig_straight_down: z.boolean().default(true), scaffold_blocks: z.array(z.string()).default([]) }) }),
-  }).optional(),
-});
 
 const policyEditSchema = z.object({ result: z.object({ status: z.string() }) });
 
@@ -430,6 +462,9 @@ const blockKindSchema = z.object({
   full_cube: z.boolean().optional(),
   harvest: z.array(z.string()).nullable().default(null),
   tags: z.array(z.string()).optional(),
+  hardness: z.number().nullable().optional(),
+  fluid: z.boolean().optional(),
+  known: z.boolean().optional(),
 }).transform(({ full_cube, ...kind }) => (full_cube === undefined ? kind : { ...kind, fullCube: full_cube }));
 
 const viewBoxSchema = z.object({
@@ -439,8 +474,9 @@ const viewBoxSchema = z.object({
         layers: z.array(z.object({ y: z.number(), rows: z.array(z.object({ z: z.number(), blocks: z.array(z.string()) })) })),
         kinds: z.record(z.string(), blockKindSchema).default({}),
       }).nullable(),
-      find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string() })) })).nullable(),
+      find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string(), situation: z.enum(["under_water", "roofed"]).optional() })) })).nullable(),
       kinds: z.record(z.string(), blockKindSchema).optional(),
+      cells: z.array(positionSchema.extend({ name: z.string(), holds_water: z.literal(true).optional() })).default([]),
     }).optional(),
   }),
 });
@@ -457,6 +493,23 @@ const regionResultSchema = z.object({
 const sayResultSchema = z.object({
   result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
 });
+
+const itemFamilySchema = z.object({ result: z.object({ members: z.array(z.string()) }) });
+
+const signLinesSchema = z.tuple([z.string(), z.string(), z.string(), z.string()]);
+const signReadingSchema = z.object({ position: positionSchema, block: z.string(), known: z.boolean(), front: signLinesSchema, back: signLinesSchema });
+export type SignReading = z.output<typeof signReadingSchema>;
+const readSignsSchema = z.object({ result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional(), signs: z.array(signReadingSchema) }) });
+const signEvidenceSchema = z.object({ target: positionSchema, block: z.string().nullable(), facing: z.enum(["north", "south", "east", "west"]), attach: z.enum(["ground", "wall"]), lines: signLinesSchema, confirmed: z.boolean(), placed: z.boolean() });
+const placeSignSchema = z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional(), sign: signEvidenceSchema.optional(), members: z.array(z.string()).optional(), existing: z.object({ block: z.string(), front: signLinesSchema.optional(), back: signLinesSchema.optional() }).optional() });
+export type PlaceSignOutcome = Omit<z.output<typeof placeSignSchema>, "error"> & { readonly error: string | null; readonly code: string | null };
+
+/** Decode the action evidence returned through the body. */
+export function parsePlaceSign(result: unknown): PlaceSignOutcome {
+  const parsed = placeSignSchema.parse(result);
+  const error = parsed.error ?? null;
+  return { ...parsed, error, code: errorCode(error) };
+}
 
 const queryResultSchema = z.object({
   result: z.object({
@@ -506,22 +559,29 @@ const MAX_RATIONALE = 200;
 /** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
-/** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
-function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number; position?: Position | undefined } }[]): NearbyMob[] {
-  const species = new Map<string, NearbyMob>();
-  for (const group of groups) {
-    const seen = species.get(group.name);
-    const nearest = { distance: group.nearest.distance, ...(group.nearest.position === undefined ? {} : { position: group.nearest.position }) };
-    species.set(group.name, seen === undefined
-      ? { name: group.name, hostile: group.hostile, count: group.count, ...nearest }
-      : { ...seen, count: seen.count + group.count, ...(group.nearest.distance < seen.distance ? nearest : {}) });
-  }
-  return [...species.values()].sort((a, b) => a.distance - b.distance);
-}
-
 /** The runtime's outcome code: the bracketed prefix its errors start with, e.g. `HOSTILE_CONTACT`. */
 export function errorCode(error: string | null | undefined): string | null {
   return /^\[([A-Z_]+)\]/u.exec(error ?? "")?.[1] ?? null;
+}
+
+/**
+ * An output-schema validator that accepts every reply. The SDK client builds one AJV validator per listed tool's
+ * output schema at `listTools` (`client/index.js:535`, used only by `callTool`, `:108`): ~1.2 GB and 13 s per Client for
+ * the runtime's catalog (spec 2026-10-25-memory-per-bot, measured with `.agent/scripts/ops/mcp-tools-mem.ts`). The
+ * server already checks each output against its schema (`McpServer.validateToolOutput`, `sdk/dist/esm/server/mcp.js:132,185`)
+ * and the brain reads every reply through its own zod schemas (`callOnce` and each method's schema). The SDK's other
+ * check, a tool with an output schema answering without structured content, does not use the validator and stays.
+ * `src/server/mcp-client-options.ts` holds the same three lines for `src/` (the brain imports nothing from there).
+ */
+const ACCEPT_ANY_OUTPUT: jsonSchemaValidator = {
+  getValidator<T>(): JsonSchemaValidator<T> {
+    return (input) => ({ valid: true, data: input as T, errorMessage: undefined });
+  },
+};
+
+/** The MCP client every brain connection uses (a first connection and each reconnect): no output-schema validators. */
+export function newToolClient(clientName: string): Client {
+  return new Client({ name: clientName, version: "0.1.0" }, { jsonSchemaValidator: ACCEPT_ANY_OUTPUT });
 }
 
 /** {@link BotRuntime} over one mine-ai-mcp host's Streamable HTTP endpoint (ADR-002: one MCP connection per bot). */
@@ -544,7 +604,7 @@ export class McpBotRuntime implements BotRuntime {
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
     const open = async (): Promise<ToolClient> => {
-      const client = new Client({ name: clientName, version: "0.1.0" });
+      const client = newToolClient(clientName);
       await client.connect(new StreamableHTTPClientTransport(new URL(url)));
       return client;
     };
@@ -557,28 +617,18 @@ export class McpBotRuntime implements BotRuntime {
   }
 
   async status(): Promise<BotSnapshot> {
-    const data = viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding."));
-    const { situation } = data.result;
-    return {
-      position: situation.position,
-      dimension: situation.dimension,
-      health: situation.vitals.health,
-      food: situation.vitals.food,
-      difficulty: situation.difficulty,
-      inventory: situation.inventory.stacks.map(({ name, count, durability }) => ({ name, count, durability })),
-      foods: situation.inventory.foods,
-      mobs: mobSpecies(situation.nearby.mobs),
-      players: situation.nearby.players,
-      ...(situation.clock === undefined ? {} : { clock: situation.clock }),
-      ...(situation.tools === undefined ? {} : { gear: situation.tools }),
-      policy: data.survivalPolicy === undefined
-        ? null
-        : {
-          revision: data.survivalPolicy.revision,
-          digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down,
-          scaffoldBlocks: data.survivalPolicy.effective.navigation.scaffold_blocks,
-        },
-    };
+    return snapshotOf(viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding.")));
+  }
+
+  async itemFamily(family: string): Promise<readonly string[]> {
+    const { result } = itemFamilySchema.parse(await this.call("view_item_family", { family }, "Find the items in this family."));
+    return result.members;
+  }
+
+  async readSigns(at: Position): Promise<readonly SignReading[]> {
+    const { result } = readSignsSchema.parse(await this.call("read_signs", { ...at }, "Read the sign at this cell."));
+    if (result.status !== "succeeded") throw new Error(result.error ?? "The sign read did not finish; move closer and read again.");
+    return result.signs;
   }
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
@@ -591,6 +641,13 @@ export class McpBotRuntime implements BotRuntime {
   async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
     const reason = allowed ? "I may dig straight down." : "I never dig straight down: I go down by staircase.";
     const input = { operation: "set", expected_revision: revision, changes: { navigation: { dig_straight_down: allowed } }, lifetime: { kind: "session" }, reason };
+    const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
+    return result.status === "succeeded";
+  }
+
+  async setReportOpenSky(on: boolean, revision: string): Promise<boolean> {
+    const reason = on ? "Report in view_status where my foreground route first leaves cover; routes are not changed." : "Stop reporting where routes leave cover; routes are not changed.";
+    const input = { operation: "set", expected_revision: revision, changes: { navigation: { report_open_sky: on } }, lifetime: { kind: "session" }, reason };
     const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
     return result.status === "succeeded";
   }
@@ -649,9 +706,18 @@ export class McpBotRuntime implements BotRuntime {
     return { blocks, kinds };
   }
 
+  async cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]> {
+    const read = viewBoxSchema.parse(await this.call("view_blocks", { cells: positions.map(({ x, y, z }) => ({ x, y, z })) }, "Look at these exact cells.")).result.blocks;
+    const answered = new Map((read?.cells ?? []).map((cell) => [areaKey(cell.x, cell.y, cell.z), cell]));
+    return positions.map(({ x, y, z }) => {
+      const cell = answered.get(areaKey(x, y, z));
+      return { name: cell?.name ?? UNLOADED_CELL, holdsWater: cell?.holds_water === true, loaded: cell !== undefined && cell.name !== UNLOADED_CELL };
+    });
+  }
+
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const read = viewBoxSchema.parse(await this.call("view_blocks", { find: { block_names: [name], limit } }, `Find ${name}.`)).result.blocks;
-    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z, name: found }) => ({ x, y, z, name: found }));
+    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z, name: found, situation }) => ({ x, y, z, name: found, ...(situation !== undefined && { situation }) }));
   }
 
   /** The dimension she is in now (read fresh: a portal changes it between two steps), as the frontier map's queries need it. */
@@ -669,7 +735,7 @@ export class McpBotRuntime implements BotRuntime {
     const dimension = await this.dimensionNow();
     const sql = seenPlacesSql(block, from, beyond, limit, dimension);
     const rows = sql === null ? [] : await this.queryBotData(sql);
-    return rows.map((row) => ({ dimension: dimension.replace(/^minecraft:/u, ""), x: Number(row[0]), z: Number(row[1]) }));
+    return rows.map((row) => ({ dimension: dimension.replace(/^minecraft:/u, ""), x: Number(row[0]), z: Number(row[1]), ...(row[2] !== undefined && row[2] !== null && { waterShare: Number(row[2]) }) }));
   }
 
   async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
@@ -677,6 +743,12 @@ export class McpBotRuntime implements BotRuntime {
     const sql = chunks.length === 0 ? null : waterShareSql(chunks, await this.dimensionNow());
     const [count, share] = (sql === null ? undefined : (await this.queryBotData(sql))[0]) ?? [0, null];
     return Number(count) === 0 || share === null ? null : { chunks: Number(count), share: Number(share) };
+  }
+
+  async chunkWater(position: Position): Promise<number | null> {
+    const sql = waterShareSql([[Math.floor(position.x / 16), Math.floor(position.z / 16)]], await this.dimensionNow());
+    const [count, share] = (sql === null ? undefined : (await this.queryBotData(sql))[0]) ?? [0, null];
+    return Number(count) === 0 || share === null ? null : Number(share);
   }
 
   async unseenAlong(from: Position, to: Position): Promise<number | null> {

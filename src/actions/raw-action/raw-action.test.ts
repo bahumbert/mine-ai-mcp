@@ -3,9 +3,58 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { temporaryBotData } from "../../test-support/bot-data.js";
-import { createFakeBot, type FakeBot, type FakeHarness } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeBot, type FakeHarness } from "../../test-support/fake-bot/index.js";
+import { useNativeDigging } from "../../test-support/fake-bot/native-digging.js";
+import { installNativeDigClock } from "../../navigation/index.js";
+import { watch } from "../../test-support/pending.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
+import { useBucketOutcomes } from "../use-bucket/contract.js";
+import { attackedIds } from "../../test-support/combat.js";
+import { fightSwordAfter } from "../../test-support/swing-handoff.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+
+for (const rate of [20, 10]) test(`a raw attack is immediate and the next reflex sword waits its shared recovery at ${rate} tps`, async () => {
+  const { bot, clock, server } = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    slots: { 36: { name: "iron_sword" } },
+    entities: { 7: { name: "zombie", position: new Vec3(0.5, 64, 2.5) } },
+  });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  await clock.advance(4_000);
+  const start = server.gameTime;
+  for (let attack = 0; attack < 2; attack++) {
+    const result = await executeRawAction(bot, { operation: "swing", entityId: 7 }, {});
+    assert.equal(result.status, "succeeded");
+    assert.equal(server.gameTime, start, "the model's attack adds no readiness wait");
+  }
+  assert.deepEqual(attackedIds(server), [7, 7]);
+  await clock.advance(5_000 / rate);
+  bot.entities[7]!.position.set(0.5, 64, 2.5);
+  assert.equal(await clock.settle(fightSwordAfter(bot, 7), 5_000), true);
+  assert.equal(server.gameTime - start, 13, "the reflex waits thirteen server ticks from the raw attack");
+  assert.deepEqual(attackedIds(server), [7, 7, 7]);
+});
+
+test("use_item with a held lava bucket aimed at the bot's own feet cell is refused with the same message", async () => {
+  const { bot, clock, server } = createFakeBot({
+    position: new Vec3(0.5, 64, 0.5), groundY: 63,
+    slots: { 36: { name: "lava_bucket" } },
+  });
+  await bot.look(0, -Math.PI / 2, true);
+  const running = executeRawAction(bot, { operation: "use_item", hand: "hand" }, {});
+  await clock.advance(100);
+  const result = await running;
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail("raw use must not bypass the pour guard");
+  assert.ok(result.error.endsWith(useBucketOutcomes.pourReachesBody(bot.username, new Vec3(0, 64, 0))), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(server.packets.filter((packet) => packet.name === "use_item").length, 0);
+});
 
 test("parses each operation into a small discriminated request and rejects mixed fields", () => {
   assert.deepEqual(
@@ -102,24 +151,27 @@ test("dig refuses beyond eye reach without calling Mineflayer", async () => {
   assert.equal(result.afterBlock, "stone");
 });
 
-test("dig success is based on the block observed after the native call", async () => {
-  const { bot, clock } = createFakeBot({
-    position: new Vec3(0.5, 64, 0.5),
-    cells: { "1,64,0": "pointed_dripstone" },
+for (const ticksPerSecond of [20, 10]) {
+  test(`raw dig waits for authoritative removal at ${ticksPerSecond} tps`, async () => {
+    const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+      server: { ticksPerSecond }, cells: { "1,64,0": "deepslate" } });
+    const { bot, clock, server } = harness;
+    using _timers = clock.install();
+    useNativeDigging(harness);
+    installNativeDigClock(bot);
+    const running = executeRawAction(bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+    const pending = watch(running);
+    await clock.advance(14_000);
+    assert.equal(pending.over, false);
+    const result = await clock.settle(running, 25_000);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.beforeBlock, "deepslate");
+    assert.equal(result.afterBlock, "air");
+    assert.equal(result.attempted, true);
+    assert.equal(result.effectObserved, true);
+    assert.ok(server.gameTime >= 24_300);
   });
-  const running = executeRawAction(
-    bot,
-    { operation: "dig", target: { x: 1, y: 64, z: 0 } },
-    {},
-  );
-  await clock.advance(10_000);
-  const result = await running;
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.beforeBlock, "pointed_dripstone");
-  assert.equal(result.afterBlock, "air");
-  assert.equal(result.attempted, true);
-  assert.equal(result.effectObserved, true);
-});
+}
 
 test("dig cancellation calls stopDigging and drains the native operation before returning ownership", async () => {
   const stop = new AbortController();
@@ -165,6 +217,59 @@ test("a native call that synchronously aborts is stopped and drained", async () 
     /disconnect during dig start/,
   );
   assert.equal(stopped, 1);
+});
+
+/** Protected regions at raw digs and placements (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+const regionAround = (owner: string, cell: { x: number; y: number; z: number }): ProtectedRegion => ({
+  regionId: 9, dimension: "overworld", owner, label: "Tom's place",
+  min: { x: cell.x - 1, y: cell.y - 1, z: cell.z - 1 }, max: { x: cell.x + 1, y: cell.y + 1, z: cell.z + 1 },
+});
+const digPackets = (harness: FakeHarness) => harness.server.packets.filter((packet) => packet.name === "block_dig").length;
+
+test("raw_action dig of a cell in another owner's region is refused naming the region, with no dig packet", async () => {
+  const harness = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: { "1,64,0": "stone" } });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround("Tom", { x: 1, y: 64, z: 0 })]);
+  const result = await executeRawAction(harness.bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail();
+  assert.match(result.error, /RAW_REGION_PROTECTED/);
+  assert.ok(result.error.includes("inside protected region #9 'Tom's place' (owner Tom)"), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(digPackets(harness), 0);
+  assert.equal(result.afterBlock, "stone");
+});
+
+test("raw_action dig of a cell in the bot's own region proceeds", async () => {
+  const harness = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: { "1,64,0": "pointed_dripstone" } });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround(harness.bot.username, { x: 1, y: 64, z: 0 })]);
+  const running = executeRawAction(harness.bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+  await harness.clock.advance(10_000);
+  const result = await running;
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.afterBlock, "air");
+});
+
+test("raw_action place into another owner's region is refused naming the region, with no placement packet", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const harness = placingBot("barrel", { placement: "server" });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround("Tom", { x: 1, y: 65, z: 0 })]);
+  const result = await runRawAction(harness, rawPlace("barrel"), data);
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail();
+  assert.match(result.error, /RAW_REGION_PROTECTED/);
+  assert.ok(result.error.includes("inside protected region #9 'Tom's place' (owner Tom)"), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(harness.server.packets.filter((packet) => packet.name === "block_place").length, 0);
+  assert.equal(harness.bot.blockAt(new Vec3(1, 65, 0))?.name, "air");
+  assert.deepEqual(rawPlacedContainers(data), []);
+});
+
+test("raw_action place into the bot's own region proceeds", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const harness = placingBot("barrel", { placement: "server" });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround(harness.bot.username, { x: 1, y: 65, z: 0 })]);
+  const result = await runRawAction(harness, rawPlace("barrel"), data);
+  assert.equal(result.status, "succeeded");
 });
 
 /** Record every control the action sets, then let the fake apply it as before; `onSet` may react to one. */

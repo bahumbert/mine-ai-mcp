@@ -11,7 +11,8 @@ export const VIEW_STATUS_DESCRIPTION =
   "the ticks until that changes, and whether the bot is asleep or it is raining; exact position, dimension, footing, " +
   "and compass heading; every carried stack with its slot, the free slot count, the held item, and worn equipment; " +
   "each carried food with the hunger points and saturation one restores; " +
-  "remaining item durability, best carried tool and armour tiers, bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
+  "the armour points, the armour worn per slot and carried unworn, the light at the feet with the open sky above, the fight reflex's gear, and the respawn point; " +
+  "remaining item durability, best carried tool and armour (item, rank in its family, durability), bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
   "which movements the inventory unlocks: no carried water bucket caps every route at a three-block fall and disarms the emergency fall save, and pillaring and bridging need a carried scaffold block; " +
   "the players and hostile mobs nearby; every loaded dropped item, nearest first; and every loaded mob species and observed age group with its count, whether it is hostile, and the " +
   "nearest one's position, at any distance, so a cow sixty blocks off is listed. " +
@@ -97,6 +98,15 @@ export const inventoryStackSchema = z.strictObject({
     .strictObject({ remaining: z.number().nonnegative(), maximum: z.number().positive() })
     .nullable()
     .describe("Remaining and maximum durability; null when durability is not reported or not applicable."),
+  families: z
+    .array(z.string())
+    .describe("The item's families (sword, pickaxe, helmet, food, bed...) from the server's tags, else the tags shipped for the version; sorted, empty when none."),
+});
+
+export const itemFamiliesSourceSchema = z.strictObject({
+  source: z.enum(["server", "shipped", "none"]).describe("server: the server's tags packet arrived; shipped: the tags shipped for the version; none: neither exists."),
+  version: z.string().describe("The server's version for server, the shipped file's version for shipped."),
+  overrides: z.array(z.string()).describe("Namespaces of the family override files in use."),
 });
 
 export const liveSituationSchema = z.strictObject({
@@ -155,7 +165,36 @@ export const liveSituationSchema = z.strictObject({
       .nullable()
       .describe("Own entity air_supply metadata in ticks; null until observed. May be negative during drowning."),
     burning: z.boolean().nullable().describe("Own entity burning flag; null until observed."),
+    burn: z.strictObject({ ticks: z.number(), hp: z.number() }).nullable(),
+    armour: z.number().nullable().describe("Armour points the server counts (generic.armor); 0 with no piece worn; null when a piece is worn and the server told none."),
+    armourToughness: z.number().nullable().describe("Armour toughness (generic.armor_toughness); same null rule as armour."),
   }),
+  armourWorn: z
+    .array(z.strictObject({ slot: z.enum(["head", "torso", "legs", "feet"]), item: z.string().nullable() }))
+    .describe("The four armour slots as worn, an empty one with item null."),
+  armourCarried: z
+    .array(z.strictObject({ item: z.string(), count: z.number().int().positive(), slot: z.enum(["head", "torso", "legs", "feet"]) }))
+    .describe("Armour pieces in the main inventory and hotbar (not worn), summed per item, each with the slot it is for."),
+  light: z
+    .strictObject({
+      sky: z.number().int().nullable().describe("Sky light at the feet cell (15 under open sky by day); null where the client holds no light data."),
+      block: z.number().int().nullable().describe("Block light at the feet cell; null where the client holds no light data."),
+      openSkyAbove: z.number().int().positive().nullable().describe("Blocks up to the first cell with sky light 15 when the feet cell is below 15; null when the feet are under open sky, or a cell on the way has no light data, or none is found."),
+    })
+    .describe("The light at the bot's feet, as the chunk data the server sent."),
+  combat: z
+    .strictObject({
+      melee: z.string().nullable().describe("The melee weapon the fight reflex picks; null: bare hands."),
+      bow: z.string().nullable().describe("The best carried bow, with or without arrows."),
+      arrows: z.number().int().nonnegative().describe("Arrows carried, the off-hand included."),
+      shield: z.string().nullable(),
+      exposure: z.number().min(0.15).max(1).describe("Gear exposure 0.15..1 (1 = no gear): the share of a fight's risk the gear leaves, src/world/gear-exposure.ts."),
+    })
+    .describe("What the fight reflex has to work with."),
+  respawn: z
+    .strictObject({ kind: z.enum(["bed", "last_wake", "world_spawn"]), position: positionSchema, distance: z.number().nonnegative().nullable() })
+    .nullable()
+    .describe("A bed slept in this session, else where it last woke after a death, else the world spawn; distance null in another dimension."),
   mobility: z
     .strictObject({
       maximumDrop: z
@@ -208,6 +247,10 @@ export const liveSituationSchema = z.strictObject({
     .describe(
       "Current physical session owner and action. The reply's survival field also reports the request, reserved owner, response phase, budgets, answered scopes, observations and the survival policy.",
     ),
+  navigation: z.strictObject({
+    reportOpenSky: z.boolean(),
+    coverExit: z.strictObject({ at: positionSchema, plannedAt: z.string(), reached: z.boolean() }).nullable(),
+  }).describe("Passive foreground route cover report. Reached means its step started; the route is unchanged."),
   clock: z.strictObject({
     timeOfDay: z.number().int(),
     phase: z
@@ -258,6 +301,7 @@ export const liveSituationSchema = z.strictObject({
     ),
   }),
   tools: toolSnapshotSchema,
+  item_families: itemFamiliesSourceSchema.describe("Where the stacks' families come from; a stack's families are those of this source."),
   nearby: z.strictObject({
     rangeBlocks: z.number().positive(),
     players: z.array(
@@ -268,8 +312,12 @@ export const liveSituationSchema = z.strictObject({
       }),
     ),
     hostiles: z.array(
-      z.strictObject({ name: z.string(), distance: z.number().nonnegative(), position: positionSchema }),
+      z.strictObject({ name: z.string(), distance: z.number().nonnegative(), position: positionSchema,
+        threat: z.strictObject({ damagePerHit: z.number().nullable(), hitsToKillYou: z.number().nullable(), yourHitsToKill: z.number(), explodes: z.boolean(), unknownMelee: z.boolean() }) }),
     ),
+    fight: z.strictObject({ weapon: z.string().nullable(), margin: z.number().nullable(), healthLostToClear: z.number(), effectiveHealth: z.number(),
+      ticksToDie: z.number().nullable(), ticksToClear: z.number(), fightMargin: z.number(),
+      source: z.strictObject({ version: z.string(), measured: z.boolean() }) }).nullable(),
     /** Every loaded mob by species, nearest first. Unlike the lists around it, no distance bounds this one. */
     mobs: z.array(nearbyMobSchema),
     /** Every loaded dropped item, nearest first, up to sixteen; no distance bounds this one either. */

@@ -4,8 +4,11 @@
  */
 import { COLLECT_MOB_DROP, huntMobResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
+import type { Bot } from "mineflayer";
 import { z } from "zod";
 
+import { SERVER_ANSWER_TICKS, STALE_AGE_TICKS } from "../../src/world/world-age.ts";
+import { DRIVER_CLOCK_STOPPED_MS, waitServerTicks } from "../../tests/minecraft/drivers/server-ticks.ts";
 import { openRuntime, wearArmor } from "./runtime.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
@@ -75,9 +78,43 @@ function watchFight(context: MineAiScenarioContext, mobName: string): { close():
   };
 }
 
+/** Reserve enough of the trial deadline for the wait's rounding and completion. */
+export function quarryBudgetTicks(goalTimeoutSeconds: number | undefined, firstAge: number | null, ageNow: number | null): number {
+  if (goalTimeoutSeconds === undefined) throw new Error("Fixture: the shared hunter needs a goal timeout");
+  const elapsed = firstAge === null || ageNow === null ? 0 : ageNow - firstAge;
+  return Math.max(0, goalTimeoutSeconds * 20 - elapsed - 2 * SERVER_ANSWER_TICKS - (STALE_AGE_TICKS + 1));
+}
+
+/** Wait until the hunt's target predicate can see a loaded quarry. */
+export async function awaitQuarry(
+  bot: Bot, mobName: string, budgetTicks: number,
+  options: { signal?: AbortSignal; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<number> {
+  options.signal?.throwIfAborted();
+  const type = bot.registry.entitiesByName[mobName]?.id;
+  if (type === undefined) return 0;
+  let firstAge = bot.time?.age ?? null;
+  let foundAge: number | null = null;
+  const loaded = () => {
+    const age = bot.time?.age ?? null;
+    firstAge ??= age;
+    const found = Object.values(bot.entities).some(entity => entity.isValid && entity.entityType === type);
+    if (found) foundAge = age;
+    return found;
+  };
+  if (loaded()) return 0;
+  const missing = `Fixture: no loaded ${mobName} within ${budgetTicks} server ticks (the hunt would refuse it unloaded)`;
+  if (budgetTicks <= 0) throw new Error(missing);
+  const result = await waitServerTicks(bot, budgetTicks, { ...options, until: loaded });
+  if (result === "stalled") throw new Error(`Fixture: no loaded ${mobName}: the server clock stood still for ${DRIVER_CLOCK_STOPPED_MS} ms`);
+  if (result !== "until") throw new Error(missing);
+  return firstAge === null || foundAge === null ? 0 : foundAge - firstAge;
+}
+
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
   const params = paramsSchema.parse(context.scenario.params ?? {});
   const { bot } = context;
+  const firstAge = bot.time?.age ?? null;
   const runtime = await openRuntime(context, "hunt");
   const watch = watchFight(context, params.mob_name);
   const itemId = bot.registry.itemsByName[params.drop_name]!.id;
@@ -89,6 +126,8 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   try {
     const hunt = runtime.actions.find((action) => action.name === COLLECT_MOB_DROP)!;
     if (params.wear_armor) await wearArmor(context);
+    const waited = await awaitQuarry(bot, params.mob_name, quarryBudgetTicks(context.scenario.goal.timeout, firstAge, bot.time?.age ?? null), { signal });
+    context.log(`quarry ${params.mob_name} loaded after ${waited} server ticks`);
     const output = await runtime.run(
       hunt,
       {
@@ -110,6 +149,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
       deathsObserved: watch.deaths(),
       botDied: died.signal.aborted,
       health: bot.health,
+      quarryWaitTicks: waited,
       output,
       combat: parsed.success ? parsed.data.hunt : null,
     });

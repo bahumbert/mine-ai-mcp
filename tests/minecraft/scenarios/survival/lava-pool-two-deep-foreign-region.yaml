@@ -1,0 +1,59 @@
+template: ../../templates/flat-single-action.yaml
+
+name: lava-pool-two-deep-foreign-region
+tags: [regression]
+description: >-
+  The two-deep lava pool belongs to Builder. A raised stone gate excludes a natural climb until the server confirms
+  an emergency step at the surface, then opens the ordinary bank. Require that the body escaped and the server confirms the step
+  is gone afterwards. Then navigate across the safe bank. Peaceful regeneration and absorption remove the damage race.
+
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+
+reset:
+  - "fill -12 -63 -12 12 -40 12 air"
+
+geometry:
+  - fill: { block: stone, from: [-9, -63, -9], to: [9, -58, 9] }
+  - fill: { block: air, from: [-1, -62, -1], to: [1, -57, 1] }
+  - fill: { block: lava, from: [-1, -62, -1], to: [1, -61, 1] }
+
+players:
+  - name: Actor
+    pos: [4.5, -57, 0.5]
+    op: true
+    inventory:
+      - { item: cobblestone, count: 8 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/lava-pool-region.ts
+
+params:
+  regionMin: [-1, -62, -1]
+  regionMax: [1, -59, 1]
+  gateMin: [-9, -60, -9]
+  gateMax: [9, -58, 9]
+  next: [5, -60, 0]
+  escape:
+    poolFloor: [0.5, -62, 0.5]
+    bankRise: 2
+    deadlineMs: 10000
+    absorptionAmplifier: 4
+
+goal:
+  kind: all
+  timeout: 50
+  goals:
+    - { kind: completion, who: Actor }

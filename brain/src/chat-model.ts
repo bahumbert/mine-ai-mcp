@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { timeoutSignal } from "./wall-timers.ts";
 
 export interface ChatTurn {
   readonly role: "system" | "user" | "assistant";
@@ -10,6 +11,7 @@ export interface ChatReply {
   readonly text: string;
   /** Tokens the server read from the prompt (`usage.prompt_tokens`); null when it does not say. */
   readonly promptTokens: number | null;
+  readonly replyTokens?: number | null;
   /** The context window the model ran with: configured, or read from Ollama; null when unknown. */
   readonly contextTokens: number | null;
 }
@@ -62,7 +64,7 @@ export interface OpenAiCompatibleConfig {
 
 const completionSchema = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })).min(1),
-  usage: z.object({ prompt_tokens: z.number().int().nonnegative() }).partial().nullish(),
+  usage: z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative() }).partial().nullish(),
 });
 
 const ollamaRunningSchema = z.object({
@@ -107,7 +109,7 @@ export class OpenAiCompatibleModel implements ChatModel {
         ...(this.config.jsonMode ? { response_format: { type: "json_object" } } : {}),
         ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]),
+      signal: AbortSignal.any([signal, timeoutSignal(this.config.timeoutMs)]),
     });
     if (!response.ok) {
       throw new ModelUnavailable(`[LLM_HTTP_${response.status}] ${this.config.model}: ${(await response.text()).slice(0, 300)}`);
@@ -120,6 +122,7 @@ export class OpenAiCompatibleModel implements ChatModel {
     return {
       text: completion.choices[0]?.message.content ?? "",
       promptTokens: completion.usage?.prompt_tokens ?? null,
+      ...(completion.usage?.completion_tokens === undefined ? {} : { replyTokens: completion.usage.completion_tokens }),
       contextTokens: this.contextTokens,
     };
   }
@@ -127,7 +130,7 @@ export class OpenAiCompatibleModel implements ChatModel {
   /** The window Ollama loaded this model with (asked once, after a first answer so the model is loaded); null elsewhere. */
   private async askOllamaContext(signal: AbortSignal): Promise<number | null> {
     try {
-      const response = await fetch(`${this.baseUrl.replace(/\/v1$/u, "")}/api/ps`, { signal: AbortSignal.any([signal, AbortSignal.timeout(2_000)]) });
+      const response = await fetch(`${this.baseUrl.replace(/\/v1$/u, "")}/api/ps`, { signal: AbortSignal.any([signal, timeoutSignal(2_000)]) });
       if (!response.ok) return null;
       const running = ollamaRunningSchema.parse(await response.json());
       return running.models.find((model) => model.name === this.config.model || model.model === this.config.model)?.context_length ?? null;

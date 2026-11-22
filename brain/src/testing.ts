@@ -1,10 +1,11 @@
-import { setTimeout as sleep } from "node:timers/promises";
-import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn } from "./chat-model.ts";
-import { LlmMind } from "./llm-mind.ts";
-import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import { sleepMs } from "./wall-timers.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare, SignReading } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
-import { sameDimension } from "./bot-data-sql.ts";
+import { MOSTLY_WATER, sameDimension } from "./bot-data-sql.ts";
+import { vanillaItemFamilies } from "./testing-item-families.ts";
+
+export { vanillaItemFamilies };
+export { testPersona, ScriptedModel, scriptedMind, until, steppedClocks, type ReplyCounts } from "./testing-model.ts";
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -31,6 +32,27 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
 
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {
+  /** Registry members returned by item-family queries. */
+  itemFamilies: Readonly<Record<string, readonly string[]>> = {};
+
+  async itemFamily(family: string): Promise<readonly string[]> {
+    return this.itemFamilies[family] ?? [];
+  }
+
+  /** Scripted sign readings, keyed by cell; reads are recorded for callers' tests. */
+  signs: readonly SignReading[] = [];
+  readonly signReads: Position[] = [];
+  async readSigns(at: Position): Promise<readonly SignReading[]> {
+    this.signReads.push(at);
+    return this.signs.filter(({ position }) => position.x === at.x && position.y === at.y && position.z === at.z);
+  }
+
+  /** The cover report a foreground route leaves cover at, as the runtime sends it while `report_open_sky` is on (the shape the scenario `navigation/report-open-sky` reported: `.agent/knowledge/facts/navigation-and-boats.md`). */
+  planCoverExit(at: Position): void {
+    if (this.snapshot.policy?.reportOpenSky !== true) return;
+    this.snapshot = { ...this.snapshot, coverExit: { at, plannedAt: "2026-11-09T00:00:00.000Z", reached: true } };
+  }
+
   snapshot: BotSnapshot = {
     position: { x: 0, y: 64, z: 0 },
     dimension: "minecraft:overworld",
@@ -85,13 +107,46 @@ export class FakeRuntime implements BotRuntime {
   readonly cancelled: string[] = [];
   private readonly actions = new Map<string, { tool: ForegroundTool; input: Readonly<Record<string, unknown>>; remaining: number; cancelled: boolean }>();
   private nextId = 1;
+  private readonly heldStatusReads: { readonly started: () => void; readonly released: Promise<void> }[] = [];
 
   get said(): string[] {
     return this.submitted.filter((call) => call.tool === "send_message").map((call) => String(call.input.message));
   }
 
+  /** Like the real runtime, every stack comes with its families; a stack the test labelled itself (even with `[]`) keeps its own. */
   async status(): Promise<BotSnapshot> {
-    return this.snapshot;
+    const inventory = this.snapshot.inventory.map((stack) => stack.families === undefined ? { ...stack, families: vanillaItemFamilies(stack.name) } : stack);
+    const snapshot = { ...this.snapshot, inventory };
+    const held = this.heldStatusReads.shift();
+    held?.started();
+    if (held !== undefined) await held.released;
+    return snapshot;
+  }
+
+  /** Holds the next captured status answer until released, modelling transport latency without changing its facts. */
+  holdNextStatus(): { readonly started: Promise<void>; readonly release: () => void } {
+    let start!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { start = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.heldStatusReads.push({ started: start, released });
+    return { started, release };
+  }
+
+  private deaths = 0;
+
+  /**
+   * The bot dies where it stands: `view_status` reports a new `lastDeath` from then on, and the runtime cancels the
+   * running action (`src/runtime/minecraft-runtime.ts:398`, `cancelActive(reason, { kind: "death" })`; the action
+   * then ends `cancelled`, measured for the body and item actions in `src/runtime/death-mid-action-body.test.ts:271`;
+   * the brain's own cancel list stays as it was). `cancelRunning: false` is a death with no action running. Until a
+   * test sets `snapshot.lastDeath` (null: never died), the fake sends none, as an older runtime. The fake hands the
+   * brain's `LastDeath` shape directly: `parseLastDeath` is tested on its own (`last-death.test.ts`), not through here.
+   */
+  die(cause: string | null, { cancelRunning = true }: { readonly cancelRunning?: boolean } = {}): void {
+    this.deaths += 1;
+    this.snapshot = { ...this.snapshot, lastDeath: { dimension: "overworld", position: this.snapshot.position, observedAt: `death-${this.deaths}`, minutesAgo: 0, cause } };
+    if (cancelRunning) for (const action of this.actions.values()) action.cancelled = true;
   }
 
   async say(message: string, to?: string): Promise<{ readonly status: "succeeded"; readonly error: null }> {
@@ -104,9 +159,12 @@ export class FakeRuntime implements BotRuntime {
 
   async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
     this.digSettings.push(allowed);
-    if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
-    this.snapshot = { ...this.snapshot, policy: { revision: `${revision}+`, digStraightDown: allowed } };
-    return true;
+    return this.editPolicy(revision, { digStraightDown: allowed });
+  }
+
+  /** `navigation.report_open_sky`, shown as `snapshot.policy.reportOpenSky`. */
+  async setReportOpenSky(on: boolean, revision: string): Promise<boolean> {
+    return this.editPolicy(revision, { reportOpenSky: on });
   }
 
   /** Every `setScaffoldBlocks` call, in order. */
@@ -114,8 +172,13 @@ export class FakeRuntime implements BotRuntime {
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
     this.scaffoldSettings.push(blocks);
+    return this.editPolicy(revision, { scaffoldBlocks: blocks });
+  }
+
+  /** A stale revision changes nothing; the other policy fields stay, as the runtime's merge keeps them. */
+  private editPolicy(revision: string, change: Partial<NonNullable<BotSnapshot["policy"]>>): boolean {
     if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
-    this.snapshot = { ...this.snapshot, policy: { ...this.snapshot.policy, revision: `${revision}+`, scaffoldBlocks: blocks } };
+    this.snapshot = { ...this.snapshot, policy: { ...this.snapshot.policy, ...change, revision: `${revision}+` } };
     return true;
   }
 
@@ -187,6 +250,22 @@ export class FakeRuntime implements BotRuntime {
     return { blocks, kinds };
   }
 
+  /** Cells ("x,y,z") that hold water (a waterlogged block, a water plant) on a `cellsAt` read, whatever block `world` names there. */
+  waterCells = new Set<string>();
+  /** Cells ("x,y,z") in a chunk that is not loaded: a `cellsAt` read answers the name "unloaded", as the runtime does. */
+  unloadedCells = new Set<string>();
+  /** Every `cellsAt` read, in order (a read is not a foreground call: `submitted` does not list it). */
+  readonly cellsRead: (readonly Position[])[] = [];
+
+  async cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]> {
+    this.cellsRead.push(positions);
+    return positions.map(({ x, y, z }) => {
+      const key = `${x},${y},${z}`;
+      if (this.unloadedCells.has(key)) return { name: "unloaded", holdsWater: false, loaded: false };
+      return { name: this.world.get(key) ?? (y <= this.groundTop ? "dirt" : "air"), holdsWater: this.waterCells.has(key), loaded: true };
+    });
+  }
+
   /** Tools without which a block drops nothing, cheapest first, per block name (others: drops by hand). */
   harvestTools: Readonly<Record<string, readonly string[]>> = {
     stone: ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe"],
@@ -217,6 +296,10 @@ export class FakeRuntime implements BotRuntime {
   /** Surface water share of explored chunks, by "chunkX,chunkZ" (others: never explored). */
   water: Readonly<Record<string, number>> = {};
 
+  async chunkWater(position: Position): Promise<number | null> {
+    return this.water[`${Math.floor(position.x / 16)},${Math.floor(position.z / 16)}`] ?? null;
+  }
+
   async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
     const known = chunksAlong(from, to).map(([x, z]) => this.water[`${x},${z}`]).filter((share) => share !== undefined);
     return known.length === 0 ? null : { chunks: known.length, share: known.reduce((sum, share) => sum + share, 0) / known.length };
@@ -230,7 +313,7 @@ export class FakeRuntime implements BotRuntime {
   }
 
   async nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null> {
-    const land = Object.entries(this.water).filter(([, share]) => share < 0.5)
+    const land = Object.entries(this.water).filter(([, share]) => share < MOSTLY_WATER)
       .map(([key]) => { const [x, z] = key.split(",").map(Number) as [number, number]; return { x: x * 16 + 8, z: z * 16 + 8 }; })
       .sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z));
     return land[0] ?? null;
@@ -239,7 +322,11 @@ export class FakeRuntime implements BotRuntime {
   async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
     const seen = this.seen[block];
     const places = [...(seen === undefined ? [] : [seen]), ...(this.alsoSeen[block] ?? [])];
-    return places.filter((place) => sameDimension(place.dimension, this.snapshot.dimension) && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit);
+    return places.filter((place) => sameDimension(place.dimension, this.snapshot.dimension) && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit)
+      .map((place) => {
+        const share = this.water[`${Math.floor(place.x / 16)},${Math.floor(place.z / 16)}`];
+        return { ...place, ...(share !== undefined && { waterShare: share }) };
+      });
   }
 
   async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {
@@ -260,12 +347,19 @@ export class FakeRuntime implements BotRuntime {
     return { tool: this.toolClasses[name] ?? null, solid, fullCube: solid && !/_(stairs|slab|door|pane)$/u.test(name), harvest: this.harvestTools[name] ?? null };
   }
 
+  /** Non-open situations reported by view_blocks find (water-targets T2); absent means open. */
+  situations: Readonly<Record<string, "under_water" | "roofed">> = {};
+
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const at = this.snapshot.position;
     // The runtime's `logs` selector matches every wood's log.
     const matches = (block: string) => block === name || (name === "logs" && block.endsWith("_log"));
     return [...this.world].filter(([, block]) => matches(block))
-      .map(([key, block]) => { const [x, y, z] = key.split(",").map(Number) as [number, number, number]; return { x, y, z, name: block }; })
+      .map(([key, block]) => {
+        const [x, y, z] = key.split(",").map(Number) as [number, number, number];
+        const situation = this.situations[key];
+        return { x, y, z, name: block, ...(situation !== undefined && { situation }) };
+      })
       .sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y, a.z - at.z) - Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z))
       .slice(0, limit);
   }
@@ -349,7 +443,7 @@ export class FakeRuntime implements BotRuntime {
 
   async wait(actionId: string): Promise<ForegroundState> {
     // Yield to timers like a real network round trip, so pending loops never starve the test.
-    await sleep(1);
+    await sleepMs(1);
     return this.step(actionId);
   }
 
@@ -393,6 +487,8 @@ export class FakeRuntime implements BotRuntime {
   /** A `tend_crops` result for the plot: every cell but the middle planted (src/actions/tend-crops/contract.ts). */
   /** Replaces the `tend_crops` result the fake settles with, when a test needs a particular plot. */
   tendAfter: Readonly<Record<string, unknown>> | null = null;
+  /** `before.crops` from T3's runtime contract; a harvest can replant the after-reading at stage zero. */
+  tendBefore: Readonly<Record<string, number>> | null = null;
   /** Cells `tend_crops` leaves as they were, by reason: the fake then settles it as partial ([TEND_INCOMPLETE]). */
   tendSkipped: Readonly<Record<string, readonly { x: number; z: number }[]>> | null = null;
   /** The soils `tend_crops` reports tilled, by block name and cells. */
@@ -409,7 +505,7 @@ export class FakeRuntime implements BotRuntime {
 
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     const skipped = this.tendSkipped ?? {};
-    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, ...(this.tendBefore !== null && { before: { crops: this.tendBefore } }), skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
     const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
     return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
   }
@@ -485,117 +581,11 @@ export class FakeRuntime implements BotRuntime {
       // It reaches the ground asked for, at the height it stands.
       this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
     }
-    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : undefined;
+    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : action.tool === "place_sign" ? { status: "succeeded", sign: { target: { x: action.input.x, y: action.input.y, z: action.input.z }, block: null, facing: action.input.facing, attach: action.input.attach ?? "ground", lines: [...(action.input.lines as string[]), "", "", ""].slice(0, 4), confirmed: true, placed: action.input.fill_blank !== true } } : undefined;
     if (action.tool === "tend_crops" && this.tendSkipped !== null) {
       const cells = Object.values(this.tendSkipped).reduce((sum, list) => sum + list.length, 0);
       return { state: "settled", actionId, status: this.tendSkippedStatus, error: `[TEND_INCOMPLETE] ${cells} cells could not be farmed; see skipped.`, result };
     }
     return { state: "settled", actionId, status: "succeeded", error: null, ...(result !== undefined && { result }) };
   }
-}
-
-export function testPersona(overrides: Partial<Persona> = {}): Persona {
-  return {
-    id: "ayla",
-    username: "Ayla",
-    displayName: "Ayla",
-    stance: "companion",
-    description: "A test companion.",
-    traits: [],
-    voice: "Plain.",
-    listensTo: [],
-    authority: ["*"],
-    // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
-    settings: { goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 } },
-    models: {},
-    ...overrides,
-  };
-}
-
-/** A chat model replying from a script, recording what it was sent. */
-export class ScriptedModel implements ChatModel {
-  readonly requests: (readonly ChatTurn[])[] = [];
-  constructor(readonly name: string, private readonly replies: string[] = []) {}
-
-  /** Queue replies, as objects (sent as JSON) or raw text. */
-  reply(...replies: (string | object)[]): this {
-    this.replies.push(...replies.map((reply) => (typeof reply === "string" ? reply : JSON.stringify(reply))));
-    return this;
-  }
-
-  private readonly holds: Promise<void>[] = [];
-
-  /** The next call waits (after it is recorded) until the returned function is called: a slow model. */
-  hold(): () => void {
-    let release!: () => void;
-    this.holds.push(new Promise((resolve) => { release = resolve; }));
-    return release;
-  }
-
-  private unavailableCalls = 0;
-
-  /** The next `times` calls (after any hold) find the model server away, as the real client reports it. */
-  unavailable(times = 1): this {
-    this.unavailableCalls += times;
-    return this;
-  }
-
-  async complete(turns: readonly ChatTurn[]): Promise<ChatReply> {
-    this.requests.push([...turns]);
-    const hold = this.holds.shift();
-    if (hold !== undefined) await hold;
-    if (this.unavailableCalls > 0) {
-      this.unavailableCalls -= 1;
-      throw new ModelUnavailable(`[LLM_UNAVAILABLE] ${this.name}: the model server did not answer`);
-    }
-    const reply = this.replies.shift();
-    if (reply === undefined) throw new Error(`${this.name}: no scripted reply left`);
-    return { text: reply, promptTokens: null, contextTokens: null };
-  }
-}
-
-/** One scripted model per tier, plus the mind using them. */
-export function scriptedMind() {
-  const models = { chat: new ScriptedModel("chat"), action: new ScriptedModel("action"), planner: new ScriptedModel("planner") };
-  return { ...models, mind: new LlmMind(models) };
-}
-
-/** The real monotonic clock, bound at load: a test that moves `performance.now` (`steppedClocks`) never drives `until`'s own timeout. */
-const realMonotonicNow = performance.now.bind(performance);
-
-/** Polls until the condition holds; fails the test after `timeoutMs` of real time. */
-export async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = realMonotonicNow() + timeoutMs;
-  while (!condition()) {
-    if (realMonotonicNow() > deadline) throw new Error("condition not reached in time");
-    await sleep(5);
-  }
-}
-
-/**
- * Moves the two clocks a test reads apart, as WSL does when it steps its wall clock: `wall(ms)` shifts `Date.now()` only,
- * `monotonic(ms)` shifts `performance.now()` only (time that really passed). Both are restored by `restore()` or when
- * the test ends. One per test at a time: a second call, or one over another mock of these clocks, throws (restoring
- * the outer mock first would leave the inner one's offset in the next test).
- */
-export function steppedClocks(t: { mock: { method(object: object, name: "now", implementation: () => number): { mock: { restore(): void } } } }) {
-  if ("mock" in Date.now || "mock" in performance.now) throw new Error("steppedClocks: the clocks are already mocked in this test; restore() the first one");
-  const realDate = Date.now.bind(Date);
-  const realPerformance = performance.now.bind(performance);
-  let wallOffset = 0;
-  let monotonicOffset = 0;
-  const date = t.mock.method(Date, "now", () => realDate() + wallOffset);
-  const clock = t.mock.method(performance, "now", () => realPerformance() + monotonicOffset);
-  return {
-    restore(): void {
-      date.mock.restore();
-      clock.mock.restore();
-    },
-    wall(ms: number): void {
-      wallOffset += ms;
-    },
-    monotonic(ms: number): void {
-      monotonicOffset += ms;
-    },
-  };
 }

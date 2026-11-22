@@ -139,13 +139,18 @@ export function attachFakeVehicle(bot: FakeBot, parts: { server: FakeServer; sea
   const yaws = new Map<number, number>();
   server.onPacket("vehicle_move", (data) => server.answer(() => answerVehicleMove(bot, server, data as VehicleMove, yaws)));
   bot.vehicle = null; // the entity's own `vehicle` starts null (prismarine-entity)
+  let shiftDown = false;
   bot.mount = (target) => bot._client.write("use_entity", { target: target.id, mouse: 0, sneaking: false });
   server.onPacket("use_entity", (data) => {
-    const { target, mouse } = data as { target: number; mouse: number };
+    const { target, mouse, sneaking } = data as { target: number; mouse: number; sneaking: boolean };
     if (mouse === 0) server.answer(() => answerMount(bot, server, target, seatPositionLeadTicks));
+    // Only a valid target processes the attack's shift field; hitting the ridden boat does not (contract 2026-11-08).
+    if (mouse === 1) server.answer(() => {
+      const entity = bot.entities[target];
+      if (entity && vehicleOnServer(bot, server)?.id !== target && inEntityReach(bot, server, entity)) shiftDown = sneaking;
+    });
   });
   // The shift key is a state the server reads at its ticks: only a press still down at one lets her off.
-  let shiftDown = false;
   server.onPacket("entity_action", (data) => {
     const { actionId } = data as { actionId: number };
     if (actionId === PRESS_SHIFT || actionId === RELEASE_SHIFT) server.answer(() => void (shiftDown = actionId === PRESS_SHIFT));

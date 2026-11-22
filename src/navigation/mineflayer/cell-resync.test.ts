@@ -3,7 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { requestCellResync } from "./cell-resync.js";
-import { SERVER_ANSWER_WALL_MS } from "./server-block-changes.js";
+import { SERVER_CLOCK_STOPPED_MS } from "../../world/world-age.js";
 
 const CELL = new Vec3(3, 63, 4);
 
@@ -45,6 +45,7 @@ test("a block packet for the cell within the bound is resent", async () => {
   using _timers = fixture.clock.install();
   fixture.clock.after(1_500, () => fixture.hearBlockChange({ x: 3, y: 63, z: 4 }));
   assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 1_550), "resent");
+  for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, name);
 });
 
 test("a packet for another cell is not the answer", async () => {
@@ -68,21 +69,25 @@ test("no packet in 40 ticks of world age is unanswered", async () => {
   // Two time packets (contract check `world-age-per-second`) are the 40 ticks: the wait ends with the second.
   assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), 2_000), "unanswered");
   assert.equal(fixture.bot.time.age - started, 40, "it stopped as the age passed 40, not before");
+  for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, name);
 });
 
-test("no packet and no world age for 2 s is unanswered, on the wall clock", async () => {
+test("no packet and no world age for 20 s is unanswered, on the wall clock", async () => {
   const fixture = resyncFixture();
   using _timers = fixture.clock.install();
   fixture.server.stop();
   const started = fixture.bot.time.age;
-  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), SERVER_ANSWER_WALL_MS), "unanswered");
+  assert.equal(await fixture.clock.settle(requestCellResync(fixture.bot, CELL, new AbortController().signal), SERVER_CLOCK_STOPPED_MS), "unanswered");
+  assert.equal(fixture.clock.now(), 20_000);
   assert.equal(fixture.bot.time.age, started, "the server clock never moved");
+  for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, name);
 });
 
 test("a held off-hand item is unavailable and nothing is sent", async () => {
   const fixture = resyncFixture({ offHand: { name: "shield" } });
   assert.equal(await requestCellResync(fixture.bot, CELL, new AbortController().signal), "unavailable");
   assert.deepEqual(fixture.sent, [], "no sneak, no use: the bot's items are not swapped");
+  for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, name);
 });
 
 test("an abort during the wait rejects with its reason and the bot stands up", async () => {
@@ -95,15 +100,4 @@ test("an abort during the wait rejects with its reason and the bot stands up", a
   await rejected;
   assert.equal(ticks(fixture.sent).at(-1), "entity_action:1", "never left crouching");
   assert.equal(fixture.bot._client.listenerCount("block_change"), 0);
-});
-
-test("listeners are removed after each outcome", async () => {
-  for (const outcome of ["resent", "unanswered", "unavailable"] as const) {
-    const fixture = resyncFixture(outcome === "unavailable" ? { offHand: { name: "shield" } } : {});
-    using _timers = fixture.clock.install();
-    if (outcome === "resent") fixture.clock.after(50, () => fixture.hearBlockChange({ x: 3, y: 63, z: 4 }));
-    const pending = requestCellResync(fixture.bot, CELL, new AbortController().signal);
-    assert.equal(await fixture.clock.settle(pending, 2_000), outcome);
-    for (const name of ["block_change", "multi_block_change", "map_chunk"]) assert.equal(fixture.bot._client.listenerCount(name), 0, `${outcome}: ${name}`);
-  }
 });

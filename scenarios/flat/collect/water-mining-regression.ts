@@ -232,6 +232,7 @@ async function runLavaInterruptsDig(
 /** Lava reaches the bot (placed beside it); it must get out, stop burning and then walk on from the water. */
 async function runLavaEscape(context: ScenarioContext, runtime: MinecraftRuntime): Promise<ScenarioResult> {
   const { bot, signal } = context;
+  bot.chat("/tp @s 0.5 -60 0.5");
   let sawLava = false;
   let escaped = 0;
   for (let tick = 0; tick < 200 && bot.health > 0; tick++) {

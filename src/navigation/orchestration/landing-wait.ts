@@ -80,9 +80,10 @@ function heldAfterResend(position: Position3): LandingResult {
 }
 
 /**
- * `signal` is the run's: its abort ends the wait as `stopped`. `null` bounds the
- * wait by the wall clock only, for the search's `finally`, which keeps its hold
- * through a cancel on purpose until the landing is seen or the bound passes.
+ * The supplied signal ends the wait as `stopped`; `null` bounds it by the wall clock only.
+ * The navigation loop supplies the run signal. Stationary-search cleanup supplies its
+ * termination signal, keeping the hold through ordinary cancellation or replanning while
+ * letting an admitted successor take over immediately (P4-29 a10, 2026-11-17).
  */
 export async function awaitLanding(
   bot: Pick<NavigationBot, "stabilize" | "observe" | "requestCellResync">,

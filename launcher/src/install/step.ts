@@ -41,6 +41,6 @@ export function isFileLockError(error: unknown): boolean {
 export const FILE_LOCKED_HINT = "Another program holds the file (a running Mine AI server or an antivirus): run `mine-ai stop`, wait a few seconds and run this step again.";
 
 /** A failed step: the thrown error's message as `error`, and what the user can do next as `hint`. */
-export function stepFailure(error: unknown, hint: string): StepResult {
+export function stepFailure(error: unknown, hint: string): StepFailure {
   return failure(error instanceof Error ? error.message : String(error), hint);
 }

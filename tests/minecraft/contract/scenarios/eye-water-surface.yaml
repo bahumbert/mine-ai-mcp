@@ -1,0 +1,43 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-eye-water-surface
+tags:
+  - contract
+description: A standing player keeps full air just above a source surface, hears air fall just below it, and refills on return.
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: eye-water-surface
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -1 -60 0 glass
+  - setblock 1 -60 0 glass
+  - setblock 0 -60 -1 glass
+  - setblock 0 -60 1 glass
+  - setblock -1 -59 0 glass
+  - setblock 1 -59 0 glass
+  - setblock 0 -59 -1 glass
+  - setblock 0 -59 1 glass
+  - setblock -1 -58 0 glass
+  - setblock 1 -58 0 glass
+  - setblock 0 -58 -1 glass
+  - setblock 0 -58 1 glass
+  - setblock 0 -60 0 water[level=0]
+  - setblock 0 -59 0 water[level=0]
+  - setblock 0 -58 0 water[level=0]
+players:
+  - name: Actor
+    pos: [-2.5, -60, 0.5]
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

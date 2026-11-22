@@ -13,3 +13,4 @@ export * from "./placement.js";
 export * from "./nearby-placement.js";
 export * from "./own-placement.js";
 export * from "./loaded-block-scan.js";
+export * from "./server-tick-pace.js";

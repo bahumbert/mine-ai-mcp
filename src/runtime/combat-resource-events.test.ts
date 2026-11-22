@@ -5,6 +5,7 @@ import type { CombatResourceObservation } from "../session/progress.js";
 import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { recordCombatResourceReceipt } from "./combat-resource-receipts.js";
+import { addEntitiesToServerTag } from "../test-support/datapack-tags.js";
 
 /** A bow in hand and three arrows carried; `arm` changes the slots before the observer starts. */
 function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: FakeClock, version?: string) {
@@ -30,7 +31,7 @@ function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: 
     recordScopedCombatResource: (candidate: string, event: CombatResourceObservation) => { if (candidate === scope) observed.push(event); },
   };
   const stop = observeCombatResourceEvents(bot, runner as never);
-  return { bot, client, inventory, arrows, observed, stop, idle: () => { owner = null as never; },
+  return { bot, client, inventory, arrows, observed, stop, harness, idle: () => { owner = null as never; },
     directHunt: () => { owner = "task"; action = "collect_mob_drop"; }, nextRequest: () => { scope = "request-2"; } };
 }
 
@@ -122,14 +123,23 @@ test("a picked-up stack of two tipped arrows records one arrow_recovered per ite
   } finally { f.stop(); }
 });
 
-// Known gap (spec 2026-11-01 C1, open choice 5): no item tags are shipped for 1.20.x, so the `arrows` tag is unknown there
-// and a shot is not counted. Remove this test when those versions' tags ship.
-test("known gap: on 1.20.4 no item tags are shipped, so a shot arrow records no arrow_fired", () => {
+test("a collected entity a datapack adds to entity tag `arrows` records arrow_recovered; a snowball does not", () => {
+  const f = fixture(({ entities }) => entities.spawn({ id: 11, name: "snowball", position: new Vec3(0, 64, 0) }));  try {
+    f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[11]!);
+    assert.deepEqual(f.observed, [], "vanilla: a collected snowball is no arrow");
+    addEntitiesToServerTag(f.harness, "arrows", ["snowball"]);
+    f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[11]!);
+    assert.deepEqual(f.observed, [{ kind: "arrow_recovered" }]);
+  } finally { f.stop(); }
+});
+
+// Spec 2026-11-01 C1, open choice 5, closed by P4-17a task 2: the 1.20.x item tags are shipped, so the `arrows` tag is known there.
+test("on 1.20.4 the shipped item tags know the `arrows` tag, so a shot arrow records arrow_fired", () => {
   const f = fixture(undefined, undefined, "1.20.4");
   try {
     recordCombatResourceReceipt(f.bot, { kind: "arrow_release_command" });
     f.inventory.updateSlot(10, f.arrows(2));
-    assert.deepEqual(f.observed, []);
+    assert.deepEqual(f.observed, [{ kind: "arrow_fired" }]);
   } finally { f.stop(); }
 });
 

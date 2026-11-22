@@ -1,14 +1,10 @@
 import type { CombatController } from "../control/combat/contract.js";
 
-import type { ReflexLimits } from "../control/contract.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import { isInWater } from "../perception/body.js";
 import { decideFootingResponse } from "../policy/environment.js";
-import type { FootingRecovery } from "../responses/footing.js";
-
-/** A landing may take 30 s; 5 s without landing, entering water or falling on (the base probe) ends it, then a 2 s pause. */
-const FOOTING_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 5_000, standDownMs: 2_000 };
+import { FOOTING_LIMITS, type FootingRecovery } from "../responses/footing.js";
 
 /** Combat uses the same impulse history internally; other owners yield to its landing. */
 export function attachFootingReflex(

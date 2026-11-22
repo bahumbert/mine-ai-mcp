@@ -5,7 +5,7 @@ import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
 import { createFakeClock } from "../../../test-support/fake-bot/index.js";
-import { build, BuildProgress, BuildTargeting, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
+import { build, BuildProgress, BuildTargeting, enclosesBot, holdsCell, keptWith, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -331,6 +331,194 @@ test("a route that cannot reach a cell refuses that cell and carries on with the
   assert.ok(kinds(result).includes("correct"));
 });
 
+test("keptWith reads both sets live", () => {
+  const live = new Set([1]);
+  const kept = new Set([2]);
+  const protectedCells = keptWith(live, kept);
+  assert.equal(protectedCells.has(1), true);
+  assert.equal(protectedCells.has(2), true);
+  assert.equal(protectedCells.has(3), false);
+  live.add(3);
+  assert.equal(protectedCells.has(3), true);
+  kept.delete(2);
+  assert.equal(protectedCells.has(2), false);
+});
+
+test("work legs use routeMovements, digs and the outside leg keep movements", async () => {
+  const { bot, put, physics, routeCalls, breakPolicies } = structureWorld();
+  put(new Vec3(8, 64, 0), "stone");
+  const digPolicy = physics.movements(new Set());
+  const routePolicy = physics.movements(new Set());
+  const policies = { movements: () => digPolicy, routeMovements: () => routePolicy };
+  const work = {
+    ...physics,
+    ...policies,
+    cells: [...cells([[8, 64, 0]], "air"), ...cells([[8, 64, 2]])],
+    removeWrongBlocks: false,
+  };
+  const result = await build(bot, work);
+  assert.equal(result.status, "complete");
+  assert.equal(result.dug, 1);
+  assert.equal(result.placed, 1);
+  assert.equal(routeCalls.length, 1);
+  assert.equal(routeCalls[0]!.isWorkRoute, true);
+  assert.equal(routeCalls[0]!.movements, routePolicy, "the work route uses its own policy");
+  assert.equal(breakPolicies.length, 1);
+  assert.equal(breakPolicies[0], digPolicy, "the dig uses movements after arrival");
+
+  const exit = structureWorld({ feet: new Vec3(1, 64, 1) });
+  const sealed = await build(exit.bot, { ...exit.physics, ...policies, cells: cells(hollowBox()), removeWrongBlocks: false });
+  assert.equal(sealed.status, "complete");
+  const outside = exit.routeCalls.filter(({ isWorkRoute }) => !isWorkRoute);
+  assert.ok(outside.length > 0);
+  for (const call of outside) assert.equal(call.movements, digPolicy, "the outside route uses movements");
+});
+
+test("a stamped refusal is tried again after its observation changes and the cell is placed", async () => {
+  let failed = false;
+  const { bot, put, physics, placements, routes, calculationFailures } = structureWorld({
+    failCalculation: (revision) => {
+      if (failed || !revision.includes("8,64,0")) return false;
+      failed = true;
+      return true;
+    },
+  });
+  put(new Vec3(9, 65, 0), "stone");
+  let reads = 0;
+  const result = await build(bot, {
+    ...physics,
+    cells: cells([[8, 64, 0], [8, 65, 0]]),
+    removeWrongBlocks: false,
+    routeObservation: () => {
+      reads += 1;
+      return bot.entity.position.x < 1 ? "a" : "b";
+    },
+  });
+  assert.deepEqual(calculationFailures, [routes[0]]);
+  assert.match(calculationFailures[0]!, /8,64,0/);
+  assert.equal(routes[1], "any(near:8,65,0:4)", "the next search omits the refused cell until the bot moves");
+  assert.equal(result.status, "complete");
+  assert.equal(result.placed, 2);
+  assert.deepEqual(kinds(result), ["correct", "correct"]);
+  assert.deepEqual(placements, ["8,64,0", "8,65,0"]);
+  assert.ok(reads <= result.passes + calculationFailures.length, `read the observation ${reads} times in ${result.passes} passes`);
+});
+
+const NO_PATH_AT_START = "no path found after 1 ms compute; visited 1 nodes, generated 1; closest node was 0,64,0";
+const REFUSAL_EXPIRY = "tried again when the clouds near the build, its cells or the bot's feet change";
+const STAMPED_REFUSAL = `${NO_PATH_AT_START}; ${REFUSAL_EXPIRY}`;
+
+test("a search that finishes after the observation changed does not refuse a reopened cell", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  let stamp = "a";
+  let searches = 0;
+  const { bot, physics, placements, calculationFailures } = structureWorld({
+    clock,
+    failCalculation: async () => {
+      searches += 1;
+      if (searches === 1) return true;
+      if (searches !== 2) return false;
+      stamp = "b";
+      // The live target snapshot has expired by the time this in-flight search answers.
+      await clock.advance(250);
+      return true;
+    },
+  });
+  const result = await build(bot, {
+    ...physics,
+    cells: cells([[8, 64, 0], [8, 64, 2]]),
+    removeWrongBlocks: false,
+    routeObservation: () => stamp,
+  });
+  assert.deepEqual(calculationFailures, [
+    "any(near:8,64,0:4|near:8,64,2:4)",
+    "any(near:8,64,2:4)",
+  ]);
+  assert.deepEqual(placements, ["8,64,0", "8,64,2"], "the revised goal reconsidered the cell absent from the failed search");
+  assert.equal(result.status, "complete");
+});
+
+test("route refusals hold for an unchanged observation and for the run by default", async () => {
+  for (const stamped of [false, true]) {
+    const { bot, physics, calculationFailures } = structureWorld({ failCalculation: () => true });
+    const progress = new BuildProgress();
+    const result = await build(bot, {
+      ...physics,
+      cells: cells([[8, 64, 0], [8, 64, 2]]),
+      removeWrongBlocks: false,
+      ...(stamped && { routeObservation: () => "a" }),
+    }, false, progress);
+    assert.equal(result.status, "stopped");
+    assert.equal(result.reason, null);
+    assert.equal(progress.refused.size, 2, "one refusal per target");
+    assert.equal(calculationFailures.length, 2, "the refusal prevents a second search for either target");
+    assert.ok(result.passes <= 4, `passes: ${result.passes}`);
+    const reason = stamped ? STAMPED_REFUSAL : NO_PATH_AT_START;
+    assert.deepEqual(result.cells.map(({ state }) => state), [
+      { kind: "refused", cause: "route", reason },
+      { kind: "refused", cause: "route", reason },
+    ]);
+  }
+});
+
+test("a changing observation that keeps failing reaches the idle stop", async () => {
+  let revision = 0;
+  let blocked = true;
+  const { bot, physics, calculationFailures } = structureWorld({ failCalculation: () => blocked });
+  const progress = new BuildProgress();
+  const request: BuildRequest = {
+    ...physics,
+    cells: cells([[8, 64, 0], [8, 64, 2]]),
+    removeWrongBlocks: false,
+    routeObservation: () => String(revision),
+    route: async (options) => {
+      const result = await physics.route(options);
+      revision += 1;
+      return result;
+    },
+  };
+  const result = await build(bot, request, false, progress);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.reason, `2 passes changed nothing; last work route refusal: ${STAMPED_REFUSAL}`);
+  assert.equal(progress.refused.size, 2);
+  assert.ok(calculationFailures.length > progress.refused.size, "reconsidered cells failed again");
+  assert.ok(calculationFailures.length <= 5, `calculation failures: ${calculationFailures.length}`);
+
+  blocked = false;
+  revision += 1;
+  const resumed = await build(bot, request, false, progress);
+  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.placed, 2);
+});
+
+test("an unloaded target with a route that always stops ends bounded", async () => {
+  for (const stamped of [false, true]) {
+    const { bot, physics } = structureWorld({ loadedRadius: 4 });
+    const progress = new BuildProgress();
+    let reads = 0;
+    const routeObservation = () => {
+      reads += 1;
+      return "a";
+    };
+    const result = await build(bot, {
+      ...physics,
+      cells: cells([[8, 64, 0]]),
+      removeWrongBlocks: false,
+      route: async () => ({ status: "stopped", reason: NO_PATH_AT_START, elapsedMs: 0 }),
+      ...(stamped && { routeObservation }),
+    }, false, progress);
+    assert.equal(result.status, "stopped");
+    assert.equal(result.reason, stamped
+      ? `2 passes changed nothing; last work route refusal: ${STAMPED_REFUSAL}`
+      : "2 passes changed nothing; last route stopped");
+    assert.deepEqual(kinds(result), ["unloaded"]);
+    assert.equal(progress.refused.size, 1);
+    assert.ok(result.passes <= 4, `passes: ${result.passes}`);
+    assert.equal(reads > 0, stamped);
+  }
+});
+
 test("a cell asking for block states holds only a block in those states: facing, half (or a slab's type) and axis", () => {
   const { bot, put } = structureWorld();
   const block = (name: string, properties: Record<string, unknown>) => {
@@ -468,40 +656,38 @@ test("scaffold that cannot be reached is reported and the build is still complet
   assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 9, y: 67, z: 2 }] });
 });
 
-/** What refused a cell decides whether asking again can help: only a policy refusal is for good (run 14 review SF1). */
-function refusalCause(result: BuildResult): unknown {
-  return (result.cells[0]!.state as { cause?: unknown }).cause;
-}
-
 test("a refused cell carries the cause: placement, entity, policy or route", async () => {
   const one = cells([[2, 64, 0]]);
-  const placementWorld = structureWorld();
-  const placement = await build(placementWorld.bot, {
-    ...placementWorld.physics,
-    place: async () => ({ kind: "failed", error: "the server did not update the block" }),
-    cells: one,
-    removeWrongBlocks: false,
-  });
-  assert.equal(refusalCause(placement), "placement");
-
-  const entityWorld = structureWorld();
-  const entity = await build(entityWorld.bot, {
-    ...entityWorld.physics,
-    place: async () => ({ kind: "failed", error: "a cow stands in the cell", cause: "entity" }),
-    cells: one,
-    removeWrongBlocks: false,
-  });
-  assert.equal(refusalCause(entity), "entity");
-
-  const policyWorld = structureWorld();
-  policyWorld.put(new Vec3(2, 64, 0), "crafting_table");
-  const policy = await build(policyWorld.bot, {
-    ...policyWorld.physics,
-    breakInPlace: async () => ({ status: "failed", reason: "movement policy prohibits breaking this block", cause: "policy" }),
-    cells: one,
-    removeWrongBlocks: true,
-  });
-  assert.equal(refusalCause(policy), "policy");
+  for (const row of [
+    { kind: "place", cause: "placement", reason: "the server did not update the block" },
+    { kind: "place", cause: "entity", reason: "a cow stands in the cell" },
+    { kind: "dig", cause: "policy", reason: "The dig was refused." },
+    { kind: "dig", cause: "support", reason: "The dig was refused." },
+  ] as const) {
+    const { bot, put, physics } = structureWorld();
+    const progress = new BuildProgress();
+    const isDig = row.kind === "dig";
+    if (isDig) put(new Vec3(2, 64, 0), "crafting_table");
+    const request: BuildRequest = {
+      ...physics,
+      cells: one,
+      removeWrongBlocks: isDig,
+      ...(row.kind === "dig" ? {
+        breakInPlace: async () => ({ status: "failed", reason: row.reason, cause: row.cause }),
+      } : {
+        place: async () => ({
+          kind: "failed", error: row.reason, ...(row.cause === "entity" && { cause: row.cause }),
+        }),
+      }),
+    };
+    const cause = row.cause === "support" ? "placement" : row.cause;
+    const reason = isDig ? `crafting_table there could not be cleared: ${row.reason}` : row.reason;
+    const expected = { kind: "refused", cause, reason };
+    const result = await build(bot, { ...request, routeObservation: () => "a" }, false, progress);
+    assert.deepEqual(result.cells[0]?.state, expected);
+    const resumed = await build(bot, { ...request, ...physics, routeObservation: () => "b" }, false, progress);
+    assert.deepEqual(resumed.cells[0]?.state, expected);
+  }
 
   const routeWorld = structureWorld();
   let stopped = false;
@@ -515,7 +701,9 @@ test("a refused cell carries the cause: placement, entity, policy or route", asy
     cells: cells([[10, 64, 0]]),
     removeWrongBlocks: false,
   });
-  assert.equal(refusalCause(route), "route");
+  assert.deepEqual(route.cells[0]?.state, {
+    kind: "refused", cause: "route", reason: "no path; closest node was 5,64,0",
+  });
 });
 
 test("a dig that came out just before the abort threw is counted in the progress the next attempt reports", async () => {

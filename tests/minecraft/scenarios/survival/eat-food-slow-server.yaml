@@ -1,0 +1,43 @@
+template: ../../templates/flat-single-action.yaml
+
+name: eat-food-slow-server
+tags: [regression]
+description: >-
+  Eating on a lagging server (spec 2026-11-08 p4-eat-lag, run 37 fresh world: 38 of 38 hunger-reflex meals failed with
+  "Promise timed out"). Mineflayer's consume gives up after 2500 ms of wall clock and the bite is 32 server ticks, so at
+  five ticks a second (6.4 s of wall for the bite) no meal landed, and our catch released the hand mid-bite. The actor
+  carries four cooked beef, its food is dipped to 19 by the hunger effect (measured 19 in 9 runs; Mine Labs refills hunger at prepare and
+  has no food fixture; the effect is cleared as soon as the food leaves 20, so the hunger reflex, which eats at 14 or
+  less, stays out of it) and eat_food must succeed: a confirmed drop of one beef in the result's evidence (hasItem is
+  an at-least goal, so it cannot bound the count from above).
+
+setup: ["tick rate 5"]
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: cooked_beef, count: 4 }
+
+tick:
+  # Food leaves 20 only through the effect; once it did, the effect goes, so the food stops just under 20 (19 measured).
+  - "execute as Actor if entity @s[nbt={foodLevel:20}] run effect give @s minecraft:hunger 1 255 true"
+  - "execute as Actor unless entity @s[nbt={foodLevel:20}] run effect clear @s minecraft:hunger"
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+params:
+  # The template has no start condition: wait 100 hunger-effect server ticks, plus the helper's 20-tick packet margin,
+  # so the food has dipped when eat_food starts (Mineflayer refuses "Food is full" at 20).
+  actions:
+    - { action: eat_food, waitServerTicks: 100, input: { food_name: cooked_beef }, expect: succeeded }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: hasItem, who: Actor, item: cooked_beef, count: 1 }
+    - { kind: survive, who: Actor, seconds: 5 }

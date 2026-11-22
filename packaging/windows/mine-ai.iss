@@ -7,7 +7,7 @@
 ; again (every install step resumes, and the pages start from the saved settings.json).
 ; Silent install (/SILENT or /VERYSILENT): one command-line parameter per wizard choice, read by `Param()` below and
 ; listed in docs/install/windows.md (launcher/src/build/iss-launcher-calls.test.ts keeps the two in step):
-;   /LLM=local|remote /LLMURL= /LLMKEY= /LLMMODEL= /SERVER=none|local|remote /SERVERHOST= /SERVERPORT=
+;   /LLM=local|remote /LLMURL= /LLMKEY= /LLMMODEL= /SERVER=none|local|remote /SERVERHOST= /SERVERPORT= /SERVERPROGRAM=paper|vanilla
 ;   /DATADIR= /OLLAMADIR= /EULA=accept /CHECKUPDATES=0|1 /STARTNOW=0|1; uninstall: /DELETEDATA=0|1.
 ; The app folder is Inno's own /DIR=; the data folder (/DATADIR=) and the Ollama folder (/OLLAMADIR=) are asked by pages of
 ; this script. The folders chosen at the first install are kept by every update; the uninstaller removes them.
@@ -16,8 +16,9 @@
 ; code (7 for a wrong parameter, 100 for a failed step) and the error and hint in the /LOG= file. Pass /SUPPRESSMSGBOXES
 ; too: Setup's own error boxes are not silent without it.
 ; iss-compile.test.ts compiles it with ISCC (a stand-in stage folder) when Inno Setup is installed; W5 walks every page.
-; The [Code] section is split in two files: this one, and endpoint-page.iss (the endpoint page and its key box), pulled in by `#include`
-; where its code used to stand. ISCC reads the included file from this file's folder; the tests read the two as one (iss-test-support.ts).
+; The [Code] section is split in three files: this one, endpoint-page.iss (the endpoint page and its key box) and server-page.iss (the
+; server page and the local server's program), pulled in by `#include` where their code used to stand. ISCC reads an included file from
+; this file's folder; the tests read the three as one (iss-test-support.ts).
 
 #ifndef StageDir
   #error StageDir is not defined: build with launcher/src/build/build-windows.ts.
@@ -155,12 +156,16 @@ var
   DataPage: TInputDirWizardPage;
   // The endpoint page's variables are in endpoint-page.iss.
   ModelPage, ServerPage, EulaPage, StepsPage: TWizardPage;
-  ModelStatus, DiskStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  ModelStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  DiskStatus: TNewMemo;
   ModelLocalRadio, ModelRemoteRadio: TNewRadioButton;
   OllamaDirEdit: TEdit;
   OllamaBrowseButton: TButton;
   ModelGauge: TNewProgressBar;
   ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio: TNewRadioButton;
+  // The local server's program (Paper or vanilla): its own panel, so the two radios are a group apart from the three above.
+  ServerProgramPanel: TPanel;
+  ServerPaperRadio, ServerVanillaRadio: TNewRadioButton;
   ServerHostEdit, ServerPortEdit: TEdit;
   EulaCheck: TNewCheckBox;
   StepsStatus: TNewStaticText;
@@ -176,6 +181,8 @@ var
   // The data folder (DataDir('')) the tasks-page box was last set for from its settings.json; '' until the page first shows.
   TasksBoxFolder: String;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
+  CaptureConfigureOutput: Boolean;
+  ConfigureStdout: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
   UninstallDataDir: String;
@@ -449,6 +456,8 @@ var
   Text, Rest: String;
   Space: Integer;
 begin
+  if CaptureConfigureOutput and (not Error) then
+    ConfigureStdout := ConfigureStdout + Line + #13#10;
   Text := Trim(Line);
   if Text = '' then
     Exit;
@@ -477,6 +486,7 @@ begin
   JsonFile := ExpandConstant('{tmp}\mine-ai-step.json');
   DeleteFile(JsonFile);
   JsonText := '';
+  ConfigureStdout := '';
   LastLogTail := '';
   ActiveGauge := Gauge;
   ActiveStatus := Status;
@@ -813,12 +823,6 @@ begin
     OllamaDirEdit.Text := Folder;
 end;
 
-procedure ServerChoiceChanged(Sender: TObject);
-begin
-  ServerHostEdit.Enabled := ServerRemoteRadio.Checked;
-  ServerPortEdit.Enabled := ServerRemoteRadio.Checked;
-end;
-
 procedure EulaCheckChanged(Sender: TObject);
 begin
   WizardForm.NextButton.Enabled := EulaCheck.Checked;
@@ -833,15 +837,25 @@ end;
 
 #include "endpoint-page.iss"
 
+// The server page and the local server's program (Paper or vanilla); it needs EndpointPage and the page helpers above.
+#include "server-page.iss"
+
 // ---------- page creation ----------
 
 procedure CreateModelPage();
 begin
   ModelPage := CreateCustomPage(wpInfoAfter, 'AI model', 'Where should the bots'' AI model run?');
   ModelStatus := AddText(ModelPage, '', 0, 46);
-  // The free space of the drives the local model needs (ShowDiskSpace, wizard only).
-  // Room for about four lines: a short drive adds a warning sentence to the drive lines (disk-report.ts).
-  DiskStatus := AddText(ModelPage, '', 48, 60);
+  // Multiple drives and warnings can exceed this footprint: keep every line reachable (T14 walk, 2026-11-15).
+  DiskStatus := TNewMemo.Create(WizardForm);
+  DiskStatus.Parent := ModelPage.Surface;
+  DiskStatus.Top := ScaleY(48);
+  DiskStatus.Height := ScaleY(60);
+  DiskStatus.Width := ModelPage.SurfaceWidth;
+  DiskStatus.ReadOnly := True;
+  DiskStatus.WordWrap := True;
+  DiskStatus.ScrollBars := ssVertical;
+  DiskStatus.TabStop := True;
   // What the local choice does is set by CheckGpuOnce once it knows whether Ollama is already installed.
   ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 112);
   // One row: the label, the folder and Browse; shown only when this setup will install Ollama (ModelChoiceChanged).
@@ -864,29 +878,6 @@ begin
   ModelLocalRadio.Enabled := False;
   ModelRemoteRadio.Checked := True;
   ModelChoiceChanged(nil);
-end;
-
-procedure CreateServerPage();
-var
-  PortLeft: Integer;
-begin
-  ServerPage := CreateCustomPage(EndpointPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
-  ServerNoneRadio := AddRadio(ServerPage, 'No server for now (I will set one in settings.json)', 0);
-  ServerLocalRadio := AddRadio(ServerPage, 'Install a Minecraft server on this PC (only this PC can join, by default)', 24);
-  ServerRemoteRadio := AddRadio(ServerPage, 'Use an existing server', 48);
-  PortLeft := (ServerPage.SurfaceWidth * 3) div 4;
-  AddText(ServerPage, 'Address', 72, 14);
-  ServerHostEdit := AddEdit(ServerPage, 86, 0, PortLeft - ScaleX(8));
-  ServerPortEdit := AddEdit(ServerPage, 86, PortLeft, ServerPage.SurfaceWidth - PortLeft);
-  ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
-  AddText(ServerPage, 'An existing server must be vanilla Minecraft 1.21.4 with online-mode=false (the bots join without a Minecraft account). Mine AI checks it before starting any bot.', 124, 60);
-  ServerNoneRadio.Checked := True;
-  ServerNoneRadio.OnClick := @ServerChoiceChanged;
-  ServerLocalRadio.OnClick := @ServerChoiceChanged;
-  ServerRemoteRadio.OnClick := @ServerChoiceChanged;
-  // What a local server downloads and where, filled by CurPageChanged once the data folder is known.
-  ServerDownloadText := AddText(ServerPage, '', 190, 44);
-  ServerChoiceChanged(nil);
 end;
 
 // After the program folder page (a first install only) and before the files are copied: the data folder is chosen first, so the
@@ -973,7 +964,7 @@ begin
     Model := JsonString(Llm, 'model') + ' on this PC';
   Kind := JsonString(ServerSection, 'kind');
   if Kind = 'local' then
-    Server := 'on this PC (port ' + JsonNumber(ServerSection, 'port') + ')'
+    Server := 'on this PC (port ' + JsonNumber(ServerSection, 'port') + ', ' + ProgramWords(JsonString(ServerSection, 'program')) + ' server)'
   else if Kind = 'remote' then
     Server := JsonString(ServerSection, 'host') + ':' + JsonNumber(ServerSection, 'port')
   else
@@ -1021,6 +1012,8 @@ begin
   RemoteUrlEdit.Text := '';
   RemoteModelCombo.Text := '';
   ServerNoneRadio.Checked := True;
+  // A first install, a missing file and a server that is not a local one: Paper, the new local server's program.
+  ServerPaperRadio.Checked := True;
   ServerHostEdit.Text := '';
   ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
   SavedCheckUpdates := True;
@@ -1049,7 +1042,14 @@ begin
     end;
     Kind := JsonString(Server, 'kind');
     if Kind = 'local' then
-      ServerLocalRadio.Checked := True
+    begin
+      ServerLocalRadio.Checked := True;
+      // A local server of an install from before Paper has no `program` and runs vanilla: an update keeps it, never switches it.
+      if JsonString(Server, 'program') = 'paper' then
+        ServerPaperRadio.Checked := True
+      else
+        ServerVanillaRadio.Checked := True;
+    end
     else if Kind = 'remote' then
     begin
       ServerRemoteRadio.Checked := True;
@@ -1105,7 +1105,7 @@ var
 begin
   Result := MemoDirInfo + NewLine + NewLine + 'Data folder:' + NewLine + Space + DataDir('');
   if IsUpdate() and SettingsSummary(Model, Server) then
-    Result := Result + NewLine + NewLine + 'AI model:' + NewLine + Space + Model + NewLine + NewLine + 'Minecraft server:' + NewLine + Space + Server
+    Result := Result + NewLine + NewLine + 'Saved AI model:' + NewLine + Space + Model + NewLine + NewLine + 'Saved Minecraft server:' + NewLine + Space + Server + NewLine + NewLine + 'These are your saved settings. You can change the AI model and Minecraft server on the next pages, after the files are copied.'
   else
     // A first install, or an update that finds no settings.json: the pages after the copy still ask both.
     Result := Result + NewLine + NewLine + 'AI model and Minecraft server: chosen on the next pages, after the files are copied (the setup checks this PC''s graphics card there).';
@@ -1122,7 +1122,7 @@ end;
 // Silent: sets the pages' controls from /LLM= /LLMURL= ... A parameter not given leaves what PrefillFromSettings set.
 procedure ApplySilentParameters();
 var
-  Server: String;
+  Server, ProgramParam: String;
 begin
   // No page is shown: the room warning of the model page and the Ready list goes to the log.
   Log('Disk room: ' + ROOM_WARNING_TEXT);
@@ -1150,6 +1150,12 @@ begin
     ServerLocalRadio.Checked := True
   else if Server = 'remote' then
     ServerRemoteRadio.Checked := True;
+  // After the prefill: a parameter not given keeps the saved program (an update of a vanilla server stays vanilla); SilentParameterProblem refuses another word.
+  ProgramParam := Param('SERVERPROGRAM', PARAM_UNSET);
+  if ProgramParam = 'paper' then
+    ServerPaperRadio.Checked := True
+  else if ProgramParam = 'vanilla' then
+    ServerVanillaRadio.Checked := True;
   if ParamGiven('SERVERHOST') then
     ServerHostEdit.Text := Param('SERVERHOST', '');
   if ParamGiven('SERVERPORT') then
@@ -1159,6 +1165,8 @@ end;
 
 procedure InitializeWizard();
 begin
+  CaptureConfigureOutput := False;
+  ConfigureStdout := '';
   // The Ready list's long lines (the disk room warning) wrapped to the right under a horizontal scroll bar (F3).
   WizardForm.ReadyMemo.WordWrap := True;
   WizardForm.ReadyMemo.ScrollBars := ssVertical;
@@ -1204,15 +1212,15 @@ var
   Json, Args: String;
   Succeeded: Boolean;
 begin
-  DiskStatus.Caption := 'Checking disk space...';
-  Args := 'install disk';
+  DiskStatus.Text := 'Checking disk space...';
+  Args := 'install disk --server-program paper';
   if not ModelLocalRadio.Enabled then
     Args := Args + ' --no-model';
   Succeeded := RunStepSucceeded(Args, ModelGauge, ModelStepStatus, Json);
   if Succeeded and (JsonString(Json, 'detail') <> '') then
-    DiskStatus.Caption := JsonString(Json, 'detail')
+    DiskStatus.Text := JsonString(Json, 'detail') + #13#10 + 'Server disk estimate includes Paper, the recommended local server. You choose the server on a later page. A fresh vanilla server downloads less; existing server files are kept.'
   else
-    DiskStatus.Caption := '';
+    DiskStatus.Text := '';
 end;
 
 // Moves the focus to the radio of the group that is already checked, when Page is the page on screen. It never writes a .Checked: a
@@ -1386,7 +1394,7 @@ begin
   ModelChoiceChanged(nil);
   ModelStatus.Caption := StepFailureText(Json);
   // The disk text listed the local model's needs, which this PC no longer has.
-  DiskStatus.Caption := '';
+  DiskStatus.Text := '';
   if InstallStateHas('"ollama":"installed"') then
   begin
     if SuppressibleMsgBox('This PC cannot run the model, so the Ollama that was just installed is not needed. Remove it now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
@@ -1482,7 +1490,7 @@ begin
   else
     Result := 'configure --llm-local';
   if ServerLocalRadio.Checked then
-    Result := Result + ' --server-local'
+    Result := Result + ' --server-local' + ServerProgramArgument()
   else if ServerRemoteRadio.Checked then
     Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), DEFAULT_SERVER_PORT))
   else
@@ -1495,6 +1503,32 @@ procedure NoteSetup(const Line: String);
 begin
   StepsLog.Lines.Add(Line);
   Log(Line);
+end;
+
+// Configure's full stdout belongs in both logs, even when saving settings later fails (T14 walk, 2026-11-15).
+procedure NoteConfigureOutput(const Output: String);
+var
+  Rest, Line: String;
+  P: Integer;
+begin
+  Rest := Output;
+  while Length(Rest) > 0 do
+  begin
+    P := Pos(#10, Rest);
+    if P = 0 then
+    begin
+      Line := Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Line := Copy(Rest, 1, P - 1);
+      Delete(Rest, 1, P);
+    end;
+    StringChangeEx(Line, #13, '', True);
+    if Trim(Line) <> '' then
+      NoteSetup(Line);
+  end;
 end;
 
 function RunSetupStep(const Step: String): Boolean;
@@ -1518,7 +1552,13 @@ var
   Code: Integer;
 begin
   StepsStatus.Caption := 'Saving your choices...';
-  Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  CaptureConfigureOutput := True;
+  try
+    Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  finally
+    CaptureConfigureOutput := False;
+  end;
+  NoteConfigureOutput(ConfigureStdout);
   Result := Code = 0;
   if Result then
     NoteSetup('OK   settings saved in ' + DataDir('') + '\settings.json')
@@ -1611,7 +1651,8 @@ end;
 //   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none --check-updates on; install model
 //   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port> --check-updates on
 //   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model> --check-updates on; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port> --check-updates on
-//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --check-updates on; install model; install java; install server --accept-eula
+//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --server-program paper --check-updates on; install model; install java; install server --accept-eula
+//   CALLS /LLM=local /SERVER=local /SERVERPROGRAM=vanilla /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --server-program vanilla --check-updates on; install model; install java; install server --accept-eula
 //   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none --check-updates on
 //   CALLS /DELETEDATA=1 (uninstall): stop; install model-remove; install ollama-remove
 // What is wrong with the silent parameters, before any file is copied (Setup then exits with code 7); '' when all is well.
@@ -1628,6 +1669,8 @@ begin
     Result := '/LLM= must be local or remote.'
   else if (Server <> 'none') and (Server <> 'local') and (Server <> 'remote') then
     Result := '/SERVER= must be none, local or remote.'
+  else if ParamGiven('SERVERPROGRAM') and (Param('SERVERPROGRAM', '') <> 'paper') and (Param('SERVERPROGRAM', '') <> 'vanilla') then
+    Result := '/SERVERPROGRAM= must be paper or vanilla.'
   else if (StartNow <> '0') and (StartNow <> '1') then
     Result := '/STARTNOW= must be 0 or 1.'
   else if (CheckUpdates <> '0') and (CheckUpdates <> '1') then
@@ -1701,7 +1744,7 @@ begin
   if ServerLocalRadio.Checked then
     Result := 'Join from Minecraft Java 1.21.4 on this PC at localhost (the console shows the port, normally 25565).'
   else if ServerRemoteRadio.Checked then
-    Result := 'The bots join ' + Trim(ServerHostEdit.Text) + ':' + Trim(ServerPortEdit.Text) + '. That server must be vanilla Minecraft 1.21.4 with online-mode=false.'
+    Result := 'The bots join ' + Trim(ServerHostEdit.Text) + ':' + Trim(ServerPortEdit.Text) + '. That server must be vanilla or Paper Minecraft 1.21.4 with online-mode=false.'
   else
     Result := 'No Minecraft server is set: put one in settings.json ("server") before the bots can start.';
 end;
@@ -1788,7 +1831,7 @@ begin
   end
   else if CurPageID = ServerPage.ID then
   begin
-    ServerDownloadText.Caption := 'A server on this PC downloads Java (from Adoptium) and the Minecraft server (from Mojang, after you accept the EULA) into your data folder, ' + DataDir('') + '. Nothing else is installed.';
+    ShowServerDownloadText();
     FocusCheckedRadio(ServerPage, ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio);
   end
   else if CurPageID = EulaPage.ID then

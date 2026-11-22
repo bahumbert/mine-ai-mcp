@@ -1,5 +1,4 @@
 import { Vec3 } from "vec3";
-import { hideInPlace } from "../../../src/survival/responses/hide.ts";
 import { standStill } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { ScenarioCombat } from "../../src/combat.ts";
@@ -7,13 +6,7 @@ import { ScenarioCombat } from "../../src/combat.ts";
 export const run: MineAiScenario = async (context) => {
   await standStill(context);
   using responseOwner1 = new ScenarioCombat(context.bot, context.navigation);
-  const result = await hideInPlace(context.bot, {
-    threatContext: {
-      ...responseOwner1.context,
-      resolvedIds: new Set(),
-      attackerIds: new Set(),
-      unreachableIds: new Set(),
-    },
+  const result = await responseOwner1.hide(context.bot, {
     signal: context.signal,
     recoverTo: 18,
     // The whole hide, shaft included, must fit: construction now ends at this budget (reflex-limits T5).

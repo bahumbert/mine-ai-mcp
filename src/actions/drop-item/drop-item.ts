@@ -42,16 +42,8 @@ import { approachPlayer, canWalkOffAfterToss, closeDisposalHole, DropItemActionE
 import { planPlugKeep, PLUG_CELLS, type PlugKeep } from "./plug-reserve.js";
 import { tossItem, type ItemToss } from "./toss-item.js";
 
-/**
- * How long a toss is given to clear the slot it emptied.
- *
- * A toss is a server round trip: the slot clears when the server acknowledges
- * it, not when the promise resolves. Mining settles observed drops on the same
- * budget (`OBSERVED_DROP_SETTLE_MS`), which is longer than the couple of ticks
- * a receipt normally waits, because a drop that never lands must be reported
- * as not observed rather than merely unconfirmed.
- */
-const TOSS_SETTLE_MS = 1_500;
+/** Item fall into the pit, out of C8 (spec 2.9, 2026-11-15). */
+const HOLE_LANDING_MS = 1_500;
 
 /** Items a bot stands over are picked up again within a couple of seconds; wait this long to see it happen. */
 const PICKUP_WAIT_MS = 3_000;
@@ -65,8 +57,8 @@ export interface DropItemDependencies {
   /** Fills one cell of the hole's shaft with a carried block once the toss is done. */
   readonly placeInto: typeof placeSolidBlockInto;
   readonly createMovements: (bot: Bot) => ReturnType<typeof createMovements>;
-  /** How long the server gets to show a toss in the inventory and, for a hole, on the ground. */
-  readonly settleMs?: number;
+  /** How long tossed item entities get to land at the bottom of the hole. */
+  readonly holeLandingMs?: number;
   /** How long after the toss the carried count is read again to catch items picked straight back up. */
   readonly pickupWaitMs?: number;
   /** How long a ground toss waits for a bot in the air to land before it is refused. */
@@ -196,7 +188,6 @@ async function tossRequested(
   request: DropItemRequest,
   progress: DropProgress,
   context: ActionContext,
-  settleMs: number,
 ): Promise<DroppedItem[]> {
   const dropped: DroppedItem[] = [];
   for (const [index, { itemName, count }] of request.items.entries()) {
@@ -204,7 +195,7 @@ async function tossRequested(
     const toss = progress.tosses[index]!;
     // Refusals are for an item the request has not started on: a reflex that equipped it must not undo a drop under way.
     const refusal = toss.tossed === 0 ? refusedEntry(bot, request, progress, itemName, count) : null;
-    dropped.push(refusal ?? (await tossItem(bot, itemName, count, context, settleMs, toss)));
+    dropped.push(refusal ?? (await tossItem(bot, itemName, count, context, toss)));
   }
   return dropped;
 }
@@ -342,7 +333,7 @@ async function finishHole(
     progress.holeBaseline ?? new Map<number, number>(),
     dropped,
     context,
-    dependencies.settleMs ?? TOSS_SETTLE_MS,
+    dependencies.holeLandingMs ?? HOLE_LANDING_MS,
   );
   context.signal?.throwIfAborted();
   // The toss-time claim ran before the server spawned the stacks (run 16): claim the ones now seen in the pit.
@@ -407,7 +398,7 @@ export function beginDropItem(
     const unreachable = await reachDestination(bot, request, progress, dependencies, context);
     if (unreachable) return unreachable;
     if (progress.hole && progress.plugKeep === undefined) planBurialPlug(bot, request, progress);
-    const dropped = await tossRequested(bot, request, progress, context, dependencies.settleMs ?? TOSS_SETTLE_MS);
+    const dropped = await tossRequested(bot, request, progress, context);
     await settleAfterTosses(bot, request, progress, dropped, dependencies, discarded, context);
 
     // Free slots are read now: plugging the hole spends a block and stepping back moves the body, and neither is part of

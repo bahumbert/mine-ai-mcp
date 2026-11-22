@@ -9,6 +9,16 @@ import { navigationFeet, standsOnDryGround } from "../world/block-geometry.js";
 import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { blockLabel, samePosition, type BlockPosition, type Position3, type WorldView } from "../world/world.js";
 
+/**
+ * How far from the eye a fill stands from its source: a block inside the server's reach, not at its edge.
+ * Measured 2026-11-07 (scenario `action-catalog`, `--repeat 10`): standing at 4.49 of the 4.5 blocks the server lets
+ * a use ray reach, on a ray that cleared the shore block by about 0.1, the scoop got no water in 4 to 5 runs of 10
+ * (`[BUCKET_FAILED]`, 40 server ticks waited, so not lag); with the reach set to 3.5 it got water in 10 of 10.
+ * Which of the two (the distance or the grazing ray) the server refuses is not isolated.
+ */
+const FILL_STANDOFF_MARGIN = 1;
+const FILL_RAY_REACH = USE_RAY_REACH - FILL_STANDOFF_MARGIN;
+
 type Liquid = "water" | "lava";
 const SOURCE_SHAPE = [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }];
 
@@ -28,7 +38,7 @@ function sourceRay(world: WorldView, position: Position3, source: BlockPosition,
   const eye = new Vec3(position.x, position.y + eyeHeight, position.z);
   const toward = new Vec3(source.x + 0.5, source.y + 0.9, source.z + 0.5).minus(eye);
   const distance = toward.norm();
-  if (distance > USE_RAY_REACH) return null;
+  if (distance > FILL_RAY_REACH) return null;
   // Empty buckets stop at source liquid too. A nearer source must not be
   // mistaken for an unobstructed ray to the requested, more distant source.
   const ray = worldViewRaycaster((x, y, z) => {
@@ -59,7 +69,7 @@ export function liquidAccessGoal(sources: readonly BlockPosition[], liquid: Liqu
   return {
     resolve(observation) {
       if (sources.length === 0) return { kind: "invalid", observation: "No liquid sources were supplied." };
-      const approaches = sources.map((source) => nearGoal(source, USE_RAY_REACH).resolve(observation));
+      const approaches = sources.map((source) => nearGoal(source, FILL_RAY_REACH).resolve(observation));
       const currentFeet = navigationFeet(observation.position, observation.stance === "supported");
       return {
         kind: "active",

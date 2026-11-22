@@ -1,4 +1,4 @@
-import { errorCode, type ItemCount } from "../runtime-client.ts";
+import { errorCode, type CarriedStack, type ItemCount } from "../runtime-client.ts";
 
 /** Cobblestone a stone tool of each class takes: with that much spare, the tool is made in stone, else in wood. */
 export const TOOL_COBBLESTONE: Readonly<Record<string, number>> = { pickaxe: 3, axe: 3, shovel: 1, hoe: 2 };
@@ -6,11 +6,14 @@ export const TOOL_COBBLESTONE: Readonly<Record<string, number>> = { pickaxe: 3, 
 /** Losses of one tool class that end a step: the one before it was remade, this one is not. */
 export const MAX_TOOL_LOSSES = 3;
 
-/** The class (`pickaxe`, `shovel`...) of the tool a `[TOOL_TIER_LOST] stone_pickaxe was lost ...` error names; null for any other error. */
+/**
+ * The class (`pickaxe`, `shovel`...) of the tool a `[TOOL_TIER_LOST] stone_pickaxe was lost at 1,2,3; family: pickaxe; ...`
+ * error names in its `family:` field (the runtime puts the lost tool's family there, so no item name is parsed); null for
+ * any other error, and for a loss from a runtime that names no family.
+ */
 export function lostToolClass(error: string | null | undefined): string | null {
   if (errorCode(error) !== "TOOL_TIER_LOST") return null;
-  const name = /^\[TOOL_TIER_LOST\] ([a-z_]+) was lost/u.exec(error ?? "")?.[1];
-  return name?.split("_").at(-1) ?? null;
+  return /^\[TOOL_TIER_LOST\][^;]*; family: ([a-z_]+);/u.exec(error ?? "")?.[1] ?? null;
 }
 
 /** The best tier of a tool class the spare materials allow: stone with the cobblestone for it, else wood. */
@@ -22,7 +25,7 @@ export function toolToMake(toolClass: string, spare: (item: string) => number): 
 export interface ToolLossDeps {
   /** Materials that are not spare (the bill of what is being built): never spent on a tool. */
   readonly reserved: readonly ItemCount[];
-  readonly inventory: () => Promise<readonly { readonly name: string; readonly count: number }[]>;
+  readonly inventory: () => Promise<readonly Pick<CarriedStack, "name" | "count" | "families">[]>;
   /** The `get_items` skill: fetches and crafts what is missing. */
   readonly getItems: (items: readonly ItemCount[], purpose: string) => Promise<{ readonly status: "done" | "failed" | "stopped"; readonly detail?: string }>;
   /** Told the class of each tool lost, whatever came of it (the objective remembers it: N7). */
@@ -71,7 +74,7 @@ export class ToolLosses {
     const inventory = await deps.inventory();
     const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
     const spare = (item: string) => carried(item) - (deps.reserved.find((entry) => entry.item === item)?.count ?? 0);
-    const have = inventory.find((stack) => stack.name.endsWith(`_${toolClass}`));
+    const have = inventory.find((stack) => stack.families?.includes(toolClass));
     const item = have?.name ?? toolToMake(toolClass, spare);
     if (have === undefined) {
       const got = await deps.getItems([{ item, count: 1 }], `a new ${toolClass} to go on (one wore out)`);

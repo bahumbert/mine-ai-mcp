@@ -34,13 +34,14 @@ setup:
 entities:
   - type: creeper
     pos: [0.7, -60, 0.5]
-    nbt: "{PersistenceRequired:1b}"
+    nbt: "{NoAI:1b,PersistenceRequired:1b}"
   - type: zombie
     pos: [3.5, -60, 4.5]
-    nbt: "{PersistenceRequired:1b}"
+    nbt: "{NoAI:1b,PersistenceRequired:1b}"
 
 players:
   - name: BlockedRetreat
+    op: true
     pos: [0.5, -60, 0.5]
     inventory:
       - { item: diamond_sword, count: 1 }
@@ -56,6 +57,7 @@ client:
   args: ["../../src/client-host.ts", "./navigation-creeper-blocked-retreat.ts"]
 params:
   firstTarget: [11, -60, 0]
+  releaseAfterOpen: true
 
 goal:
   kind: all

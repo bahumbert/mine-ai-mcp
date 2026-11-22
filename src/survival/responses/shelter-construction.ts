@@ -1,11 +1,19 @@
 // The steps of building a shelter: the shaft, the ring, the cap, one pass at a time.
+import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
+import { nativeDigTicks } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
 import { findPlacementSupport } from "../../world/index.js";
+import { occupiedCell } from "../../world/placement.js";
+import { foreignRegionAt, regionRefusalText } from "../../world/protected-regions.js";
+import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
+import { isInFire, isInLava } from "../perception/body.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
+import { buildProtection } from "../positioning/combat/build-protection.js";
 import {
+  blockedCellsText,
   centerShelterCell,
   constructionChanged,
   repelShelterIntruder,
@@ -15,9 +23,22 @@ import {
   shelterHazard,
   shelterLiquidFailure,
   type StepEnd,
+  type StepFailure,
   waitForShelterTicks,
 } from "./shelter-build.js";
-import { diggable, enclosedInPlace, shelterFeet, shelterIntruder, SIDES, sidesByThreat, solid } from "./shelter-cells.js";
+import {
+  diggable,
+  enclosedInPlace,
+  floorHoldsCentre,
+  marginCells,
+  nearestThreatDirection,
+  shelterFeet,
+  shelterIntruder,
+  SIDES,
+  sidesByThreat,
+  solid,
+} from "./shelter-cells.js";
+import { describeShelterRefusal } from "./shelter-refusal.js";
 
 /** How far down the bot digs: three cells put its head below anything that walks, and out of a skeleton's line. */
 export const HIDE_DEPTH = 3;
@@ -32,6 +53,68 @@ export const WALL_IN_BLOCKS = 10;
 const DESCENT_TICKS = 20;
 
 
+type DigBlock = Parameters<Bot["dig"]>[0];
+
+/**
+ * Dig `block` with the hide's signal tied to the dig: an abort ends the pending dig (`stopDigging`, as
+ * `positioning/fire-clearance.ts`), so a cancelled hide never leaves the bot digging on. The look comes first and apart:
+ * a `stopDigging` during Mineflayer's own look is a no-op and the dig would start after it.
+ */
+async function digUntilAborted(bot: Bot, block: DigBlock, signal: AbortSignal): Promise<void> {
+  await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+  signal.throwIfAborted();
+  const stopDigging = () => bot.stopDigging();
+  signal.addEventListener("abort", stopDigging, { once: true });
+  try {
+    await bot.dig(block, "ignore");
+  } finally {
+    signal.removeEventListener("abort", stopDigging);
+  }
+}
+
+const seconds = (ms: number) => (ms / 1000).toFixed(1);
+
+/**
+ * The failure that stops the shaft before a cell the bot cannot dig in the time the hide has left, or null. The shaft is
+ * dug only when too few blocks are carried to wall in (`WALL_IN_BLOCKS`), so skipping a cell leaves no shelter: the hide
+ * ends here, with the cells already dug named, and the decision answers with the next response. The time is the game's
+ * own dig time for the held tool (`bot.digTime`), no table of blocks.
+ */
+function slowShaftCellFailure(build: ShelterBuild, block: DigBlock): StepFailure | null {
+  const diggingMs = nativeDigTicks(build.bot.digTime(block)) * MS_PER_ON_TIME_TICK;
+  const leftMs = Math.max(0, build.constructionDeadline - monotonicNow());
+  if (diggingMs <= leftMs) return null;
+  return {
+    kind: "failed",
+    error:
+      `shaft cell ${block.name} digs in ${seconds(build.bot.digTime(block))} s, ${seconds(leftMs)} s left` +
+      `; ${seconds(diggingMs)} s including the server answer${shaftAlreadyDug(build)}. ` +
+      `A faster tool, another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
+  };
+}
+
+/** What the failure of a shaft cell says about the cells before it: the bot stands in them. */
+function shaftAlreadyDug(build: ShelterBuild): string {
+  return build.dug > 0 ? `; ${build.dug} shaft ${build.dug === 1 ? "cell" : "cells"} already dug, the bot stands in them` : "";
+}
+
+/**
+ * The failure that stops the shaft before a cell inside another owner's protected region, or null (ADR-012; the bot's own
+ * regions never refuse). Like a slow cell, skipping the cell leaves no shelter: the hide ends here, with the cells already
+ * dug named, and the decision answers with the next response.
+ */
+function foreignRegionShaftFailure(build: ShelterBuild, block: DigBlock): StepFailure | null {
+  const region = foreignRegionAt(build.bot, block.position);
+  if (region === null) return null;
+  const { x, y, z } = block.position;
+  return {
+    kind: "failed",
+    error:
+      `shaft cell ${block.name} at (${x}, ${y}, ${z}) is ${regionRefusalText(region)}${shaftAlreadyDug(build)}. ` +
+      `Another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
+  };
+}
+
 /** Dig one cell of the shaft and drop into it: "dug", "blocked" when the ground will not take it. */
 async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocked" | StepEnd> {
   const { bot, options, itemUse } = build;
@@ -40,6 +123,8 @@ async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocke
   const below = bot.blockAt(standing.offset(0, -1, 0));
   const under = bot.blockAt(standing.offset(0, -2, 0));
   if (!diggable(below) || !solid(under)) return "blocked";
+  const foreign = foreignRegionShaftFailure(build, below);
+  if (foreign) return foreign;
   const centered = await centerShelterCell(build, standing);
   if (shelterIntruder(bot, threatContext)) return "again";
   if (!centered) return { kind: "failed", error: "The bot could not centre over the shelter shaft" };
@@ -48,15 +133,17 @@ async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocke
   if (tool && bot.heldItem?.name !== tool.name) await bot.equip(tool, "hand");
   signal.throwIfAborted();
   if (constructionChanged(build, standing)) return "again";
+  const slow = slowShaftCellFailure(build, below);
+  if (slow) return slow;
   try {
-    await bot.dig(below, true);
+    await digUntilAborted(bot, below, signal);
   } catch {
     signal.throwIfAborted();
     return "blocked";
   }
   const landedBelow = () => bot.entity.onGround && bot.entity.position.y <= standing.y - 0.5;
   for (let waited = 0; waited < DESCENT_TICKS && !landedBelow(); waited += 1) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
   }
   build.dug += 1;
   if (!landedBelow()) {
@@ -91,22 +178,14 @@ async function centerForShelterRing(build: ShelterBuild, feet: Vec3): Promise<St
   const { bot, options } = build;
   // A body straddling a cell edge occupies the wall's destination. The
   // server refuses that block even though the target itself is air.
-  const floor = bot.blockAt(feet.offset(0, -1, 0));
-  const supportedCenter = floor?.shapes.some(
-    ([minX, , minZ, maxX, maxY, maxZ]) =>
-      minX <= 0.5 &&
-      maxX >= 0.5 &&
-      minZ <= 0.5 &&
-      maxZ >= 0.5 &&
-      Math.abs(feet.y - 1 + maxY - bot.entity.position.y) < 0.001,
-  );
-  if (shelterBlocks(build) > 0 && !supportedCenter) {
-    return { kind: "failed", error: "The shelter cell has no solid floor to centre on" };
+  if (shelterBlocks(build) > 0 && !floorHoldsCentre(bot, feet)) {
+    return { kind: "failed", error: "The shelter cell has no solid floor to centre on", refusal: describeShelterRefusal(build, "no_floor") };
   }
+  if (!constructionChanged(build, feet)) return null;
   const centered = shelterBlocks(build) === 0 || (await centerShelterCell(build, feet));
-  if (!bot.entity.onGround || !shelterFeet(bot).equals(feet) || shelterIntruder(bot, options.threatContext))
+  if (!bot.entity.onGround || !shelterFeet(bot).equals(feet) || (!centered && shelterIntruder(bot, options.threatContext)))
     return "again";
-  if (!centered) return { kind: "failed", error: "The bot could not centre inside the shelter walls" };
+  if (!centered) return { kind: "failed", error: "The bot could not centre inside the shelter walls", refusal: describeShelterRefusal(build, "not_centred") };
   return constructionChanged(build, feet) ? "again" : null;
 }
 
@@ -208,19 +287,117 @@ async function capShelter(
   return null;
 }
 
+/** What the margin pass did after the shell stood: the blocks it placed, the world age it took, and each cell it left open with why. */
+export type MarginPass = {
+  readonly placed: number;
+  readonly ticks: number;
+  /**
+   * `occupied`, `no_support`, `reserve`, `refused: <the placement's reason>` or `stopped: <why>`. The cell is a plain point,
+   * not a `Vec3`: the hide result goes into the survival receipt, and its `Facts` schema refuses a class instance
+   * (`hostile.test.ts` failed with one).
+   */
+  readonly skipped: { readonly cell: { readonly x: number; readonly y: number; readonly z: number }; readonly reason: string }[];
+};
+
+/** Why the margin pass cannot place another block (a death, fire or lava on the body, a changed stance, the reserve, a ban, a hazard), or null. */
+function marginPassStop(build: ShelterBuild, feet: Vec3): string | null {
+  const { bot, options } = build;
+  if (bot.health <= 0) return "stopped: dead";
+  if (isInFire(bot)) return "stopped: fire";
+  if (isInLava(bot)) return "stopped: lava";
+  if (constructionChanged(build, feet)) return "stopped: construction changed";
+  if (shelterBlocks(build) <= WALL_IN_BLOCKS) return "reserve";
+  if (!options.threatContext.policy.terrain.place) return "stopped: placement prohibited by policy";
+  const hazard = shelterHazard(build);
+  return hazard ? `stopped: ${hazard}` : null;
+}
+
+/**
+ * After the 10-cell shell stands, fill the open cells the body box expanded by `PROJECTILE_HIT_MARGIN` overlaps
+ * (`marginCells`), so a projectile's path to the body is closed as the recovery reads it. Best effort: a spare shell's worth of
+ * blocks stays carried (`WALL_IN_BLOCKS`), nothing is dug, the shell's own record (`walled`, `capped`, `refusal`,
+ * `blockedCells`) is never touched, an occupied cell or one with no support is skipped, and the pass ends on the first
+ * placement the server answered without the block, on a stop (`marginPassStop`) or on an abort (which throws).
+ */
+export async function sealMarginCells(build: ShelterBuild): Promise<MarginPass> {
+  const { bot, options, itemUse } = build;
+  const feet = shelterFeet(bot);
+  const cells = marginCells(bot, feet, nearestThreatDirection(bot, options.threatContext));
+  const startAge = bot.time?.age ?? 0;
+  const skipped: { cell: { x: number; y: number; z: number }; reason: string }[] = [];
+  let placed = 0;
+  let ended: string | null = null;
+  for (const cell of cells) {
+    const skip = (reason: string) => skipped.push({ cell: { x: cell.x, y: cell.y, z: cell.z }, reason });
+    options.signal.throwIfAborted();
+    ended ??= marginPassStop(build, feet);
+    if (ended) {
+      skip(ended);
+      continue;
+    }
+    if (occupiedCell(bot, cell)) {
+      skip("occupied");
+      continue;
+    }
+    if (!findPlacementSupport(bot, cell)) {
+      skip("no_support");
+      continue;
+    }
+    itemUse.lowerShield();
+    try {
+      const built = await buildProtection(bot, [cell], {
+        signal: options.signal,
+        mayContinue: () => shelterHazard(build),
+        terrain: options.threatContext.policy.terrain,
+        blockNames: options.blockNames,
+      });
+      placed += built.placed.length;
+      if (built.kind === "blocked") {
+        ended = "stopped: refused";
+        skip(`refused: ${built.reason}`);
+      }
+    } catch (cause) {
+      options.signal.throwIfAborted();
+      ended = "stopped: refused";
+      skip(`refused: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+  return { placed, ticks: (bot.time?.age ?? 0) - startAge, skipped };
+}
+
 /** Why the hide must stop before another construction pass (a hazard, a ban, a liquid, the deadline), or null. */
 function constructionStopped(build: ShelterBuild): StepEnd | null {
   const { bot, options } = build;
   const hazard = shelterHazard(build);
-  if (hazard) return { kind: "failed", error: hazard };
+  if (hazard) return { kind: "failed", error: hazard, refusal: describeShelterRefusal(build, "hazard", { hazard }) };
   if (!permitsHide(options.threatContext.policy, recoveryAvailable(bot, options.threatContext.food)))
-    return { kind: "failed", error: "[COMBAT_CONSTRAINED] Hiding is no longer permitted." };
+    return { kind: "failed", error: "[COMBAT_CONSTRAINED] Hiding is no longer permitted.", refusal: describeShelterRefusal(build, "constrained") };
   const liquid = shelterLiquidFailure(bot);
-  if (liquid) return liquid;
+  if (liquid) return { ...liquid, refusal: describeShelterRefusal(build, "liquid") };
   if (monotonicNow() >= build.constructionDeadline) {
-    return { kind: "failed", error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s` };
+    const open = blockedCellsText(build);
+    return {
+      kind: "failed",
+      refusal: describeShelterRefusal(build, "deadline"),
+      error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s${open ? `; still open: ${open}` : ""}`,
+    };
   }
   return null;
+}
+
+/** Finish the other walls, but hand an open shelter back after three consecutive intruder-blocked passes. */
+async function blockedShelterEnd(build: ShelterBuild): Promise<StepEnd | null> {
+  const blocked = [...build.blockedCells].filter(([, cell]) => cell.pass === build.pass && cell.count > 0);
+  const skipped = blocked.filter(([, cell]) => cell.count >= 3);
+  if (skipped.length) return {
+    kind: "failed",
+    refusal: describeShelterRefusal(build, "occupied"),
+    error: `The shelter is still open: skipped ${skipped.map(([key, cell]) => `${key} (${cell.reason})`).join("; ")} ` +
+      "after 3 consecutive construction passes. Evade or withdraw to another shelter cell.",
+  };
+  if (!blocked.length) return null;
+  await waitForShelterTicks(build, 1, "construction");
+  return "again";
 }
 
 /**
@@ -233,15 +410,16 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   options.signal.throwIfAborted();
   const stopped = constructionStopped(build);
   if (stopped) return stopped;
+  build.pass += 1;
   const intruder = shelterIntruder(bot, options.threatContext);
-  if (intruder) {
+  if (intruder && (constructionChanged(build, shelterFeet(bot)) ||
+    (shelterBlocks(build) < WALL_IN_BLOCKS && build.walled === 0 && !build.capped))) {
     await repelShelterIntruder(build, intruder);
-    return "again";
   }
   // Knockback can change both the occupied cell and its floor. Pick the
   // construction origin only after the body has landed, then recheck it.
   if (!bot.entity.onGround) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
     return "again";
   }
   const sides = options.firstWallDirection
@@ -254,6 +432,8 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   if (ringed) return ringed;
   const capped = descended >= 2 || build.walled > 0 ? await capShelter(build, feet, sides, descended) : null;
   if (capped) return capped;
+  const blocked = await blockedShelterEnd(build);
+  if (blocked) return blocked;
   if (descended === 0 && build.walled === 0 && !build.capped) {
     return {
       kind: "failed",
@@ -266,13 +446,13 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   // observed partial shell and retry after a tick within the same attempt,
   // instead of opening it to escape or digging a new shaft underneath it.
   if (
-    options.holdWhile &&
+    (options.holdWhile || [...build.blockedCells.values()].some((cell) => cell.pass === build.pass)) &&
     (build.walled > 0 || build.capped) &&
     !enclosedInPlace(bot, options.blockNames) &&
     shelterHazard(build) === null &&
     monotonicNow() < build.constructionDeadline
   ) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
     return "again";
   }
   return "built";

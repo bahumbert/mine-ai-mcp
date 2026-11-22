@@ -9,7 +9,7 @@ export const VIEW_BLOCKS_DESCRIPTION =
   "View blocks without moving. find lists, for each named block kind, the nearest ones across every loaded chunk with their distance and what is above and below. " +
   "box reads every cell of a small box around a point as one grid per layer. cells reads exact cells. " +
   "kinds gives named blocks' game data: the tool class that mines them fast, the tools without which they drop nothing, and the game's block tags they belong to (logs, crops...). " +
-  "Each reports the block name and whether it is solid, open, or liquid, and a liquid's source or flowing level. " +
+  "Each reports the block name and whether it is solid, open, or liquid, and a liquid's source or flowing level; a cell read by cells or find that holds water (a water plant or a waterlogged block too) says so, and a found block under water or roofed over says so. " +
   "Use it to locate obsidian, water, lava, ore, or chests before acting, and to see what is under and around the bot or a target.";
 
 /**
@@ -142,12 +142,25 @@ export const observedBlockSchema = z.strictObject({
   /** A liquid's level: 0 is a source, higher is flowing and thinner. */
   level: z.number().int().nonnegative().optional(),
   waterlogged: z.boolean().optional(),
+  /**
+   * Present (true) when the cell holds water: liquid water, a water plant such as kelp or seagrass, or a waterlogged block
+   * (navigation's `cellHoldsWater`, read per cell). Absent when it does not or the cell is not loaded, so a dry answer is unchanged.
+   */
+  holds_water: z.literal(true).optional(),
 });
+
+/**
+ * What lies over a found block when it is not simply open: `under_water` (its own cell, or the first cell over the stack
+ * of the same blocks, holds water) or `roofed` (a solid block that is no tree part covers the column); absent when open
+ * (`situationReader`, `src/world/target-situation.ts`).
+ */
+export const FOUND_SITUATIONS = ["under_water", "roofed"] as const;
 
 export const foundBlockSchema = observedBlockSchema.extend({
   distance: z.number().nonnegative(),
   above: z.string(),
   below: z.string(),
+  situation: z.enum(FOUND_SITUATIONS).optional(),
 });
 
 /**
@@ -161,6 +174,10 @@ export const blockKindSchema = z.strictObject({
   /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's own geometry. */
   full_cube: z.boolean(),
   harvest: z.array(z.string()).nullable(),
+  /** The registry's `hardness`, a unitless number (dirt 0.5, obsidian 50; the break time also depends on the tool, unmeasured); null when the block cannot be dug (`diggable` false, hardness below 0 or missing). */
+  hardness: z.number().nonnegative().nullable(),
+  /** Whether the block holds a fluid in its default state: water, lava, a water plant or a waterlogged state (navigation's `holdsWater` plus `isLiquid`). */
+  fluid: z.boolean(),
 });
 
 /**
@@ -169,6 +186,14 @@ export const blockKindSchema = z.strictObject({
  */
 export const namedBlockKindSchema = blockKindSchema.extend({
   tags: z.array(z.string()),
+});
+
+/**
+ * A box's game data for one block name: the {@link namedBlockKindSchema} and whether the registry knows the name
+ * (false for the fallback kind of a cell the bot has not loaded, `"unloaded"`).
+ */
+export const boxBlockKindSchema = namedBlockKindSchema.extend({
+  known: z.boolean(),
 });
 
 export const viewBlocksReportSchema = z.strictObject({
@@ -202,7 +227,7 @@ export const viewBlocksReportSchema = z.strictObject({
         }),
       ),
       /** Game data for each block name in the box. */
-      kinds: z.record(z.string(), blockKindSchema),
+      kinds: z.record(z.string(), boxBlockKindSchema),
     })
     .nullable(),
   cells: z.array(observedBlockSchema),
@@ -214,6 +239,7 @@ export type ObservedBlock = z.output<typeof observedBlockSchema>;
 export type FoundBlock = z.output<typeof foundBlockSchema>;
 export type BlockKind = z.output<typeof blockKindSchema>;
 export type NamedBlockKind = z.output<typeof namedBlockKindSchema>;
+export type BoxBlockKind = z.output<typeof boxBlockKindSchema>;
 export type ViewBlocksReport = z.output<typeof viewBlocksReportSchema>;
 
 export const viewBlocksResultSchema = actionResultSchema({ blocks: viewBlocksReportSchema });

@@ -15,24 +15,33 @@ const WATER = {
   traits: { empty: true, liquid: "water" as const, liquidSource: true, safeToBreak: false },
 };
 
-/** A pillar top at `top` with a pool east of it: `depth` water blocks over a stone floor at y 0, air above. */
-function pillarOverPool(top: number, depth: number): MemoryWorld {
+const FLOWING_WATER = { ...WATER, traits: { ...WATER.traits, liquidSource: false } };
+
+/**
+ * A pillar top at `top` with a pool east of it: `depth` water blocks over a stone floor at y 0, air above.
+ * `water` is the block the pool is made of (source water by default).
+ */
+function pillarOverPool(top: number, depth: number, water: typeof WATER = WATER): MemoryWorld {
   const world = new MemoryWorld();
   for (let x = -2; x <= 3; x += 1)
     for (let z = -2; z <= 2; z += 1)
       for (let y = 0; y <= top + 3; y += 1) {
         const pillar = x === 0 && z === 0 && y <= top - 1;
         const pool = x >= 1 && y >= 1 && y <= depth;
-        world.load({ x, y, z }, y === 0 || pillar ? SOLID : pool ? WATER : AIR);
+        world.load({ x, y, z }, y === 0 || pillar ? SOLID : pool ? water : AIR);
       }
   return world;
 }
 
-function dropsEast(world: MemoryWorld, top: number): Array<{ y: number; kind: string }> {
+function dropsEast(
+  world: MemoryWorld,
+  top: number,
+  reach: { maximumBucketDrop?: number } = {},
+): Array<{ y: number; kind: string }> {
   return createMovementCatalogue()
     .generate(
       planningStart({ x: 0, y: top, z: 0 }),
-      { world, policy: createMovementPolicy({ allowDigging: false, allowPlacing: false }), player: WELL_FED },
+      { world, policy: createMovementPolicy({ allowDigging: false, allowPlacing: false, ...reach }), player: WELL_FED },
       { submergedAtEyes: false, onGround: true, aquaAffinity: false, effects: {} },
     )
     .toArray()
@@ -50,6 +59,28 @@ test("a fall into one-deep water is refused", () => {
 
 test("a dry fall of five is still refused", () => {
   assert.deepEqual(dropsEast(pillarOverPool(6, 0), 6), []);
+});
+
+// A fall past maximumDrop only cancels its damage in source water: flowing water is not a block the fall lands in
+// (spec 2026-11-07-p4-06b D6, cause 6).
+test("a fall past maximumDrop into flowing water is not offered", () => {
+  assert.deepEqual(dropsEast(pillarOverPool(30, 2, FLOWING_WATER), 30), []);
+});
+
+test("a fall past maximumDrop into 2 cells of source water is offered", () => {
+  assert.deepEqual(dropsEast(pillarOverPool(12, 2), 12), [{ y: 2, kind: "drop" }]);
+});
+
+// The same rule inside the dry-reach loop, which a bucket reach (maximumBucketDrop) lengthens past maximumDrop (3):
+// 10 up is a fall of 8, so the flowing landing is refused and, as a liquid, is no bucket landing either.
+test("with a bucket reach, a fall past maximumDrop into flowing water is not offered, into source water it is", () => {
+  const reach = { maximumBucketDrop: 80 };
+  assert.deepEqual(dropsEast(pillarOverPool(10, 2, FLOWING_WATER), 10, reach), []);
+  assert.deepEqual(dropsEast(pillarOverPool(10, 2), 10, reach), [{ y: 2, kind: "drop" }]);
+});
+
+test("a drop within the dry reach into 2-deep flowing water is still offered", () => {
+  assert.deepEqual(dropsEast(pillarOverPool(4, 2, FLOWING_WATER), 4), [{ y: 2, kind: "drop" }]);
 });
 
 const { bot: registryBot } = createFakeBot();

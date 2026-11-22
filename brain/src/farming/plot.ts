@@ -31,6 +31,17 @@ export function farmPlot(centre: Position, size: FarmSize): FarmPlot {
 }
 
 /**
+ * The box a new farm protects and must keep clear of other protected areas: the plot plus one ring around it, from
+ * one block under the soil to two above it (the crops and the head room over them).
+ */
+export function farmBox(plot: FarmPlot): { readonly min: Position; readonly max: Position } {
+  return {
+    min: { x: plot.min.x - 1, y: plot.water.y - 1, z: plot.min.z - 1 },
+    max: { x: plot.max.x + 1, y: plot.water.y + 2, z: plot.max.z + 1 },
+  };
+}
+
+/**
  * A new farm right behind the character, away from the player it is for (or south without one), as a house is
  * placed: the asker never stands on it. Its soil is the ground she stands on. The site is not surveyed (backlog).
  */

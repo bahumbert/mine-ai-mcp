@@ -27,4 +27,11 @@ client:
   command: bun
   args: ["../../src/client-host.ts", "../../src/ender-dragon.ts"]
 params: { phase: crystals, crystal_strategy: melee, crystal_approach: staircase, call_gap_ticks: 20 }
-goal: { kind: entityCount, entity: end_crystal, max: 0, timeout: 1800 }
+goal:
+  kind: all
+  stillTicks: 1900 # part4-a3 T25g: longest passing still span 947 ticks (20 tps 947 of n 20, 10 tps 640 of n 15, the saved trials before and after T25f; older passes, plan T25g step 1: 20 tps 223-505, 10 tps 126-422, all shorter); 2x = 1894, rounded up to 20 (S1): 1900; dragon breath cloud life max 598 (n 388).
+  timeout: 1800
+  goals:
+    - { kind: entityCount, entity: end_crystal, max: 0 }
+    - { kind: survive, seconds: 1 }
+    - { kind: completion, who: DragonFighter }

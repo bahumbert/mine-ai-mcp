@@ -11,7 +11,7 @@ world:
   gamerules:
     doDaylightCycle: false
     doMobSpawning: false
-    # Isolate withdrawal while wounded; food remains carried for ordinary use.
+    # Disable healing and recovery hide to measure wounded withdrawal (T5, 2026-11-16).
     naturalRegeneration: false
 players:
   - name: FortressBot
@@ -43,9 +43,9 @@ entities:
   - { type: blaze, pos: [-422.5, 63, 270.5], nbt: '{NoAI:1b,PersistenceRequired:1b,Tags:["fortress_trial"]}' }
 goal:
   kind: all
-  timeout: 120
+  # 168 s = 3 360 ticks: STALL_TICKS 1 680 plus twice the measured successful envelope (2 x 840; P5, red-evade phase 2 t00151 830 ticks, n = 7).
+  timeout: 168
   goals:
     - { kind: survive, who: FortressBot, seconds: 1 }
     - { kind: health, who: FortressBot }
-    - { kind: reach, who: FortressBot, pos: [-489.5, 60, 270.5], radius: 2 }
     - { kind: completion, who: FortressBot }

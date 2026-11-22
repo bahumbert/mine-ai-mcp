@@ -4,9 +4,10 @@ import { DEFAULT_COMBAT_POLICY } from "./contract.js";
 import { combatDecisionEvidence, decideCombatResponse, type CombatDecisionFacts } from "./decision.js";
 import { decideFightBoundary } from "./fight-boundary.js";
 import { replayCombatDecision } from "./replay.js";
+import { combatDecisionFacts } from "../../../test-support/combat.js";
 
 function facts(): CombatDecisionFacts {
-  return {
+  return combatDecisionFacts({
     policy: DEFAULT_COMBAT_POLICY,
     health: 11,
     burning: false,
@@ -17,10 +18,9 @@ function facts(): CombatDecisionFacts {
     shield: true,
     contacts: [],
     fireball: null,
-    unreachable: new Set(),
     answeredFights: new Map(),
     answered: new Set(),
-  };
+  });
 }
 const purpose = { kind: "pursuit", targetId: 7, minimumHealth: 12 } as const;
 const refuge = { returnable: true, atProtection: false, foodLow: false, foodAvailable: false };

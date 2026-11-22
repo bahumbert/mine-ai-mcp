@@ -43,6 +43,42 @@ export function likeliestOrdinaryDrop(block: string, version: string): string | 
   return best?.item ?? null;
 }
 
+/** What a break had in hand and in front of it: the facts the loot table's conditions ask about. */
+export interface BreakConditions {
+  /** The held item's name, null with an empty hand. */
+  readonly heldItem: string | null;
+  readonly silkTouch: boolean;
+  /** The block's state as it stood before the break, values as text (`{ half: "lower" }`). */
+  readonly state: Readonly<Record<string, string>>;
+}
+
+/** `drops`: the loot table guarantees an item; `nothing`: it guarantees none; `unknown`: no table for this block or version. */
+export type DropExpectation = "drops" | "nothing" | "unknown";
+
+/** A drop's tool condition holds when silk touch or the held item is one of the tools it names (`shears or silk_touch`). */
+function toolConditionMet(tool: string | undefined, conditions: BreakConditions): boolean {
+  if (tool === undefined) return true;
+  return tool.split(" or ").some((name) => (name === "silk_touch" ? conditions.silkTouch : name === conditions.heldItem));
+}
+
+function stateConditionMet(state: BlockDrop["state"], conditions: BreakConditions): boolean {
+  return Object.entries(state ?? {}).every(([property, value]) => conditions.state[property] === value);
+}
+
+/**
+ * Whether breaking `block` as `conditions` says should leave an item behind: some drop with chance 1 whose tool and
+ * state conditions hold. A chance-only drop (a sapling from leaves) is not a guarantee, so a missing one is bad luck,
+ * not a lost drop. The harvest tier (stone by hand) is not in the loot tables: the caller asks the registry first.
+ */
+export function expectedDrop(block: string, version: string, conditions: BreakConditions): DropExpectation {
+  const drops = blockDropsData(version)?.blocks[block];
+  if (drops === undefined) return "unknown";
+  const guaranteed = drops.some(
+    (drop) => drop.chance >= 1 && toolConditionMet(drop.tool, conditions) && stateConditionMet(drop.state, conditions),
+  );
+  return guaranteed ? "drops" : "nothing";
+}
+
 /**
  * The ripe state of a crop: the growth `age` its loot table asks before the crop drops (`{ age: "7" }` for wheat). Other
  * state conditions are not ripeness (tall grass drops from its lower half).

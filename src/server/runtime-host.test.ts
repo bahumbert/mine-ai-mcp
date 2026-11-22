@@ -4,13 +4,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { plugin as toolPlugin } from "mineflayer-tool";
 import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
+import { emitFakeTags } from "../test-support/fake-bot/fake-bot-tags.js";
+import { serverTagsOf } from "../world/server-tags.js";
+import { sleepMs } from "../utils/wall-timers.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
@@ -20,7 +23,7 @@ const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
 const TOOL_PLUGIN_PHYSICS_LISTENERS = await (async () => {
   const { bot } = createFakeBot();
   bot.loadPlugin(toolPlugin);
-  await delay(0);
+  await sleepMs(0);
   return bot.listenerCount("physicsTick");
 })();
 
@@ -64,7 +67,7 @@ async function answeredWhileClockMoves<T>(clock: { advance(ms: number): Promise<
   const deadline = performance.now() + ROUTE_ANSWER_REAL_MS;
   while (!settled && performance.now() < deadline) {
     await clock.advance(100);
-    await delay(5);
+    await nextTurn();
   }
   assert.ok(settled, `the route did not answer within ${ROUTE_ANSWER_REAL_MS} ms of real time`);
   return pending;
@@ -184,6 +187,16 @@ test(
   },
 );
 
+test("the host listens for the server's tags packet on the bot it creates", async (t) => {
+  const options = await configuration(t);
+  const { bot } = connectedBot(t);
+  await using _host = await startRuntimeHost(source, options);
+  assert.equal(serverTagsOf(bot), null);
+  // A real server never sends an empty packet: one group with one measured tag (`fake-bot-tags.ts`).
+  emitFakeTags(bot, [{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:swords", entries: [bot.registry.itemsByName.diamond_sword!.id] }] }]);
+  assert.notEqual(serverTagsOf(bot), null);
+});
+
 test("health publishes the bot's own slots and the calls an observer cannot otherwise see", async (t) => {
   const options = await configuration(t);
   connectedBot(t, { 36: { name: "cobblestone", count: 12 }, 5: { name: "iron_helmet", count: 1 } });
@@ -198,8 +211,8 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
   assert.deepEqual(health.minecraft.inventory, [
     // A worn stack is a prismarine Item, as the real window holds: its maximum is the 1.21.4 data's
     // (`prismarine-item` index.js:41, 50-51) and a new helmet has used none. No contract check covers armour yet.
-    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 } },
-    { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null },
+    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 }, families: ["helmet"] },
+    { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null, families: [] },
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);
 });

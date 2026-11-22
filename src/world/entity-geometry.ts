@@ -38,3 +38,14 @@ export function exposedBodyFrom(world: BlockRaycaster, from: Vec3, body: EntityB
     p.minus(side).offset(0, body.height / 2, 0),
   ].some((point) => clearCombatRay(world, from, point));
 }
+
+/**
+ * Whether a shooter's eye, or either shoulder of it across its width, sees the body: the projectile
+ * verdict, the cover goal and the combat helpers share this one geometry.
+ */
+export function shooterSeesBody(world: BlockRaycaster, shooter: EntityBody, body: EntityBody): boolean {
+  const eye = shooter.position.offset(0, shooter.height * 0.85, 0);
+  const half = shooter.width / 2;
+  return [eye, eye.offset(half, 0, 0), eye.offset(-half, 0, 0), eye.offset(0, 0, half), eye.offset(0, 0, -half)]
+    .some((from) => exposedBodyFrom(world, from, body));
+}

@@ -1,6 +1,6 @@
 /**
  * The fake bot's windows: `clickWindow`, `transfer` and the container windows, which are Mineflayer's own
- * `inventory.js` and `chest.js`, installed on a scratch object that borrows the bot (as `fake-bot-find-blocks.ts` does
+ * `inventory.js`, `chest.js` and `furnace.js`, installed on a scratch object that borrows the bot (as `fake-bot-find-blocks.ts` does
  * for `blocks.js`). Its handlers listen on the fake client, so the server's `set_slot`, `window_items` and `open_window`
  * (`fake-window-server.ts`) reach the bot through Mineflayer's own code, and its clicks and transfers are the library's.
  */
@@ -21,11 +21,11 @@ const QUICK_BAR_START = 36;
 type Plugin = (scratch: object, options: { hideErrors: boolean }) => void;
 type WindowApi = Pick<
   Bot,
-  "clickWindow" | "consume" | "closeWindow" | "putAway" | "putSelectedItemRange" | "transfer" | "moveSlotItem" | "openBlock" | "openContainer" | "openChest" | "openDispenser" | "updateHeldItem"
+  "clickWindow" | "consume" | "closeWindow" | "putAway" | "putSelectedItemRange" | "transfer" | "moveSlotItem" | "openBlock" | "openContainer" | "openChest" | "openDispenser" | "openFurnace" | "updateHeldItem"
 >;
 
 /**
- * Install `inventory.js` (windows, clicks, transfers; its `activateBlock` serves `openBlock` and is not put on the bot: using other blocks is not answered here) and `chest.js` on a scratch object that borrows the
+ * Install `inventory.js` (windows, clicks, transfers; its `activateBlock` serves `openBlock` and is not put on the bot: using other blocks is not answered here), `chest.js` and `furnace.js` on a scratch object that borrows the
  * bot's registry, client, inventory, current window and look. What the plugins write to the scratch about the bot's
  * own inventory, quick bar and hand (they create a window of their own and a null quick bar slot) is dropped: the bot's are the
  * fake inventory's.
@@ -93,6 +93,7 @@ function installWindowPlugins(bot: FakeBot): WindowApi {
   const listeningBefore = new Set(bot._client.listeners("window_items"));
   (require("mineflayer/lib/plugins/inventory.js") as Plugin)(scratch, { hideErrors: true });
   (require("mineflayer/lib/plugins/chest.js") as Plugin)(scratch, { hideErrors: true });
+  (require("mineflayer/lib/plugins/furnace.js") as Plugin)(scratch, { hideErrors: true });
   installing = false;
   // The state id the login's `window_items` would have told the client (`inventory.js:34-38`: its first `window_items` listener only files the id).
   const [fileStateId] = bot._client.listeners("window_items").filter((listener) => !listeningBefore.has(listener));
@@ -153,6 +154,7 @@ export function attachFakeWindows(
     openContainer: async (...args) => predicted(await api().openContainer(...args)),
     openChest: async (...args) => predicted(await api().openChest(...args)),
     openDispenser: async (...args) => predicted(await api().openDispenser(...args)),
+    openFurnace: async (...args) => predicted(await api().openFurnace(...args)),
     updateHeldItem: () => api().updateHeldItem(),
   };
   Object.assign(bot, forwarded);

@@ -1,13 +1,13 @@
 /** What navigate reads of a destination's cells: standable ground, a column's surface, the shore near a watery target. */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { canOccupyWater, isSafeSupport, liveBlockReader, standsOnDryGround, type MineflayerBlock } from "../../navigation/index.js";
+import { canOccupyWater, cellsWithin, isSafeSupport, liveBlockReader, standsOnDryGround, type BlockPosition, type MineflayerBlock } from "../../navigation/index.js";
 import { tagsOf } from "../../world/block-tags.js";
 
 /** How far below a target to look for ground when refusing it, so the refusal can name the height instead. */
 const GROUND_SEARCH_DEPTH = 64;
 
-function supported(bot: Bot, feet: Vec3): boolean {
+function supported(bot: Bot, feet: BlockPosition): boolean {
   return isSafeSupport(liveBlockReader(bot)(feet.x, feet.y - 1, feet.z));
 }
 
@@ -25,16 +25,6 @@ export function targetSupported(bot: Bot, target: { x: number; y: number; z: num
   const centre = new Vec3(target.x, target.y, target.z);
   if (bot.blockAt(centre) === null) return true;
   return cellsWithin(centre, range).some((feet) => supported(bot, feet) || canOccupyWater(bot, feet));
-}
-
-/** The cells within `range` of `centre` (straight-line distance), x outermost, then y, then z. */
-function cellsWithin(centre: Vec3, range: number): Vec3[] {
-  const reach = Math.ceil(range);
-  const cells: Vec3[] = [];
-  for (let dx = -reach; dx <= reach; dx += 1)
-    for (let dy = -reach; dy <= reach; dy += 1)
-      for (let dz = -reach; dz <= reach; dz += 1) cells.push(centre.offset(dx, dy, dz));
-  return cells.filter((cell) => cell.distanceTo(centre) <= range);
 }
 
 /** How far around a watery target the existing shore search looks. */

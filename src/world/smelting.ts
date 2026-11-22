@@ -2,6 +2,11 @@
  * Furnace knowledge: the smelting recipes of each supported Minecraft version (generated from its server jar by
  * `smelting-extract.ts`, see `data/smelting/`) and the fuels a furnace burns.
  */
+import recipes_1_19_4 from "./data/smelting/1.19.4.json" with { type: "json" };
+import recipes_1_20_1 from "./data/smelting/1.20.1.json" with { type: "json" };
+import recipes_1_20_4 from "./data/smelting/1.20.4.json" with { type: "json" };
+import recipes_1_20_6 from "./data/smelting/1.20.6.json" with { type: "json" };
+import recipes_1_21_1 from "./data/smelting/1.21.1.json" with { type: "json" };
 import recipes_1_21_4 from "./data/smelting/1.21.4.json" with { type: "json" };
 import { itemTagsOf } from "./item-tags.js";
 import { nearestShipped } from "./shipped-data.js";
@@ -21,7 +26,7 @@ interface SmeltingData {
 }
 
 /** Shipped data files, by version. Add a file with `smelting-extract.ts`, then list it here. */
-const SHIPPED: readonly SmeltingData[] = [recipes_1_21_4];
+const SHIPPED: readonly SmeltingData[] = [recipes_1_19_4, recipes_1_20_1, recipes_1_20_4, recipes_1_20_6, recipes_1_21_1, recipes_1_21_4];
 
 /**
  * The smelting recipes for `version`: its own file, else the nearest older shipped one (recipes rarely change between

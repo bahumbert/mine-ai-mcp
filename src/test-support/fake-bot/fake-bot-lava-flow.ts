@@ -1,13 +1,15 @@
 /**
  * The server's lava flowing, as it answered contract checks `lava-over-hole` and `lava-over-passable` (Mine Labs 1.21.4,
- * 2026-10-24; facts `fire-lava-escape.md` "Flowing lava over a hole" and "Lava over sugar cane and a structure void"): every step
- * takes 30 server ticks from the tick the lava cell appeared. A lava source or a flowing level 2 with a floor under it fills each
- * open neighbour (air, on the four sides) with a flowing cell two levels higher (2, then 4). Lava with air under it pours into the
- * air as a falling column (level 8) and fills no cell beside it, and a falling column goes on down a cell every 30 ticks; with
- * lava under it, nothing happens. Lava over sugar cane or a structure void does not pour into them: both stay, and the lava stays
- * where it is. Lava set in the cell above a nether portal block (the frame's top) breaks the whole portal at once.
- * Not modelled, because not measured: a cell of level 4 and more spreading, a falling column spreading where it lands, the cells
- * beside a source over a hole or over sugar cane or a structure void, unfed lava drying up, lava meeting water, the Nether's
+ * 2026-10-24, and `lava-beside-head`, 2026-11-08; facts `fire-lava-escape.md` "Flowing lava over a hole", "Lava over sugar cane and
+ * a structure void" and "Lava beside the head cell over a hole"): every step takes 30 server ticks from the tick the lava cell appeared.
+ * Over a floor, a source or a flowing cell with a level left (0, 2, 4: not 6) fills each open neighbour (air, on the four sides) with a
+ * flowing cell two levels higher, and a falling column fills it with a flowing level 2. Over air, lava of any level pours a falling
+ * column (level 8) and fills no cell beside it, except a source: its second turn, once its column stands, fills the air beside it with
+ * a level 2. A falling column goes on down a cell every 30 ticks. Over lava (a column or a source), nothing happens, except a flowing
+ * level 2 under lava: it becomes a falling column (the only flowing level measured under lava). Lava over sugar cane or a structure
+ * void does not pour into them: both stay, and the lava stays where it is. Lava set in the cell above a nether portal block (the
+ * frame's top) breaks the whole portal at once.
+ * Not modelled, because not measured: the cells beside a source over sugar cane or a structure void, unfed lava drying up, lava meeting water, the Nether's
  * faster flow, anything but air being flowed into, lava updating when a block beside, around or under it changes (the cane under lava broken after the lava's turn does not make it pour), lava entering a portal from its
  * side or over a portal that stays.
  */
@@ -43,21 +45,38 @@ const isAirAt = (world: FakeWorld, cell: Vec3) => AIR_BLOCKS.has(world.blockAt(c
 /** The production list is `LAVA_CANNOT_ENTER` in `navigation/mineflayer/world.ts`; the fake keeps its own copy, from the same measure. */
 const LAVA_CANNOT_ENTER: ReadonlySet<string> = new Set(["sugar_cane", "structure_void"]);
 
-/** The lava at `cell` flows on once: over air it pours a falling column; a source or a level 2 over a floor fills the air beside it. */
-function flowOn(world: FakeWorld, cell: Vec3): void {
-  const level = lavaLevelAt(world, cell);
-  if (level === null || (level !== SOURCE_LEVEL && level !== LEVEL_STEP && level !== FALLING_LEVEL)) return;
-  const below = cell.offset(0, -1, 0);
-  if (lavaLevelAt(world, below) !== null) return;
-  if (isAirAt(world, below)) {
-    world.setCell(below, { name: "lava", properties: { level: FALLING_LEVEL } });
-    return;
-  }
-  if (level === FALLING_LEVEL || LAVA_CANNOT_ENTER.has(world.blockAt(below)?.name ?? "")) return;
+/** Fill the air cells beside `cell` with flowing lava of `level`. */
+function spreadSideways(world: FakeWorld, cell: Vec3, level: number): void {
   for (const [dx, dz] of SIDES) {
     const beside = cell.offset(dx, 0, dz);
-    if (isAirAt(world, beside)) world.setCell(beside, { name: "lava", properties: { level: level + LEVEL_STEP } });
+    if (isAirAt(world, beside)) world.setCell(beside, { name: "lava", properties: { level } });
   }
+}
+
+/**
+ * The lava at `cell` flows on once. Over air it pours a falling column (any level) and a source, whose column then stands under it,
+ * spreads sideways at its next turn (returns true: flow again). A flowing level 2 under lava becomes a falling column (contract check
+ * `lava-beside-head`: the head cell's level 2 over the feet cell's level 2; no other flowing level under lava was measured). Over a floor a
+ * source or a flowing cell with a level left fills the air beside it two levels higher; a falling column fills it with a flowing level 2.
+ */
+function flowOn(world: FakeWorld, cell: Vec3): boolean {
+  const level = lavaLevelAt(world, cell);
+  if (level === null) return false;
+  const below = cell.offset(0, -1, 0);
+  const belowLevel = lavaLevelAt(world, below);
+  if (belowLevel !== null) {
+    if (belowLevel === LEVEL_STEP) world.setCell(below, { name: "lava", properties: { level: FALLING_LEVEL } });
+    else if (level === SOURCE_LEVEL && belowLevel === FALLING_LEVEL) spreadSideways(world, cell, LEVEL_STEP);
+    return false;
+  }
+  if (isAirAt(world, below)) {
+    world.setCell(below, { name: "lava", properties: { level: FALLING_LEVEL } });
+    return level === SOURCE_LEVEL;
+  }
+  if (LAVA_CANNOT_ENTER.has(world.blockAt(below)?.name ?? "")) return false;
+  if (level === FALLING_LEVEL) spreadSideways(world, cell, LEVEL_STEP);
+  else if (level + LEVEL_STEP < FALLING_LEVEL) spreadSideways(world, cell, level + LEVEL_STEP);
+  return false;
 }
 
 /** The cells of the portal that `portalBlock` belongs to: nether portal blocks joined along the plane of its axis. */
@@ -106,7 +125,7 @@ export function attachFakeLavaFlow({ server, world }: LavaFlowParts): void {
     for (const [key, entry] of [...due]) {
       if (entry.tick > tick) continue;
       due.delete(key);
-      flowOn(world, entry.cell);
+      if (flowOn(world, entry.cell)) due.set(key, { cell: entry.cell, tick: tick + LAVA_FLOW_TICKS });
     }
   });
 }

@@ -45,7 +45,7 @@ test("says when Ollama or Java is missing, with the step that installs it", asyn
 });
 
 test("lists each port the stack uses and whether another program holds it", async () => {
-  const { root, manifest, settings, deps } = fixture((s) => ({ ...s, server: { kind: "local", port: 25_565, memoryMb: 4096 } }));
+  const { root, manifest, settings, deps } = fixture((s) => ({ ...s, server: { kind: "local", port: 25_565, memoryMb: 4096, program: "vanilla" } }));
   const owners = { 25_565: "other", [settings.controlPort]: "mine-ai" } as const;
   const text = (await runDoctor(root, manifest, settings, { ...deps, portOwner: async (port) => (owners as Record<number, "other" | "mine-ai">)[port] ?? "free" })).join("\n");
   assert.match(text, /25565.*another program/u);

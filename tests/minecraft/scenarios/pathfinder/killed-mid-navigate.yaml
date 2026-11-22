@@ -1,0 +1,28 @@
+template: ../../templates/hostile-night.yaml
+
+name: killed-mid-navigate
+tags: [regression, exclusive]
+description: >-
+  A death turns Mineflayer's physics off, and a tick wait that ignores the action's cancel signal then ends only at its
+  own 5 s timeout. An actor walking eighteen blocks east is killed (`/kill`) after one second: the navigate settles
+  cancelled within three seconds of the kill, not with a tick timeout, the actor respawns once, and the navigate
+  after the respawn arrives.
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/killed-mid-action.ts]
+
+params:
+  action: navigate
+  input: { x: 18, y: -60, z: 0, range: 1, dig: false }
+  killAfterMs: 1000
+  settleWithinMs: 3000
+  respawnWithinMs: 15000
+  nextStepBlocks: 5
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }

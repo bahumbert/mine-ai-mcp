@@ -1,0 +1,100 @@
+// A real foreign-region lava step must be placed, escaped from and removed before the next action.
+import { setTimeout as delay } from "node:timers/promises";
+import { Vec3 } from "vec3";
+import { z } from "zod";
+import type { ClientCompletion } from "mine-labs/client";
+import { arenaPoint } from "../arena/params.ts";
+import type { ScenarioContext } from "../scenario.ts";
+import { pendingLifeSavingPlacements } from "../../../src/world/life-saving-placements.ts";
+import { STALE_AGE_TICKS, waitForWorldAge } from "../../../src/world/world-age.ts";
+import { isInLava } from "../../../src/survival/perception/body.ts";
+import { run as escapePool } from "./lava-pool-escape.ts";
+import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
+
+// Match waitServerTicks' margin: the entry age may already be 19 server ticks old (scenario-ticks, 2026-11-15).
+const TIME_PACKET_MARGIN_TICKS = STALE_AGE_TICKS + 1;
+
+/** Require the server's answer, rather than Mineflayer's predicted air after digging. */
+export async function serverRemoved(context: ScenarioContext, cells: readonly Vec3[], sleep: (ms: number) => Promise<void> = delay): Promise<boolean> {
+  const confirmed = new Set<string>();
+  const answer = (message: string) => { if (message.startsWith("pool-air-")) confirmed.add(message); };
+  context.bot.on("messagestr", answer);
+  try {
+    cells.forEach((cell, index) => context.bot.chat(`/execute if block ${cell.x} ${cell.y} ${cell.z} minecraft:air run tellraw @s {"text":"pool-air-${index}"}`));
+    await waitForWorldAge(context.bot, 40 + TIME_PACKET_MARGIN_TICKS, {
+      wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, sleep,
+      until: () => confirmed.size === cells.length,
+    });
+    return confirmed.size === cells.length;
+  } finally {
+    context.bot.off("messagestr", answer);
+  }
+}
+
+/** Allow the safe cleanup to clear its ledger before checking the server's blocks. */
+export async function waitForPoolCleanup(bot: ScenarioContext["bot"], sleep: (ms: number) => Promise<void> = delay): Promise<void> {
+  await waitForWorldAge(bot, 600 + TIME_PACKET_MARGIN_TICKS, {
+    wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, sleep,
+    until: () => pendingLifeSavingPlacements(bot).length === 0,
+  });
+}
+
+/** The existing pool driver proves the escape; this wrapper proves the placement debt and the next action. */
+export async function run(context: ScenarioContext): Promise<ClientCompletion> {
+  const params = z.strictObject({
+    regionMin: arenaPoint(context.arena), regionMax: arenaPoint(context.arena), next: arenaPoint(context.arena),
+    gateMin: arenaPoint(context.arena), gateMax: arenaPoint(context.arena),
+    escape: z.record(z.string(), z.unknown()),
+  }).parse(context.scenario.params);
+  const corner = ([x, y, z]: number[]) => ({ x, y, z });
+  const region = await context.call("protect_region", {
+    corner_a: corner(params.regionMin), corner_b: corner(params.regionMax), owner: "Builder", label: "lava pool",
+    reason: "Emergency placements must be removed after escaping this pool.",
+  });
+  if (region.result.status !== "succeeded") return { status: "failed", detail: region.summary };
+  const seen = new Map<string, Vec3>();
+  let opened = false;
+  const observe = () => {
+    for (const entry of pendingLifeSavingPlacements(context.bot)) {
+      if (entry.kind === "block" && context.bot.blockAt(entry.cell)?.name === entry.block) seen.set(String(entry.cell), entry.cell.clone());
+    }
+    if (!opened && seen.size > 0) {
+      opened = true;
+      context.bot.chat(`/fill ${params.gateMin.join(" ")} ${params.gateMax.join(" ")} minecraft:air replace minecraft:stone`);
+    }
+  };
+  // The burn lasts from the last contact with lava: the wait before `navigate` counts its bound from here. Lava after the escape is a bug, not a thing to show: the cleanup
+  // dug the step while the body's footprint was on it (11 of 30 runs fell back into the pool before plan 2026-11-15-p4-34-cleanup-footprint T1), so the run fails on it.
+  let lastInLava = burnStartNow(context.bot);
+  let escaped = false;
+  let lavaTicksAfterEscape = 0;
+  const noteLava = () => {
+    if (!isInLava(context.bot)) return;
+    lastInLava = burnStartNow(context.bot);
+    if (escaped) lavaTicksAfterEscape++;
+  };
+  context.bot.on("blockUpdate", observe);
+  context.bot.on("physicsTick", observe);
+  context.bot.on("physicsTick", noteLava);
+  try {
+    const escape = await escapePool({ ...context, scenario: { ...context.scenario, params: params.escape } });
+    if (escape.status !== "succeeded") return escape;
+    escaped = true;
+    await waitForPoolCleanup(context.bot);
+    const cells = [...seen.values()];
+    const removed = cells.length > 0 && pendingLifeSavingPlacements(context.bot).length === 0 && await serverRemoved(context, cells);
+    if (!removed) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, pending: pendingLifeSavingPlacements(context.bot), lavaTicksAfterEscape }) };
+    // The bot still burns after the pool and the fire reflex claims the body again while it does: a `navigate` on a claim is refused `ACTION_BUSY` (two reds of 5, the claim 18 and 27 ms old).
+    const bodyFree = await waitUntilBodyFree(context, lastInLava);
+    if (!bodyFree.freed) return { status: "failed", detail: JSON.stringify({ escape, lavaTicksAfterEscape, bodyFree }) };
+    if (lavaTicksAfterEscape > 0) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, lavaTicksAfterEscape, why: "the bot touched lava again after its escape" }) };
+    const [x, y, z] = params.next;
+    const next = await context.call("navigate", { x, y, z, range: 0, dig: false, scaffold: false });
+    return { status: next.result.status === "succeeded" ? "succeeded" : "failed", detail: JSON.stringify({ escape, placed: cells, serverRemoved: removed, lavaTicksAfterEscape, bodyFree, next: next.result.status }) };
+  } finally {
+    context.bot.off("blockUpdate", observe);
+    context.bot.off("physicsTick", observe);
+    context.bot.off("physicsTick", noteLava);
+  }
+}

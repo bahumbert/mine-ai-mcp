@@ -21,13 +21,14 @@ geometry:
 players:
   - name: Actor
     pos: [0.5, -59, 0.5]
+    # needsFood (environment.ts:73-74): 15 > 14 at full health; the flat floor keeps health 20 (wounded branch <18).
+    food: 15
     inventory:
       - { item: cooked_beef, count: 16 }
 
 tick:
   - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
-  # Hunger from the moment the action walks off: the bot stands still until the request starts, and the effect is
-  # renewed every tick while it is away from where it started, so food falls below the reflex's threshold in seconds.
+  # One food point above needsFood's threshold; the maximum dose crosses it once the action walks off at any rate.
   - "execute as Actor unless entity @s[x=0,y=-59,z=0,distance=..3] run effect give @s minecraft:hunger 2 255 true"
 
 params:

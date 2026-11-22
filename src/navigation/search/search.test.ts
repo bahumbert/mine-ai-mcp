@@ -13,6 +13,10 @@ import { movementList } from "../movements/movement-candidates.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "../navigate.js";
 import type { StepField } from "../step-field.js";
+import { ExpectedMutationLedger } from "../execution/mutations.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
+import { MemoryWorld } from "../world/memory-world.js";
+import { blockKey, type NavigationObservation } from "../world/world.js";
 import type { SearchLimits } from "./search-result.js";
 import { IncrementalSearch, type SearchUpdate } from "./search.js";
 
@@ -96,16 +100,19 @@ function searchOver(
     limits?: SearchLimits;
     now?: () => number;
     stepField?: StepField;
+    world?: MemoryWorld;
+    observedStart?: NavigationObservation;
   } = {},
 ): IncrementalSearch {
   return new IncrementalSearch({
     id: options.id ?? goal.revision,
     start: planningStart(ORIGIN, options.scaffolds ?? 0),
     goal,
+    observedStart: options.observedStart,
     ...(options.limits ? { limits: options.limits } : {}),
     now: options.now ?? (() => 0),
     context: {
-      world: flatWorld(),
+      world: options.world ?? flatWorld(),
       policy: createMovementPolicy(),
       player: WELL_FED,
       catalogue,
@@ -113,6 +120,83 @@ function searchOver(
     },
   });
 }
+
+test("finish receives an observed pose only for its actual root ancestry, including an edited root", () => {
+  for (const observed of [true, false]) for (const edited of [true, false]) {
+    const pose = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
+    const start = planningStart(ORIGIN);
+    const overlay = edited ? start.overlay.apply({ kind: "break", position: { x: 3, y: 64, z: 0 }, stateId: 0 }) : start.overlay;
+    const seen: { x: number; overlay: string; actual?: NavigationObservation }[] = [];
+    const goal = { ...goalOf("provenance", () => 0), finish: (state, _context, _dig, actual) => {
+      seen.push({ x: state.node.feet.x, overlay: state.overlay.identity, actual });
+      return null;
+    } } satisfies ActiveGoal;
+    const catalogue = stubCatalogue((state) => {
+      if (state.node.feet.x === 0 && state.node.remainingScaffolds === 0) return [graphMovement(state, 1, 0, 1)];
+      if (state.node.feet.x !== 1) return [];
+      const returned = graphMovement(state, 0, 0, 1);
+      const future = planningStart(ORIGIN, 1);
+      return [{ ...returned, remainingScaffolds: 1, state: future }];
+    });
+    const search = new IncrementalSearch({ id: "ancestry", start: { node: { ...start.node, overlayId: overlay.identity }, overlay },
+      goal, observedStart: observed ? pose : undefined, now: () => 0,
+      context: { world: flatWorld(), policy: createMovementPolicy(), player: WELL_FED, catalogue } });
+    search.advance();
+    assert.equal(seen[0]?.actual, observed ? pose : undefined);
+    assert.deepEqual(seen.map((call) => call.x), [0, 1, 0]);
+    assert.equal(seen[2]?.overlay, start.overlay.identity, "an empty-overlay return is still a future node");
+    assert.ok(seen.slice(1).every((call) => call.actual === undefined), "future nodes never inherit the root pose");
+  }
+});
+
+test("the real catalogue routes around sole edge support while retaining centred descent", () => {
+  const world = flatWorld();
+  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) {
+    world.load({ x, y: 61, z }, { stateId: 1 });
+    world.load({ x, y: 60, z }, { stateId: 1 });
+  }
+  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
+  const target = { x: 1, y: 62, z: 0 };
+  const goal = destination(target);
+  for (const [x, observed] of [[0.85, true], [0.85, false], [1.5, true]] as const) {
+    const position = { x, y: 63, z: 0.5 };
+    const start = planningStart({ x: Math.floor(position.x), y: 63, z: 0 });
+    const search = new IncrementalSearch({ id: "real-edge", start, goal,
+      observedStart: observed ? { ...observation(), position } : undefined, now: () => 0,
+      context: { world, catalogue: createMovementCatalogue(),
+        policy: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }), player: WELL_FED } });
+    const { plan } = expect(search.advance(), "complete");
+    const breaks = plan.steps[0]!.operations.filter((op) => op.kind === "break");
+    assert.equal(breaks.some((op) => op.position.x === 1 && op.position.y === 62 && op.position.z === 0),
+      !observed || x === 1.5, JSON.stringify(plan.steps));
+  }
+});
+
+test("root support filtering keeps a safe sibling during expansion and reconstruction", () => {
+  for (const { y, cellY } of [{ y: 64.0, cellY: 63 }, { y: 64.5, cellY: 64 }]) {
+    const world = flatWorld();
+    world.load({ x: 0, y: cellY, z: 0 }, { stateId: 0 });
+    world.load({ x: 1, y: cellY, z: 0 }, { stateId: 1,
+      collisionShapes: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: y - cellY, maxZ: 1 }] });
+    const pose = { ...observation(0, cellY + 1, 0), position: { x: 0.85, y, z: 0.5 } };
+    const catalogue = stubCatalogue((state) => {
+      if (state.node.feet.x !== 0) return [];
+      const safe = graphMovement(state, 1, 0, 2);
+      const unsafe = { ...safe, cost: 1, step: { ...safe.step, id: "unsafe", operations: [
+        { kind: "break" as const, position: { x: 1, y: cellY, z: 0 }, expectedStateId: 1, toolType: null, brings: [], stance: state.node.feet },
+        ...safe.step.operations,
+      ] } };
+      return [unsafe, safe];
+    });
+    for (const actual of [pose, undefined]) {
+      const search = new IncrementalSearch({ id: "bank", start: planningStart({ x: 0, y: cellY + 1, z: 0 }),
+        goal: goalOf("bank", () => 0, (node) => node.feet.x === 1), observedStart: actual, now: () => 0,
+        context: { world, catalogue, policy: createMovementPolicy(), player: WELL_FED } });
+      const plan = expect(search.advance(), "complete").plan;
+      assert.equal(plan.steps[0]?.id, actual ? "0,0>1,0" : "unsafe");
+    }
+  }
+});
 
 /** The update carrying a route, asserting the search reached the named kind of answer. */
 function expect(update: SearchUpdate, kind: "complete" | "segment_ready") {
@@ -556,23 +640,17 @@ function roomOf(cells: readonly (readonly [number, number])[]): MovementCatalogu
 
 const NOWHERE = goalOf("nowhere", () => 50);
 
-test("an exhausted search in a two-cell pocket reports the farthest visited node at 1 block (Dirk, run 15 P2)", () => {
-  const update = searchOver(NOWHERE, roomOf([[0, 0], [1, 0]]), { id: "pocket" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [2, 1]);
-});
-
-test("a search that visited only its root reports the farthest visited node at 0", () => {
-  const update = searchOver(NOWHERE, roomOf([[0, 0]]), { id: "cell" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.equal(update.evidence.farthestVisited, 0);
-});
-
-test("a 3x3 room entered at its edge reports the farthest visited node at 2", () => {
-  const room = [-1, 0, 1].flatMap((z) => [0, 1, 2].map((x) => [x, z] as const));
-  const update = searchOver(NOWHERE, roomOf(room), { id: "room" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [9, 2]);
+test("an exhausted search reports the farthest visited node for its reachable room", () => {
+  const cases = [
+    { id: "pocket", cells: [[0, 0], [1, 0]] as const, visited: 2, farthest: 1 },
+    { id: "cell", cells: [[0, 0]] as const, visited: 1, farthest: 0 },
+    { id: "room", cells: [-1, 0, 1].flatMap((z) => [0, 1, 2].map((x) => [x, z] as const)), visited: 9, farthest: 2 },
+  ];
+  for (const row of cases) {
+    const update = searchOver(NOWHERE, roomOf(row.cells), { id: row.id }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+    assert.equal(update.kind, "no_path", row.id);
+    assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [row.visited, row.farthest], row.id);
+  }
 });
 
 test("the farthest visited node counts height as well as the level, and a search that succeeds or hits a limit reports it", () => {
@@ -593,4 +671,32 @@ test("the farthest visited node counts height as well as the level, and a search
   }] : []));
   const tall = searchOver(NOWHERE, climb, { id: "tall" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
   assert.equal(tall.evidence.farthestVisited, 3);
+});
+
+/*
+ * Lava that starts 3 cells from a route cell is outside the near-lava scan (2 cells), so the route gained no dependency
+ * there; the flow reaches the cell beside the route one flow step before it fills the route cell (plan 2026-11-07-p4-06b
+ * T3b). The lava dependencies are watched whatever lies near. The search reads no dimension: the Nether (flow every 10
+ * ticks) changes when the flow arrives, not which cell is watched.
+ */
+test("lava flowing into a cell beside a route cell invalidates the route, for a flow that began 3 cells away", () => {
+  const world = flatWorld();
+  const lava = { stateId: 10, traits: { empty: true, liquid: "lava", liquidLevel: 8, damaging: true } } as const;
+  world.load({ x: 1, y: 63, z: 3 }, lava);
+  const done = expect(
+    searchOver(destination({ x: 3, y: 63, z: 0 }), createMovementCatalogue(), { id: "beside-lava", world }).advance({
+      maximumExpansions: 1_000,
+      maximumMilliseconds: Infinity,
+    }),
+    "complete",
+  );
+  const beside = { x: 1, y: 63, z: 1 };
+  assert.ok(done.plan.lavaDependencies.has(blockKey(beside)), "the cell beside the route is a lava dependency");
+  assert.equal(done.plan.dependencies.has(blockKey(beside)), false, "and not a plain one: a non-lava change there is irrelevant");
+
+  const before = world.blockAt(beside.x, beside.y, beside.z);
+  world.load(beside, lava);
+  const flow = { position: beside, before, after: world.blockAt(beside.x, beside.y, beside.z), worldRevision: world.revision };
+  const ledger = new ExpectedMutationLedger();
+  assert.equal(ledger.classify(flow, done.plan.dependencies, monotonicNow(), done.plan.lavaDependencies), "invalidating");
 });

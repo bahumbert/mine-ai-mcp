@@ -1,30 +1,207 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import type { NavigationRuntime } from "../../../navigation/index.js";
+import { createNavigationRuntime, type NavigationRuntime } from "../../../navigation/index.js";
 import { TestEndCombat as EndCombat, attackedIds, onAttack } from "../../../test-support/combat.js";
 import {
   type FakeBotOptions,
   type FakeEntitySpec,
   createFakeBot,
   createFakeClock,
+  itemOf,
 } from "../../../test-support/fake-bot/index.js";
+import { addItemsToServerTag } from "../../../test-support/datapack-tags.js";
 import type { FootingRecovery } from "../footing.js";
 import { enclosedInPlace } from "../hide.js";
+import { closeShelter, fixtureCell, SHELTERED } from "../../../test-support/crystal-shelter-scene.js";
+import { confirmFakeDigs } from "../../../test-support/life-saving-placements.js";
+import towerFixture from "../../positioning/combat/first-entry-64510673-tower.fixture.json" with { type: "json" };
 import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
 
 import { PerchObservation } from "../../perception/combat/perch.js";
+import { CrystalObservation } from "../../perception/combat/crystal.js";
+import { DragonShotObservation } from "../../perception/combat/dragon-shot.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
+
+for (const rate of [20, 10]) for (const kind of ["dragon", "crystal"] as const) {
+  test(`the End's ${kind} bow draw counts twenty server ticks at ${rate} tps`, async () => {
+    const { bot, clock, server, combat } = endScene({ server: { ticksPerSecond: rate }, carried: { bow: 1, arrow: 3 },
+      entities: { 42: kind === "dragon" ? dragonAt(new Vec3(30, 84, 0), 1) : { name: "end_crystal", position: new Vec3(20, 70, 0) } } });
+    using _timers = clock.install();
+    using _pace = serverTickPace(bot);
+    await clock.advance(40_000 / rate);
+    let started = 0, releaseMs = 0, releaseTicks = 0, age = 0, speed = 0;
+    const activate = bot.activateItem.bind(bot), release = bot.deactivateItem.bind(bot);
+    bot.activateItem = offHand => { started = clock.now(); age = server.gameTime; activate(offHand); };
+    bot.deactivateItem = () => {
+      if (started && releaseMs === 0) { releaseMs = clock.now() - started; releaseTicks = server.gameTime - age; }
+      release();
+    };
+    bot.on("entitySpawn", entity => {
+      if (entity.name !== "arrow") return;
+      speed = entity.velocity.norm();
+      combat.kill(42); // Scripted finish: no arrow collision is simulated by the shared fake.
+    });
+    using observation = kind === "dragon" ? new DragonShotObservation(bot, 42) : new CrystalObservation(bot, 42, "bow");
+    const end = new EndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
+    const signal = new AbortController().signal;
+    const result = await clock.settle(observation instanceof DragonShotObservation
+      ? end.shootDragon(signal, observation) : end.crystal(42, signal, observation), 15_000);
+    assert.equal(result.attacks, 1);
+    assert.equal(releaseMs, 20_000 / rate);
+    assert.equal(releaseTicks, 20);
+    assert.ok(Math.abs(speed - 3) < 0.01);
+  });
+}
+import { swingReadiness } from "../../weapons/swing-readiness.js";
+import { planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
+import { fightSwordAfter } from "../../../test-support/swing-handoff.js";
+import { observation as navigationObservation, planningStart } from "../../../test-support/navigation.js";
+
+for (const rate of [20, 10]) test(`a crystal melee swing leaves shared recovery for the next fight at ${rate} tps`, async () => {
+  const cells: Record<string, string> = { "0,82,0": "bedrock" };
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++)
+    if (x * x + z * z <= 5) for (let y = 61; y <= 81; y++) cells[`${x},${y},${z}`] = "obsidian";
+  const { bot, clock, server, world } = createFakeBot({
+    dimension: "the_end", position: new Vec3(2.5, 81, -1.5), groundY: 60, cells,
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    slots: { 36: { name: "iron_sword" } },
+    entities: { 42: { name: "end_crystal", position: new Vec3(0.5, 83, 0.5) },
+      7: { name: "zombie", position: new Vec3(2.5, 81, 0.5) } },
+  });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  using observation = new CrystalObservation(bot, 42, "melee");
+  // An already-built staircase keeps this command-handoff test independent of construction receipts.
+  const plan = planCrystalStaircase(bot, bot.entities[42]!.position);
+  for (const cell of plan.cells) world.setCell(new Vec3(cell.position.x, cell.position.y, cell.position.z), cell.blockName);
+  await clock.advance(4_000);
+  const caller = new AbortController();
+  let attackedAt = -1;
+  const stopWatching = onAttack(server, id => {
+    if (id !== 42) return;
+    attackedAt = server.gameTime;
+    // The handoff follows the command; crystal explosion physics are not this test's subject.
+    caller.abort(new Error("crystal swing handed off"));
+  });
+  const navigation = { navigate: async () => ({ status: "completed", elapsedMs: 1 }) } as unknown as NavigationRuntime;
+  try {
+    await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+      .crystal(42, caller.signal, observation), SETTLE_LIMIT_MS), /crystal swing handed off/);
+    assert.deepEqual(attackedIds(server), [42]);
+    await clock.advance(5_000 / rate);
+    bot.entities[7]!.position.set(2.5, 81, 0.5);
+    assert.equal(await clock.settle(fightSwordAfter(bot, 7), 5_000), true);
+    assert.equal(server.gameTime - attackedAt, 13, "the next sword waits thirteen server ticks from the crystal swing");
+    assert.deepEqual(attackedIds(server), [42, 7]);
+  } finally { stopWatching(); }
+});
+
+test("crystal stance and return refuse a mid-height tower break and allow the pillar's scaffold", async () => {
+  const tower = new Vec3(0, 72, 0);
+  const scaffold = new Vec3(3, 75, 0);
+  const start = new Vec3(3.5, 76, 0.5);
+  const cells: Record<string, string> = { "0,82,0": "bedrock", "3,75,0": "cobblestone" };
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++)
+    if (x * x + z * z <= 5) for (let y = 61; y <= 81; y++) cells[`${x},${y},${z}`] = "obsidian";
+  const { bot, clock, server, combat } = endScene({
+    position: start, groundY: 60, cells, carried: { cobblestone: 64, diamond_pickaxe: 1, iron_sword: 1 },
+    entities: { 42: { name: "end_crystal", position: new Vec3(0.5, 83, 0.5) } },
+  });
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee", "pillar");
+  await using runtime = createNavigationRuntime(bot);
+  const answers: string[][] = [];
+  const navigate: NavigationRuntime["navigate"] = async ({ goal, movements }) => {
+    const readBreak = (position: Vec3) => movements.evaluateBreak(
+      runtime.world.blockAt(position.x, position.y, position.z), position, runtime.world,
+    ).decision.kind;
+    answers.push([readBreak(tower), readBreak(scaffold)]);
+    assert.ok(observation.staircase);
+    const stance = observation.staircase.stance.offset(0.5, 0, 0.5);
+    const destination = answers.length === 1 ? stance : start;
+    const feet = bot.entity.position.floored();
+    const resolved = goal.resolve(navigationObservation(feet.x, feet.y, feet.z));
+    assert.equal(resolved.kind, "active");
+    assert.ok(resolved.isSatisfied(planningStart(destination.floored(), 0).node, runtime.world));
+    server.sendPosition(destination);
+    bot.entity.onGround = true;
+    return { status: "completed", elapsedMs: 0 };
+  };
+  const off = onAttack(server, id => { if (id === 42) combat.kill(id); });
+  try {
+    const result = await clock.settle(new EndCombat(bot, { ...runtime, navigate }, { needed: false } as FootingRecovery)
+      .crystal(42, new AbortController().signal, observation), SETTLE_LIMIT_MS);
+    assert.equal(result.outcome, "crystal_destroyed", result.reason ?? "");
+    assert.deepEqual(answers, [["prohibited", "penalized"], ["prohibited", "penalized"]]);
+  } finally { off(); }
+});
+
+/** The saved first-entry tower with its bot shut in its own shelter (`closeShelter`), one crystal melee call against it. */
+function shelteredCrystalScene(ticksPerSecond: number) {
+  const cells = Object.fromEntries(Object.entries(towerFixture.cells).map(([key, state]) => [key, fixtureCell(state)]));
+  const crystal = new Vec3(towerFixture.crystal.x, towerFixture.crystal.y, towerFixture.crystal.z);
+  const scene = endScene({ cells, position: SHELTERED, groundY: null, simulatePhysics: true, server: { ticksPerSecond },
+    carried: { end_stone: 64, stone_pickaxe: 1 }, entities: { 42: { name: "end_crystal", position: crystal } } });
+  closeShelter({ ...scene, plan: planCrystalStaircase(scene.bot, crystal) });
+  confirmFakeDigs(scene);
+  return scene;
+}
+
+for (const rate of [20, 10]) test(`a crystal approach that starts in the bot's own closed shelter takes an exit leg with digging, then work legs that dig nothing at ${rate} tps`, async () => {
+  const { bot, clock } = shelteredCrystalScene(rate);
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee");
+  await using runtime = createNavigationRuntime(bot);
+  const legs: { leave: boolean; allowDigging: boolean; work: boolean }[] = [];
+  const caller = new AbortController();
+  const navigate: NavigationRuntime["navigate"] = options => {
+    const work = options.onArrival !== undefined;
+    const goal = work ? null : options.goal.resolve(navigationObservation(0, 0, 0));
+    if (legs.length >= 2 && legs.some(leg => leg.work)) caller.abort(new Error("enough legs seen"));
+    legs.push({ work, allowDigging: options.movements.allowDigging, leave: goal?.kind === "active" && goal.revision.startsWith("leave:") });
+    return runtime.navigate(options);
+  };
+  // `needed: false`: no footing recovery is pending; the crystal call under test never reads it before the approach.
+  const end = new EndCombat(bot, { ...runtime, navigate }, { needed: false } as FootingRecovery);
+  await clock.settle(end.crystal(42, caller.signal, observation), 45_000).catch(error => {
+    if (!caller.signal.aborted) throw error;
+  });
+  assert.equal(legs[0]?.leave, true, `the first leg is the exit leg: ${JSON.stringify(legs)}`);
+  assert.equal(legs[0]?.allowDigging, true);
+  assert.ok(legs.some(leg => leg.work));
+  assert.ok(legs.filter(leg => leg.work).every(leg => !leg.allowDigging));
+});
+
+test("a reflex taking the caller's signal during the crystal approach's exit dig leaves no navigation running", async () => {
+  const { bot, clock, server } = shelteredCrystalScene(20);
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee");
+  await using runtime = createNavigationRuntime(bot);
+  const caller = new AbortController();
+  using listeners = new DisposableStack();
+  listeners.defer(server.onPacket("block_dig", data => {
+    if ((data as { status: number }).status === 0) queueMicrotask(() => caller.abort(new Error("reflex took the body")));
+  }));
+  await clock.settle(new EndCombat(bot, runtime, { needed: false } as FootingRecovery).crystal(42, caller.signal, observation), 45_000)
+    .catch(error => { if (!caller.signal.aborted) throw error; });
+  assert.equal(caller.signal.aborted, true);
+  assert.equal(runtime.active, false);
+});
 
 /**
  * A bot in the End on a mocked clock: the code under test reads `Date.now` and sets timers, so each test installs the
  * clock (`using _timers = clock.install()`) before it builds a `PerchObservation`.
  */
 function endScene(options: FakeBotOptions = {}) {
-  return createFakeBot({
+  const harness = createFakeBot({
     dimension: "the_end",
     clock: createFakeClock({ mode: "mocked" }),
     ...options,
   });
+  swingReadiness(harness.bot); // Installed before actions by the connected runtime.
+  return harness;
 }
 
 /** The ender dragon: metadata 9 is its health, 16 its native phase. */
@@ -552,3 +729,46 @@ test("damage-interrupted breath excavation gives the next escape a route without
   assert.equal(result.outcome, "evaded");
   assert.equal(attempts, 2);
 });
+
+// A sword's sweep hits what stands within three blocks of the target: the check is "holds a member of the item family
+// `sword`" (tag `swords`), not a name ending in `_sword`. A bystander the loadout never saw (it walked up while the bot
+// aimed) is met by the withheld swing, so the cow arrives in `lookAt`.
+for (const held of [
+  { item: "diamond_sword", swordsTag: false },
+  { item: "stick", swordsTag: true },
+]) {
+  test(`the perch fight withholds its swing from a bystander while holding ${held.item}${held.swordsTag ? ", a datapack's sword" : ""}`, async () => {
+    const caller = new AbortController();
+    const reasons: string[] = [];
+    let swings = 0;
+    const scene = endScene({ position: new Vec3(12.5, 64, 0.5), carried: { [held.item]: 1 },
+      entities: { 42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([62, 64, 66], 5) } });
+    const { bot, clock, server, entities, inventory } = scene;
+    if (held.swordsTag) addItemsToServerTag(scene, "swords", [held.item]);
+    onAttack(server, () => {
+      swings++;
+      caller.abort(new Error("swung"));
+    });
+    using _timers = clock.install();
+    const navigation = { navigate: async () => {
+      bot.entity.position.set(0.5, 64, -1.5);
+      return { status: "completed", elapsedMs: 1 };
+    } } as unknown as NavigationRuntime;
+    const lookAt = bot.lookAt.bind(bot);
+    bot.lookAt = async (...args) => {
+      // The server puts the held item in the hand (a loadout built before the tag change would not) and a cow beside the bot.
+      inventory.updateSlot(bot.inventory.hotbarStart + bot.quickBarSlot, itemOf(bot.registry, held.item, 1));
+      if (!bot.entities[60]) entities.spawn({ id: 60, name: "cow", kind: "Passive mobs", position: new Vec3(0.5, 64, -0.5) });
+      return lookAt(...args);
+    };
+    using observation = new PerchObservation(bot, 42);
+    const fight = new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+      const reason = (JSON.parse(JSON.stringify(facts)) as { reason: string }).reason;
+      reasons.push(reason);
+      if (reason === "sweep_bystander") caller.abort(new Error("withheld"));
+    });
+    await assert.rejects(clock.settle(fight.perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /withheld|swung/);
+    assert.equal(swings, 0, "no swing while the cow stands within the sweep");
+    assert.ok(reasons.includes("sweep_bystander"), `reasons: ${reasons.join(", ")}`);
+  });
+}

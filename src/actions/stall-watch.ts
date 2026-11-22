@@ -10,6 +10,7 @@
  */
 import { AnchorTravel } from "../session/anchor-travel.js";
 import { monotonicNow, type Position3 } from "../utils/index.js";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline } from "../world/world-age.js";
 
 /** How often the work and the position are sampled when the caller does not say. */
 const SAMPLE_MS = 1_000;
@@ -17,6 +18,8 @@ const SAMPLE_MS = 1_000;
 export interface StallFacts {
   /** How long nothing changed, in seconds. */
   readonly seconds: number;
+  /** World ticks since the work last changed, or null if no world age was heard. */
+  readonly ticks: number | null;
   /** Blocks walked while nothing changed, rounded. */
   readonly walked: number;
 }
@@ -44,14 +47,15 @@ export interface StallWatchOptions {
   readonly position: () => Position3;
   /** Whether the bot is in water now: bobbing there is not walking. Default: never. */
   readonly inWater?: () => boolean;
-  readonly stallMs: number;
+  readonly stallTicks: number;
+  readonly worldAge: () => number | null;
   readonly sampleMs?: number;
   readonly clock?: StallClock;
   readonly describe: (facts: StallFacts) => string;
 }
 
 export interface StallWatch {
-  /** Aborted, with the described reason, once the work has not changed for `stallMs`. */
+  /** Aborted, with the described reason, once the work has not changed for `stallTicks`. */
   readonly signal: AbortSignal;
   /** The described reason once stalled, else null. */
   readonly reason: () => string | null;
@@ -59,29 +63,43 @@ export interface StallWatch {
   readonly close: () => void;
 }
 
+/** Sample confirmed work with a server-tick deadline and bounded stopped-server and wall fallbacks. */
 export function watchForStall(options: StallWatchOptions): StallWatch {
   const controller = new AbortController();
   let reason: string | null = null;
   let lastWork = options.work();
   const clock = options.clock ?? MONOTONIC_CLOCK;
-  let lastChange = clock.now();
+  const deadline = () => serverTickDeadline(options.worldAge, options.stallTicks, clock.now(), {
+    origin: "packet", wallMs: serverPacedWallMs(options.stallTicks),
+    stoppedMs: options.stallTicks * MS_PER_ON_TIME_TICK,
+  });
+  let budget = deadline();
   const travel = new AnchorTravel();
   travel.add(options.position(), false);
   let walked = 0;
-  const stop = clock.every(() => {
-    const here = options.position();
-    walked += travel.add(here, options.inWater?.() ?? false);
-    const work = options.work();
-    if (work !== lastWork) {
-      lastWork = work;
-      lastChange = clock.now();
-      walked = 0;
-      return;
+  let closed = false;
+  const stop = () => { if (!closed) { closed = true; cancel(); } };
+  const cancel = clock.every(() => {
+    try {
+      const here = options.position();
+      walked += travel.add(here, options.inWater?.() ?? false);
+      const work = options.work();
+      if (work !== lastWork) {
+        lastWork = work;
+        budget = deadline();
+        walked = 0;
+        return;
+      }
+      const now = clock.now();
+      if (!budget.passed(now)) return;
+      const elapsed = budget.elapsed(now);
+      reason = options.describe({ seconds: Math.round(elapsed.ms / 1_000), ticks: elapsed.ticks, walked: Math.round(walked) });
+      stop();
+      controller.abort(new Error(reason));
+    } catch (error) {
+      stop();
+      throw error;
     }
-    if (clock.now() - lastChange < options.stallMs) return;
-    reason = options.describe({ seconds: options.stallMs / 1_000, walked: Math.round(walked) });
-    stop();
-    controller.abort(new Error(reason));
   }, options.sampleMs ?? SAMPLE_MS);
   return {
     signal: controller.signal,

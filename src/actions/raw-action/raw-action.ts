@@ -1,7 +1,14 @@
 import type { Bot } from "mineflayer";
+import { attackAndRestart } from "../../survival/weapons/swing-readiness.js";
 import { Vec3 } from "vec3";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { familyIndexOf } from "../../world/item-families.js";
+import { regionChangeRefusal } from "../../world/protected-regions.js";
+import { bucketItem } from "../../world/buckets.js";
+import { observedEyeHeight } from "../../world/block-visibility.js";
+import { LIQUIDS, USE_RAY_REACH } from "../../world/liquid.js";
+import { pourRefusal } from "../use-bucket/pour-guard.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import {
@@ -158,6 +165,12 @@ async function look(
   }
 }
 
+/** A raw dig or placement is a world change outside every route: it obeys other owners' protected regions too (ADR-012). */
+function refuseForeignRegion(bot: Bot, cell: Vec3, change: "dig" | "placement"): void {
+  const refusal = regionChangeRefusal(bot, cell, change);
+  if (refusal !== null) throw new Error(`[RAW_REGION_PROTECTED] ${refusal}`);
+}
+
 async function dig(
   bot: Bot,
   request: Extract<RawActionRequest, { operation: "dig" }>,
@@ -177,6 +190,7 @@ async function dig(
     );
   if (!block)
     throw new Error("[RAW_TARGET_UNLOADED] The requested block is not loaded.");
+  refuseForeignRegion(bot, evidence.target, "dig");
   if (!blockWithinReach(bot, evidence.target))
     throw new Error(
       `[RAW_OUT_OF_REACH] Target is beyond the ${BLOCK_REACH}-block interaction reach.`,
@@ -225,6 +239,7 @@ async function place(
     .find((candidate) => candidate.name === request.blockName);
   if (!item)
     throw new Error(`[RAW_ITEM_MISSING] Bot carries no ${request.blockName}.`);
+  refuseForeignRegion(bot, evidence.target, "placement");
   await ownedOperation(
     () => bot.equip(item, "hand"),
     context.signal,
@@ -244,7 +259,7 @@ async function place(
       "[RAW_PLACE_NOT_OBSERVED] Mineflayer completed the attempt but the requested block was not observed at the target.",
     );
   const placedBlock = bot.blockAt(evidence.target);
-  if (botData && placedBlock && evidence.beforeBlock !== placedBlock.name) recordPlacedContainer(botData, bot, { name: placedBlock.name, position: evidence.target });
+  if (botData && placedBlock && evidence.beforeBlock !== placedBlock.name) recordPlacedContainer(botData, bot, { name: placedBlock.name, position: evidence.target }, familyIndexOf(bot));
 }
 
 function swing(
@@ -268,8 +283,28 @@ function swing(
       `[RAW_OUT_OF_REACH] Entity ${request.entityId} is beyond the ${ENTITY_REACH}-block interaction reach.`,
     );
   evidence.attempted = true;
-  bot.attack(entity);
+  attackAndRestart(bot, entity);
   evidence.effectObserved = null;
+}
+
+/** A raw bucket keeps the current look: the solid ray hit and face determine where its liquid lands. */
+function refuseUnsafeBucketUse(bot: Bot, hand: "hand" | "off-hand", evidence: Evidence): void {
+  const held = hand === "off-hand" ? bot.inventory.slots[bot.getEquipmentDestSlot("off-hand")] : bot.heldItem;
+  const liquid = LIQUIDS.find(liquid => held?.name === bucketItem(liquid, true));
+  if (!liquid) return;
+  const { yaw, pitch } = bot.entity;
+  const direction = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+  const eye = bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0);
+  const hit = bot.world.raycast(eye, direction, USE_RAY_REACH);
+  if (!hit) return;
+  const face = [FACES.down, FACES.up, FACES.north, FACES.south, FACES.west, FACES.east][hit.face];
+  if (!face) return;
+  const surface = (Reflect.get(hit, "position") as Vec3 | undefined) ?? new Vec3(hit.x, hit.y, hit.z);
+  const target = surface.plus(face);
+  evidence.target = target;
+  evidence.beforeBlock = bot.blockAt(target)?.name ?? null;
+  const refusal = pourRefusal(bot, target, liquid);
+  if (refusal) throw new Error(refusal);
 }
 
 async function useItem(
@@ -280,6 +315,7 @@ async function useItem(
 ) {
   const beforeHeld = bot.heldItem?.name ?? null;
   const beforeInventory = inventory(bot);
+  refuseUnsafeBucketUse(bot, request.hand, evidence);
   evidence.attempted = true;
   bot.activateItem(request.hand === "off-hand");
   try {

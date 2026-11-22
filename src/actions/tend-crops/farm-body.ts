@@ -9,18 +9,18 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { createMovements, nearGoal, observeMineflayerBlock, type NavigationRuntime } from "../../navigation/index.js";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { ripeState, seedOf } from "../../world/block-drops.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { droppedItemName, isItemEntity, pickupObservedItem, snapshotEntityIds } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
+import { regionChangeRefusal } from "../../world/protected-regions.js";
 import { snapshotTools } from "../../world/tool-tiers.js";
 import type { TendCropsRequest } from "./contract.js";
-import type { CellBlock, PlotFacts, FarmBody, FarmCell, TillFailure } from "./tend-plot.js";
+import type { CellBlock, PlotFacts, FarmBody, FarmCell, PlantFailure, TillFailure } from "./tend-plot.js";
 
 /** A player's block reach is 4.5 from the eyes; a little less keeps the use from failing at the edge. */
 const FARM_REACH = 4.2;
-/** Server answers to a right-click arrive within a few ticks; a use that changed nothing by then never will. */
-const USE_TIMEOUT_TICKS = 10;
 /** How far past the plot's edge a harvest drop may roll and still be fetched. */
 const DROP_MARGIN = 2;
 /** Looks with no drop to fetch before the sweep ends, this many ticks apart: drops still arriving are waited for. */
@@ -53,15 +53,22 @@ export function tilledSoilNames(bot: Pick<Bot, "registry">): string[] {
 
 /** The plot as the game data describes it: crops ripe in the state their crop drops in and planted from their unripe drop, ground cover by tag, tilled soil by state. */
 export function plotFacts(bot: Pick<Bot, "registry" | "version">): PlotFacts {
+  /** The loot table's `age` condition when it names one, else (nether wart drops the same at any age) the block's last age state; null with no age state. */
+  const ripeAge = (name: string): number | null => {
+    const age = Number(ripeState(name, bot.version)?.age);
+    if (Number.isInteger(age)) return age;
+    const ages = bot.registry.blocksByName[name]?.states?.find((state) => state.name === "age")?.num_values;
+    return ages === undefined ? null : ages - 1;
+  };
   return {
     isRipe(block) {
       if (block.properties.age === undefined) return null;
       const ripe = ripeState(block.name, bot.version);
       if (ripe !== null) return Object.entries(ripe).every(([key, value]) => String(block.properties[key]) === value);
-      // No loot condition to read (nether wart drops the same at any age): ripe at its last age.
-      const ages = bot.registry.blocksByName[block.name]?.states?.find((state) => state.name === "age")?.num_values;
-      return ages !== undefined && Number(block.properties.age) === ages - 1;
+      const last = ripeAge(block.name);
+      return last !== null && Number(block.properties.age) === last;
     },
+    ripeAge,
     seedOf: (name) => seedOf(name, bot.version),
     isGroundCover: (name) => isGroundCover(name, bot.version),
     isTilledSoil,
@@ -69,10 +76,10 @@ export function plotFacts(bot: Pick<Bot, "registry" | "version">): PlotFacts {
 }
 
 /** Server ticks that must pass after a use for an unchanged block to count as the server's answer (the server may be far behind). */
-export const TILL_CONFIRM_TICKS = 20;
-/** The hoe's wait: the world age moving this far past the use, bounded by the wall clock (a stopped server clock never answers). */
-const TILL_SERVER_TICKS = 40;
-const TILL_WALL_MS = 10_000;
+export const USE_CONFIRM_TICKS = 20;
+/** The hoe's and the seed's wait: the world age moving this far past the use, bounded by the wall clock (a stopped server clock never answers). */
+const USE_SERVER_TICKS = 40;
+const USE_WALL_MS = 10_000;
 
 interface UseFailure {
   readonly error: string;
@@ -83,13 +90,25 @@ interface UseFailure {
 
 /**
  * A failed hoe use as the plot sees it. The block is "unchanged" only once the server clock moved on by
- * {@link TILL_CONFIRM_TICKS} after the use with no block update (packets arrive in order: ours would have come first)
+ * {@link USE_CONFIRM_TICKS} after the use with no block update (packets arrive in order: ours would have come first)
  * and the hoe is still carried; a wait that ended earlier is "unconfirmed", an error or a broken hoe teaches nothing.
  */
 export function tillFailure(failure: UseFailure, hoeCarried: boolean): TillFailure {
   if (failure.serverTicksWaited === null || !hoeCarried) return { kind: "error", error: failure.error };
   if (failure.timedOut === true) return { kind: "unconfirmed" };
-  return failure.serverTicksWaited >= TILL_CONFIRM_TICKS ? { kind: "unchanged" } : { kind: "unconfirmed" };
+  return failure.serverTicksWaited >= USE_CONFIRM_TICKS ? { kind: "unchanged" } : { kind: "unconfirmed" };
+}
+
+/**
+ * A failed seed use as the plot sees it, judged as {@link tillFailure} judges the hoe's: "unchanged" only once the
+ * server clock moved {@link USE_CONFIRM_TICKS} with no block update and no seed left the hand (a consumed seed means the
+ * use went through: the crop may still arrive); a wait that ended earlier or on the wall clock is "unconfirmed"; a use
+ * that never went out (refused, thrown) is an "error". Neither of those two teaches anything.
+ */
+export function plantFailure(failure: UseFailure, seedsBefore: number, seedsAfter: number): PlantFailure {
+  if (failure.serverTicksWaited === null) return { kind: "error", error: failure.error };
+  if (failure.timedOut === true || failure.serverTicksWaited < USE_CONFIRM_TICKS || seedsAfter < seedsBefore) return { kind: "unconfirmed" };
+  return { kind: "unchanged" };
 }
 
 /**
@@ -117,19 +136,73 @@ export function cellBlockOf(block: NonNullable<ReturnType<Bot["blockAt"]>>, regi
   };
 }
 
+/**
+ * The sweep of the items the request dropped on its plot: walk to the nearest, again after each pickup, until a few quiet
+ * looks find none; what is left (a full inventory, no route) is named.
+ */
+async function collectPlotDrops(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: TendCropsRequest,
+  movements: () => ReturnType<typeof createMovements>,
+  drops: DropLedger,
+  signal?: AbortSignal,
+): Promise<{ left: string[] }> {
+  const inPlot = (position: Vec3) =>
+    position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
+    position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
+    position.y >= request.y - 1 && position.y <= request.y + 3;
+  const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && isItemEntity(entity) && inPlot(entity.position));
+  // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
+  // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
+  // 2 picked up; the rest lay on the plot).
+  let quiet = 0;
+  while (quiet < QUIET_LOOKS) {
+    signal?.throwIfAborted();
+    const target = dropped()
+      .filter((entity) => !drops.leftBehind.has(entity.id) && droppedItemName(entity) !== null)
+      .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+    if (target === undefined) {
+      quiet += 1;
+      await waitForTicksOrCancel(bot, QUIET_LOOK_TICKS, signal);
+      continue;
+    }
+    quiet = 0;
+    let collected = false;
+    const onCollect: BotEvents["playerCollect"] = (collector, item) => {
+      if (collector.id === bot.entity.id && item.id === target.id) collected = true;
+    };
+    bot.on("playerCollect", onCollect);
+    try {
+      const result = await pickupObservedItem(bot, {
+        entityId: target.id,
+        navigate: navigation.navigate,
+        movements: movements(),
+        hasArrived: () => collected,
+        ...(signal && { signal }),
+      });
+      if (result.kind !== "collected") drops.leftBehind.add(target.id);
+    } finally {
+      bot.off("playerCollect", onCollect);
+    }
+  }
+  return { left: dropped().map((entity) => droppedItemName(entity) ?? "an item not identified yet") };
+}
+
 export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal, drops = dropLedger(bot)): FarmBody {
   const vec = (cell: FarmCell) => new Vec3(cell.x, cell.y, cell.z);
   // Routes never dig the farmland they work, nor drop scaffold onto the plot.
   const movements = () => createMovements(bot, { protectedBlockNames: tilledSoilNames(bot), scaffolding: false });
   const inReach = (cell: FarmCell) => bot.entity.position.offset(0, 1.62, 0).distanceTo(vec(cell).offset(0.5, 0.5, 0.5)) <= FARM_REACH;
   const stack = (item: string) => bot.inventory.items().find((candidate) => candidate.name === item) ?? null;
+  const carried = (item: string) => bot.inventory.items().filter((candidate) => candidate.name === item).reduce((sum, candidate) => sum + candidate.count, 0);
   const hoe = () => {
     const name = snapshotTools(bot).tools.find((entry) => entry.class === "hoe")?.item ?? null;
     return name === null ? null : stack(name);
   };
 
   /** Right-click the top face of the block at `cell` holding `item`, until `watched` reads differently. */
-  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell, serverWait = false): Promise<UseFailure | null> => {
+  const useOnTop = async (cell: FarmCell, item: NonNullable<ReturnType<typeof stack>>, watched: FarmCell): Promise<UseFailure | null> => {
     const block = bot.blockAt(vec(cell));
     if (block === null) return { error: "the cell is not loaded", serverTicksWaited: null };
     const before = bot.blockAt(vec(watched))?.stateId;
@@ -138,8 +211,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       lookAt: { x: cell.x + 0.5, y: cell.y + 1, z: cell.z + 0.5 },
       on: { block, face: { x: 0, y: 1, z: 0 } },
       expectedCells: [{ position: watched, matches: (current) => current.stateId !== before }],
-      timeoutTicks: USE_TIMEOUT_TICKS,
-      ...(serverWait && { serverWait: { ticks: TILL_SERVER_TICKS, wallMs: TILL_WALL_MS } }),
+      serverWait: { ticks: USE_SERVER_TICKS, wallMs: USE_WALL_MS },
       ...(signal && { signal }),
     });
     return result.kind === "used" ? null : { error: result.error, serverTicksWaited: result.serverTicksWaited ?? null, ...(result.timedOut && { timedOut: true }) };
@@ -161,6 +233,8 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
     async breakBlock(cell) {
       const block = bot.blockAt(vec(cell));
       if (block === null) return "the cell is not loaded";
+      const refusal = regionChangeRefusal(bot, block.position, "dig");
+      if (refusal !== null) return refusal;
       try {
         await bot.dig(block, true);
       } catch (cause) {
@@ -173,59 +247,22 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
     async till(soil) {
       const item = hoe();
       if (item === null) return { kind: "no hoe" };
-      const failure = await useOnTop(soil, item, soil, true);
+      const failure = await useOnTop(soil, item, soil);
       if (failure === null) return null;
       return tillFailure(failure, hoe() !== null);
     },
 
     async plant(soil, item) {
       const seeds = stack(item);
-      return seeds === null ? `no ${item} is carried` : (await useOnTop(soil, seeds, { x: soil.x, y: soil.y + 1, z: soil.z }))?.error ?? null;
+      if (seeds === null) return { kind: "none carried" };
+      const before = carried(item);
+      const failure = await useOnTop(soil, seeds, { x: soil.x, y: soil.y + 1, z: soil.z });
+      return failure === null ? null : plantFailure(failure, before, carried(item));
     },
 
-    async collectDrops() {
-      const inPlot = (position: Vec3) =>
-        position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
-        position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
-        position.y >= request.y - 1 && position.y <= request.y + 3;
-      const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && isItemEntity(entity) && inPlot(entity.position));
-      // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
-      // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
-      // 2 picked up; the rest lay on the plot).
-      let quiet = 0;
-      while (quiet < QUIET_LOOKS) {
-        signal?.throwIfAborted();
-        const target = dropped()
-          .filter((entity) => !drops.leftBehind.has(entity.id) && droppedItemName(entity) !== null)
-          .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-        if (target === undefined) {
-          quiet += 1;
-          await bot.waitForTicks(QUIET_LOOK_TICKS);
-          continue;
-        }
-        quiet = 0;
-        let collected = false;
-        const onCollect: BotEvents["playerCollect"] = (collector, item) => {
-          if (collector.id === bot.entity.id && item.id === target.id) collected = true;
-        };
-        bot.on("playerCollect", onCollect);
-        try {
-          const result = await pickupObservedItem(bot, {
-            entityId: target.id,
-            navigate: navigation.navigate,
-            movements: movements(),
-            hasArrived: () => collected,
-            ...(signal && { signal }),
-          });
-          if (result.kind !== "collected") drops.leftBehind.add(target.id);
-        } finally {
-          bot.off("playerCollect", onCollect);
-        }
-      }
-      return { left: dropped().map((entity) => droppedItemName(entity) ?? "an item not identified yet") };
-    },
+    collectDrops: () => collectPlotDrops(bot, navigation, request, movements, drops, signal),
 
-    carried: (item) => bot.inventory.items().filter((candidate) => candidate.name === item).reduce((sum, candidate) => sum + candidate.count, 0),
+    carried,
     hasHoe: () => hoe() !== null,
   };
 }

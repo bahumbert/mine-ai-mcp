@@ -20,18 +20,18 @@ import { Vec3 } from "vec3";
 import { liveBlockReader } from "../../mineflayer/world.js";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
-import { isLiquidSource } from "../../../world/liquid.js";
+import { isLiquidSource, settleFormations } from "../../../world/liquid.js";
 import {
   HORIZONTAL,
   isReplaceableForPlacement,
   pourAim,
-  settledFormations,
   watchFormations,
   USE_RAY_REACH,
   type PourAim,
   type useItemAt,
 } from "../../../world/index.js";
 import type { BlockPosition, BreakBlockInPlace, MovementPolicy } from "../../index.js";
+import { standsOnBlock } from "./target-safety.js";
 
 /**
  * How close the route brings the bot to a lava source, feet cell to cell.
@@ -64,6 +64,7 @@ export type CastOutcome =
       readonly kind: "cast";
       readonly landing: Vec3;
       readonly obsidianFormed: number;
+      readonly formationsAnswered: boolean;
       readonly waterRecovered: boolean;
     }
   | { readonly kind: "reposition"; readonly reason: string }
@@ -121,6 +122,7 @@ function firstSolidTowards(bot: Bot, source: Vec3): BlockPosition | null {
   const cell = (position ?? (hit as unknown as Vec3)).floored();
   const feet = bot.entity.position.floored();
   if (cell.x === feet.x && cell.y === feet.y - 1 && cell.z === feet.z) return null;
+  if (standsOnBlock(bot, cell)) return null;
   return { x: cell.x, y: cell.y, z: cell.z };
 }
 
@@ -166,6 +168,7 @@ export async function castOntoPool(
   sources: readonly BlockPosition[],
   options: { readonly openSightLine?: boolean } = {},
 ): Promise<CastOutcome> {
+  physics.signal?.throwIfAborted();
   const item = carried(bot, "water_bucket");
   if (!item) return { kind: "failed", reason: "the bucket holds no water" };
   const keys = new Set(sources.map(cellKey));
@@ -180,8 +183,10 @@ export async function castOntoPool(
     const swing = await physics.breakInPlace({
       movements: physics.movements,
       position: blocking,
+      retainSupport: true,
       ...(physics.signal && { signal: physics.signal }),
     });
+    physics.signal?.throwIfAborted();
     if (swing.status === "failed") {
       return {
         kind: "reposition",
@@ -209,11 +214,12 @@ export async function castOntoPool(
     if (use.kind === "failed") return { kind: "failed", reason: use.error };
     // Water spreads for a while and turns every source it reaches; counting the
     // obsidian is this step's evidence that the pour was worth anything.
-    const formed = await settledFormations(bot, watch, physics.signal);
+    const { formed, ended } = await settleFormations(bot, watch, physics.signal);
     return {
       kind: "cast",
       landing: aim.landing,
       obsidianFormed: formed[CAST_BLOCK] ?? 0,
+      formationsAnswered: ended !== "stalled",
       waterRecovered: await scoopBack(bot, physics, aim),
     };
   } finally {

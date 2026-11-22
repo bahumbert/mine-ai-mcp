@@ -1,4 +1,5 @@
 /** Run one Mine Labs driver with a prepared bot and the Minecraft runtime. */
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import path from "node:path";
 import { mkdtempDisposable } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,6 +21,7 @@ import type { ScenarioContext, ScenarioRun, ScenarioCall } from "./scenario.ts";
 import { WITHOUT_RUNTIME_FLAG, parseClientHostArgs } from "./client-host-args.ts";
 import { arenaFrame, decodeArena, type ArenaFrame } from "./arena/frame.ts";
 import { clientBootedLine } from "./client-boot-marker.ts";
+import type { SurvivalReceipt } from "../../src/survival/evidence/contract.ts";
 
 const { driverFile, withRuntime } = parseClientHostArgs(process.argv.slice(2));
 
@@ -70,10 +72,23 @@ async function runWithRuntime(driver: ScenarioRun, bot: Bot, session: NodeClient
   await using scratch = artifacts ? undefined : await mkdtempDisposable(path.join(tmpdir(), "mine-ai-scenario-"));
   const incidents = artifacts ? path.join(artifacts, session.username, "incidents") : scratch!.path;
   await using overlay = await openScenarioHighlighter(bot, session);
-  await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter });
-  overlay?.follow(runtime.navigation);
-  const context = scenarioContextOf(bot, session, arena, (action, input) => callScenarioAction(runtime, session, action, input));
-  return await runTimedDriver(driver, context, session);
+  const observers = new Set<(receipt: SurvivalReceipt) => void>();
+  const navigationObservers = new Set<Parameters<ScenarioContext["onNavigationEvent"] & {}>[0]>();
+  let observerFailure: { error: unknown } | undefined;
+  await using runtime = await createMinecraftRuntime(bot, { ...runtimeOptions(session, artifacts, incidents), highlighter: overlay?.highlighter,
+    onSurvivalReceipt: (receipt) => { for (const observer of observers) { try { observer(receipt); } catch (error) { observerFailure ??= { error }; } } } });
+  const unsubscribeNavigation = runtime.navigation.onEvent(event => {
+    const status = runtime.status().survival;
+    for (const observer of navigationObservers) { try { observer(event, { requestId: status.request?.requestId ?? null, current: status.owner.current }); } catch (error) { observerFailure ??= { error }; } }
+  });
+  try {
+    overlay?.follow(runtime.navigation);
+    const context = scenarioContextOf(bot, session, arena, (action, input) => callScenarioAction(runtime, session, action, input));
+    const completion = await runTimedDriver((input) => driver({ ...input, onSurvivalReceipt: (observer) => {
+      observers.add(observer); return () => { observers.delete(observer); };
+    }, onNavigationEvent: (observer) => { navigationObservers.add(observer); return () => { navigationObservers.delete(observer); }; } }), context, session);
+    return observerFailure === undefined ? completion : { status: "failed", detail: `scenario observer failed: ${String(observerFailure.error)}` };
+  } finally { unsubscribeNavigation(); navigationObservers.clear(); observers.clear(); }
 }
 
 /** The driver on the bare bot, no runtime created (`--without-runtime`): `call` refuses, everything else is the same. */
@@ -94,6 +109,9 @@ function scenarioContextOf(bot: Bot, session: NodeClientSession, arena: ArenaFra
     scenario: session.scenario,
     arena,
     bot,
+    signal: session.signal,
+    log: (message) => session.log(message),
+    progress: (reason) => session.progress(reason),
     waitForTicks: async (ticks) => {
       await bot.waitForTicks(ticks);
       session.signal.throwIfAborted();
@@ -123,15 +141,15 @@ async function runTimedDriver(driver: ScenarioRun, context: ScenarioContext, ses
   session.signal.throwIfAborted();
 
   // Preparation is outside the trial budget; only the driver's run is timed.
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   try {
     const completion = await driver(context);
-    const detail = [completion.detail, `duration ${Date.now() - startedAt} ms`].filter(Boolean).join("; ");
+    const detail = [completion.detail, `duration ${monotonicNow() - startedAt} ms`].filter(Boolean).join("; ");
     return { ...completion, detail };
   } catch (cause) {
     session.signal.throwIfAborted();
     const error = cause instanceof Error ? cause.message : String(cause);
-    const detail = [error, `duration ${Date.now() - startedAt} ms`].filter(Boolean).join("; ");
+    const detail = [error, `duration ${monotonicNow() - startedAt} ms`].filter(Boolean).join("; ");
     return { status: "failed", detail };
   }
 }
@@ -163,7 +181,7 @@ async function callScenarioAction(
     response: { ...output, summary },
   });
   session.log(summary);
-  return { ...output, summary };
+  return { ...output, summary, requestId };
 }
 
 function summarise(action: Action, output: ActionOutput<string, ActionResult>): string {

@@ -1,14 +1,25 @@
 import type { Bot } from "mineflayer";
-import type { WorldView } from "../../navigation/index.js";
+import { pickUpPlacedWater } from "../../actions/use-bucket/use-bucket.js";
+import { LIFE_SAVING_REMOVAL_MS, pendingLifeSavingPlacements, removeLifeSavingPlacements, setLifeSavingWaterHook } from "../../world/life-saving-placements.js";
+import { describeProtectedRegion } from "../../world/protected-regions.js";
+import { bucketAvailable, waterLandingSupply, type WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
-import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
-import { turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
+import { AGE_PACKET_TICKS, ticksOnTime } from "../../world/world-age.js";
+import { LETHAL_REFLEX_RETRY_TICKS, type ReflexLimits } from "../control/contract.js";
+import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
-import { isBurning, isInFire, isInLava } from "../perception/body.js";
+import { isBurning, isInFire, isInLava, isInWater } from "../perception/body.js";
+import { hasFireDanger, readFireDanger } from "../perception/fire-danger.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
-import { FIRE_ESCAPE_RADIUS, nearbyFireEscape, type FireEscapeReason } from "../positioning/fire-escape.js";
-import type { FireEscapeOutcome } from "../responses/fire.js";
-import { escapeThenSettle, type EscapeAndSettle } from "../responses/lava-settle.js";
+import {
+  FIRE_ESCAPE_RADIUS,
+  FIRE_ESCAPE_RISE_IN_LAVA,
+  FIRE_LETHAL_WATER_RADIUS,
+  nearbyFireEscape,
+  type FireEscapeReason,
+} from "../positioning/fire-escape.js";
+import { FIRE_ESCAPE_MAXIMUM_TICKS, type FireEscapeOutcome, type FireEscapeOptions, type FireEscapeRecord } from "../responses/fire.js";
+import { escapeThenSettle, LAVA_SETTLE_MAXIMUM_TICKS, type EscapeAndSettle } from "../responses/lava-settle.js";
 
 /**
  * Whether an escape is reachable, searched once per body position, world revision and danger: the search reads up to
@@ -18,19 +29,19 @@ import { escapeThenSettle, type EscapeAndSettle } from "../responses/lava-settle
 function escapeAvailability(bot: Bot, world: WorldView) {
   let memo: { key: string; available: boolean } | null = null;
   return (reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean => {
-    const key = `${bot.entity.position}|${world.revision}|${reason}|${inLava}|${inFire}`;
+    const key = `${bot.entity.position}|${world.revision}|${reason}|${inLava}|${inFire}|${reason === "lethal_burn" ? bot.health : ""}`;
     if (memo?.key !== key) memo = { key, available: nearbyFireEscape(bot, world, reason) !== null };
     return memo.available;
   };
 }
 
 /** The facts a fire escape reads: exactly the primitive's search volume (floor and head included), the body, the blocks carried. */
-function fireEscapeFacts(bot: Bot) {
+export function fireEscapeFacts(bot: Bot) {
   const origin = bot.entity.position.floored();
   const cells: (number | null)[] = [];
-  for (let x = -FIRE_ESCAPE_RADIUS; x <= FIRE_ESCAPE_RADIUS; x++)
-    for (let z = -FIRE_ESCAPE_RADIUS; z <= FIRE_ESCAPE_RADIUS; z++)
-      for (let y = -2; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
+  for (let x = -FIRE_LETHAL_WATER_RADIUS; x <= FIRE_LETHAL_WATER_RADIUS; x++)
+    for (let z = -FIRE_LETHAL_WATER_RADIUS; z <= FIRE_LETHAL_WATER_RADIUS; z++)
+      for (let y = -2; y <= FIRE_ESCAPE_RISE_IN_LAVA + 1; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
   return {
     cells,
     body: { inLava: isInLava(bot), inFire: isInFire(bot), onGround: bot.entity.onGround },
@@ -57,9 +68,9 @@ function lavaWaitOutcomeKind(settle: NonNullable<EscapeAndSettle["settle"]>) {
 /** Why the interrupted action was stopped rather than resumed, for each outcome that ended the escape without a resume. */
 function stoppedActionReason(kind: ReturnType<typeof reflexOutcomeKind> | ReturnType<typeof lavaWaitOutcomeKind>) {
   if (kind === "lava_spreading")
-    return "Got out of the fire onto safe ground, but lava within 4 blocks was still spreading 10 s later, so the action was stopped instead of walking back into it. Wait for the lava to stop moving, or go another way.";
+    return "Got out of the fire onto safe ground, but lava within 4 blocks was still spreading when the settle budget ended, so the action was stopped instead of walking back into it. Wait for the lava to stop moving, or go another way.";
   if (kind === "lava_endangered")
-    return "Got out of the fire onto safe ground, but while waiting for nearby lava to settle the bot was in danger again (damage taken or air running low), so the action was stopped.";
+    return "Got out of the fire onto safe ground, but while recovering the bot was in danger again (fire, lava, a lethal burn, damage taken or air running low), so the action was stopped. Reach safe ground before continuing.";
   return "Fire escape did not establish safe footing.";
 }
 
@@ -98,24 +109,80 @@ function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["bl
 }
 
 /**
- * An escape (15 s) and the wait for lava to settle (10 s) fit in 30 s; 6 s without leaving the lava or fire, the fire
- * going out, or standing on dry ground ends the claim, and the reflex pauses 2 s (owner 2026-10-19).
+ * Escape (300 ticks), settling (200 ticks) and removal (30 s) share one claim, with two packet margins per budget.
+ * No progress for 120 ticks ends it; the reflex pauses 40 ticks (owner 2026-10-19; tick limits 2026-11-18).
  */
-const FIRE_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 6_000, standDownMs: 2_000 };
+const FIRE_LIMITS: ReflexLimits = {
+  ceilingTicks: FIRE_ESCAPE_MAXIMUM_TICKS + LAVA_SETTLE_MAXIMUM_TICKS + ticksOnTime(LIFE_SAVING_REMOVAL_MS) + 4 * AGE_PACKET_TICKS,
+  noProgressTicks: 120,
+  standDownTicks: 40,
+};
 
-/** What counts as getting somewhere: out of the lava or fire, the fire out, and every tick on dry ground (the lava wait). */
+/** A rise in lava that counts as a swim up: 0.05 block over the lowest the body reached (the sinking at the start is not progress). */
+const RISE_IN_LAVA_BLOCKS = 0.05;
+
+/**
+ * What counts as getting somewhere: out of the lava or fire, the fire out, every tick on safe footing (the lava wait), and
+ * a body in lava rising toward the surface (the swim up of a pool two deep takes seconds, with no block crossed).
+ */
 function fireProgress(bot: Bot, mark: (reason: string) => void): () => void {
-  const onDryGround = () => !isInLava(bot) && !isInFire(bot) && bot.entity.onGround;
+  const onSafeFooting = () => !isInLava(bot) && !isInFire(bot) && (bot.entity.onGround || isInWater(bot));
+  const climbed = climbsBy(() => bot.entity.position.y, RISE_IN_LAVA_BLOCKS);
   return watchBodyTicks(bot, mark, {
     out_of_lava: turnsTrue(() => !isInLava(bot)),
     out_of_fire: turnsTrue(() => !isInFire(bot)),
     fire_out: turnsTrue(() => !isBurning(bot)),
-    on_dry_ground: onDryGround,
+    on_safe_footing: onSafeFooting,
+    // `climbed` runs every tick, so its lowest point follows the body down; the lava test decides only whether it counts.
+    rose_in_lava: () => climbed() && isInLava(bot),
   });
 }
 
+/** Reuse the contact/burn reading for sensing and for cleanup's danger interruption. */
+function senseFire(bot: Bot, lava: LavaWatch, available: ReturnType<typeof escapeAvailability>) {
+  lava.advancing &&= advancingLavaAt(bot);
+  const danger = readFireDanger(bot);
+  const { inLava, inFire, burning, lethalBurn } = danger;
+  if (!lava.advancing && !inLava && !inFire && !burning) return null;
+  const reason: FireEscapeReason = lava.advancing ? "advancing_lava" : lethalBurn && !inLava && !inFire ? "lethal_burn" : "contact";
+  const facts: FireFacts = {
+    ...danger, reason, advancing: lava.advancing,
+    waterBucket: bucketAvailable(bot) && waterLandingSupply(bot).dimensionHoldsWater,
+    health: bot.health, escapeAvailable: available(reason, inLava, inFire),
+  };
+  return { kind: "observed" as const, danger: facts, evidence: { ...facts } };
+}
+
+/** Escape and settle first; cleanup retains the same body hold and stops when fire danger returns. */
+async function escapeAndRemove(bot: Bot, world: WorldView, signal: AbortSignal, reason: FireEscapeReason, lastChange: () => number | null, footing: FireEscapeOptions["footing"]) {
+  const healthBefore = bot.health;
+  const record: FireEscapeRecord = { recovered: 0, last: null, airborneTicks: 0 };
+  const { escape, settle } = await escapeThenSettle(bot, world, signal, reason, lastChange, { footing, record });
+  let kind = settle ? lavaWaitOutcomeKind(settle) : reflexOutcomeKind(escape);
+  if (kind === "dry_footing") {
+    await removeLifeSavingPlacements(bot, signal, undefined, () => hasFireDanger(bot));
+    if (hasFireDanger(bot)) kind = "lava_endangered";
+  }
+  const leftInRegion = pendingLifeSavingPlacements(bot)
+    .filter(entry => entry.dimension === bot.game.dimension)
+    .map(({ cell: { x, y, z }, region }) => ({ x, y, z, region: describeProtectedRegion(region) }));
+  return {
+    kind, healthBefore, healthAfter: bot.health,
+    footing: { recovered: record.recovered, last: record.last }, airborneTicks: record.airborneTicks,
+    burning: isBurning(bot), inFire: isInFire(bot), inLava: isInLava(bot),
+    position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+    leftInRegion,
+  };
+}
+
+/** The interrupted action carries the cells still owed to another owner even when it resumes successfully. */
+function placementsLeftReason(left: Awaited<ReturnType<typeof escapeAndRemove>>["leftInRegion"]): string {
+  return left.map(({ x, y, z, region }) => `left a life-saving block in ${region} at ${x} ${y} ${z}. Return to remove it when safe or ask its owner.`).join(" ");
+}
+
 /** Fire owns its environmental authority; combat policy cannot prohibit escape. */
-export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
+export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView, footing?: FireEscapeOptions["footing"]): AsyncDisposable {
+  setLifeSavingWaterHook(bot, (cell, signal) => pickUpPlacedWater(bot, cell, signal));
   const lava: LavaWatch = { advancing: false, lastChangeAge: null };
   const escapeAvailable = escapeAvailability(bot, world);
   const blockUpdate = (before: ReturnType<Bot["blockAt"]>, after: ReturnType<Bot["blockAt"]>) =>
@@ -124,24 +191,8 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
   const registration = driver.register({
     name: "fire_reflex",
     // Static lava never changes the cells the answer reads, while the body burns: try the escape again.
-    retryAfterFailureMs: LETHAL_REFLEX_RETRY_MS,
-    sense: () => {
-      lava.advancing &&= advancingLavaAt(bot);
-      const inLava = isInLava(bot);
-      const inFire = isInFire(bot);
-      const burning = isBurning(bot);
-      if (!lava.advancing && !inLava && !inFire && !burning) return null;
-      const reason: FireEscapeReason = lava.advancing ? "advancing_lava" : "contact";
-      const facts: FireFacts = {
-        reason,
-        advancing: lava.advancing,
-        inLava,
-        inFire,
-        burning,
-        escapeAvailable: escapeAvailable(reason, inLava, inFire),
-      };
-      return { kind: "observed", danger: facts, evidence: { ...facts } };
-    },
+    retryAfterFailureTicks: LETHAL_REFLEX_RETRY_TICKS,
+    sense: () => senseFire(bot, lava, escapeAvailable),
     decide: decideFireResponse,
     limits: () => FIRE_LIMITS,
     progress: (_response, mark) => fireProgress(bot, mark),
@@ -155,27 +206,13 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
         facts: () => fireEscapeFacts(bot),
       };
     },
-    act: async (reason, signal) => {
-      const healthBefore = bot.health;
-      // On dry ground the interrupted action would re-plan at once, while released lava is still spreading.
-      const { escape, settle } = await escapeThenSettle(bot, world, signal, reason, () => lava.lastChangeAge);
-      const kind = settle ? lavaWaitOutcomeKind(settle) : reflexOutcomeKind(escape);
-      return {
-        kind,
-        healthBefore,
-        healthAfter: bot.health,
-        burning: isBurning(bot),
-        inFire: isInFire(bot),
-        inLava: isInLava(bot),
-        position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
-      };
-    },
+    act: (reason, signal) => escapeAndRemove(bot, world, signal, reason, () => lava.lastChangeAge, footing),
     // Resumable requests re-observe their checkpoint after the old physical
     // execution releases. A successful escape must not abandon their goal.
     continuation: (outcome) =>
       outcome.kind === "dry_footing"
-        ? { kind: "resume" }
-        : { kind: "return", reason: stoppedActionReason(outcome.kind) },
+        ? { kind: "resume", reason: placementsLeftReason(outcome.leftInRegion) }
+        : { kind: "return", reason: `${stoppedActionReason(outcome.kind)} ${placementsLeftReason(outcome.leftInRegion)}`.trim() },
     failure: (outcome) => fireEscapeFailure(outcome.kind),
     describe: (outcome) => outcome,
   });

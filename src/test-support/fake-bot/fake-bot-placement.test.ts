@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { watchServerTags } from "../../world/server-tags.js";
 import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot.js";
 import { blockUpdateEventOf } from "./fake-world.js";
 
@@ -41,25 +42,63 @@ async function place({ bot, clock }: FakeHarness, options: PlacementOptions, fac
 
 const typeOf = ({ bot }: FakeHarness, cell = DESTINATION) => bot.blockAt(cell)!.getProperties();
 
-test("a slab put with half 'top' on a side face takes the top half; 'bottom' the bottom half; a delta at 0.9 the top", async () => {
-  const top = placer();
-  await place(top, { half: "top", swingArm: "right" });
-  assert.deepEqual([top.bot.blockAt(DESTINATION)!.name, typeOf(top).type, typeOf(top).waterlogged], ["oak_slab", "top", false], "a slab put in air is not waterlogged: states left out are the block's defaults");
-  const bottom = placer();
-  await place(bottom, { half: "bottom", swingArm: "right" });
-  assert.equal(typeOf(bottom).type, "bottom");
-  const delta = placer();
-  await place(delta, { delta: new Vec3(0, 0.9, 0.5), forceLook: "ignore", swingArm: "right" });
-  assert.equal(typeOf(delta).type, "top");
+/** Wait for the placement answer or the existing five-second placement timeout. */
+function settledPlacement({ bot, clock }: FakeHarness, options: PlacementOptions, face: Vec3, reference = REFERENCE) {
+  const placing = bot._placeBlockWithOptions(bot.blockAt(reference)!, face, options).then(() => null, (error: Error) => error);
+  return clock.settle(placing, 6_000);
+}
+
+test("sign placements use the standing rotation or outward wall facing", async () => {
+  const cases = [
+    { wood: "oak", yaw: 0, face: UP, name: "oak_sign", property: "rotation", value: "0" },
+    { wood: "oak", yaw: -Math.PI / 2, face: UP, name: "oak_sign", property: "rotation", value: "4" },
+    { wood: "oak", yaw: 0, face: WEST, name: "oak_wall_sign", property: "facing", value: "west" },
+    { wood: "spruce", yaw: 0, face: WEST, name: "spruce_wall_sign", property: "facing", value: "west" },
+  ];
+  for (const ticksPerSecond of [20, 10]) {
+    for (const { wood, yaw, face, name, property, value } of cases) {
+      const harness = placer({ carried: { [`${wood}_sign`]: 1 }, server: { ticksPerSecond } });
+      await harness.bot.look(yaw, 0, true);
+      assert.equal(await settledPlacement(harness, { forceLook: "ignore" }, face), null);
+      const sign = harness.bot.blockAt(REFERENCE.plus(face))!;
+      assert.equal(sign.name, name);
+      assert.equal(sign.getProperties()[property], value);
+    }
+  }
 });
 
-test("a slab put on the top face of a block is the bottom half whatever the click height, and on the bottom face the top half", async () => {
-  const onTop = placer();
-  await place(onTop, { swingArm: "right" }, UP);
-  assert.equal(onTop.bot.blockAt(REFERENCE.plus(UP))!.getProperties().type, "bottom");
-  const onBottom = placer({ cells: { "2,-59,0": "stone" } });
-  await place(onBottom, { swingArm: "right" }, new Vec3(0, -1, 0), new Vec3(2, -59, 0));
-  assert.equal(onBottom.bot.blockAt(new Vec3(2, -60, 0))!.getProperties().type, "top");
+test("unmapped sign is refused and the next placement works (waiting for server measurement)", async () => {
+  const harness = placer({ carried: { oak_sign: 1, cobblestone: 1 } });
+  const { bot } = harness;
+  watchServerTags(bot);
+  harness.emitTags([
+    { tagType: "minecraft:item", tags: [{ tagName: "minecraft:signs", entries: [bot.registry.itemsByName.oak_sign!.id] }] },
+    { tagType: "minecraft:block", tags: [{ tagName: "minecraft:signs", entries: [] }] },
+  ]);
+  // Ack-only, retained item and timeout await a real server measurement (T2a).
+  assert.ok(await settledPlacement(harness, { forceLook: "ignore" }, UP));
+  assert.equal(bot.heldItem!.count, 1);
+  assert.equal(bot.blockAt(REFERENCE.plus(UP))!.name, "air");
+  bot.setQuickBarSlot(1);
+  assert.equal(await settledPlacement(harness, { forceLook: "ignore" }, UP), null);
+  assert.equal(bot.blockAt(REFERENCE.plus(UP))!.name, "cobblestone");
+});
+
+test("a slab's half follows the clicked face and cursor", async () => {
+  const below = new Vec3(0, -1, 0);
+  const highReference = new Vec3(2, -59, 0);
+  for (const { options, face, reference, expected } of [
+    { options: { half: "top" } as PlacementOptions, face: WEST, reference: REFERENCE, expected: "top" },
+    { options: { half: "bottom" } as PlacementOptions, face: WEST, reference: REFERENCE, expected: "bottom" },
+    { options: { delta: new Vec3(0, 0.9, 0.5), forceLook: "ignore" } as PlacementOptions, face: WEST, reference: REFERENCE, expected: "top" },
+    { options: {}, face: UP, reference: REFERENCE, expected: "bottom" },
+    { options: {}, face: below, reference: highReference, expected: "top" },
+  ]) {
+    const harness = placer({ cells: { [reference.toArray().join(",")]: "stone" } });
+    assert.equal(await settledPlacement(harness, { ...options, swingArm: "right" }, face, reference), null);
+    const block = harness.bot.blockAt(reference.plus(face))!;
+    assert.deepEqual([block.name, block.getProperties().type, block.getProperties().waterlogged], ["oak_slab", expected, false]);
+  }
 });
 
 test("stairs put with half 'top' on a side face are the top half", async () => {

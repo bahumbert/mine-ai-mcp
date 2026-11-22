@@ -5,6 +5,9 @@
  * a use sent anyway is ignored by the server (no bit, no bite, the stack kept). A bite released while it is under way
  * (`deactivateItem` once the bit is set; the bite lasts 1.6 s) clears the bit, keeps the stack, and the `consume` promise
  * rejects; the next `consume` eats.
+ * Measured too (2026-11-08, 3 runs, Mine Labs 1.21.4): the held golden apple's stack carries no `consumable` component
+ * (`bot.heldItem.componentMap.has("consumable")` false), so a vanilla food's bite length is not read from its stack. The
+ * check returns it as `consumable-component=present|absent|no-component-map`, no assert.
  */
 import assert from "node:assert/strict";
 import type { Bot } from "mineflayer";
@@ -65,6 +68,10 @@ export const consumeFood: ContractCheck = {
     const { bot } = subject;
     assert.equal(bot.food, 20, "the bot starts hungry");
     await holdInHand(subject, "golden_apple");
+    // A measurement, no assert: whether the server sends a vanilla food's stack with a `consumable` component (the eat code's
+    // `biteTicks` reads `consume_seconds` from it, else a default; plan 2026-11-08-p4-eat-lag, spec D2).
+    const components: unknown = bot.heldItem === null ? undefined : Reflect.get(bot.heldItem, "componentMap");
+    const consumable = !(components instanceof Map) ? "no-component-map" : components.has("consumable") ? "present" : "absent";
     const { started, ended } = await eatMarked(subject, "consume");
     const startTick = await tickOf(subject, started);
     const endTick = await tickOf(subject, ended);
@@ -108,6 +115,6 @@ export const consumeFood: ContractCheck = {
     assert.equal(countOf(bot, "golden_apple"), 1, "a released bite spent the apple");
     await eatMarked(subject, "the next consume");
     await answerArrives(subject, () => countOf(bot, "golden_apple") === 0, "the next consume did not eat it");
-    return latenessRecorded(EATING_TICKS, tookTicks, roundTripMs);
+    return `${latenessRecorded(EATING_TICKS, tookTicks, roundTripMs)}; consumable-component=${consumable}`;
   },
 };

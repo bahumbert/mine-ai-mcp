@@ -15,6 +15,8 @@ import { Vec3 } from "vec3";
 import { observeMineflayerBlock } from "../../navigation/index.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { findLoadedBlockPositions, isLiquid } from "../../world/index.js";
+import { situationReader } from "../../world/target-situation.js";
+import { holdsWater } from "../../navigation/world/deep-water.js";
 import { defineAction } from "../action.js";
 import { blockMatchesSelector } from "../collect-block/collection-facts.js";
 import {
@@ -27,6 +29,7 @@ import {
   viewBlocksAnnotations,
   viewBlocksOutcomes,
   type BlockKind,
+  type BoxBlockKind,
   type NamedBlockKind,
   type FoundBlock,
   type ObservedBlock,
@@ -49,6 +52,8 @@ function observe(bot: Bot, position: Vec3): ObservedBlock {
   const level = Number(properties.level);
   if (isLiquid(block) && properties.level !== undefined && Number.isInteger(level)) observed.level = level;
   if (properties.waterlogged === true || properties.waterlogged === "true") observed.waterlogged = true;
+  // Navigation's test for water (`cellHoldsWater` is built from it): water, a water plant or a waterlogged block; an unloaded cell returned above.
+  if (holdsWater(block.name, properties)) observed.holds_water = true;
   return observed;
 }
 
@@ -78,12 +83,19 @@ function find(
     // The scan is nearest first and stops once the cap's worth of nearer hits
     // is held; one past the cap tells "more" from "exactly the cap".
     const positions = findLoadedBlockPositions(bot, { center: feet, stateIds, limit: FIND_COUNT_CAP + 1 });
-    const listed: FoundBlock[] = positions.slice(0, request.limit).map((position) => ({
-      ...observe(bot, position),
-      distance: Math.round(position.distanceTo(feet) * 10) / 10,
-      above: nameAt(bot, position.offset(0, 1, 0)),
-      below: nameAt(bot, position.offset(0, -1, 0)),
-    }));
+    const situationAt = situationReader(bot, stateIds);
+    const listed: FoundBlock[] = positions.slice(0, request.limit).map((position) => {
+      const observed = observe(bot, position);
+      // A liquid is the water (or lava) itself, not a block lying under it: `find water` gets no situation. Absent when open too, so an open block's entry is the one it always was.
+      const situation = observed.shape === "liquid" ? "open" : situationAt(position);
+      return {
+        ...observed,
+        distance: Math.round(position.distanceTo(feet) * 10) / 10,
+        above: nameAt(bot, position.offset(0, 1, 0)),
+        below: nameAt(bot, position.offset(0, -1, 0)),
+        ...(situation === "open" ? {} : { situation }),
+      };
+    });
     found.push({ name, found: Math.min(positions.length, FIND_COUNT_CAP), more: positions.length > FIND_COUNT_CAP, listed });
   }
   return { found };
@@ -103,9 +115,29 @@ export function kindOf(bot: Pick<Bot, "registry">, name: string): BlockKind | nu
   // Item ids follow the game's tier order (wooden, stone, golden, iron, diamond, netherite): the lowest is the cheapest.
   const ids = Object.keys(block.harvestTools ?? {}).map(Number).sort((a, b) => a - b);
   const harvest = ids.map((id) => bot.registry.items[id]?.name).filter((item): item is string => item !== undefined);
-  const fullCube = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(block.defaultState, 0)).geometry.fullCube;
-  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", full_cube: fullCube, harvest: harvest.length > 0 ? harvest : null };
+  const defaultState = prismarineBlock(bot.registry).fromStateId(block.defaultState, 0);
+  const fullCube = observeMineflayerBlock(defaultState).geometry.fullCube;
+  // Per name, on the default state: a waterlogged stair or slab placed in the world is a per-cell fact (`cellsAt`), not this one.
+  const fluid = isLiquid(defaultState) || holdsWater(name, (defaultState.getProperties?.() ?? {}) as Record<string, unknown>);
+  return {
+    tool: toolClassOf(bot, name),
+    solid: block.boundingBox === "block",
+    full_cube: fullCube,
+    harvest: harvest.length > 0 ? harvest : null,
+    hardness: digHardness(block),
+    fluid,
+  };
 }
+
+/** The registry's break hardness; null when the block cannot be dug (`diggable` false, hardness below 0 such as bedrock, or none listed). */
+function digHardness(block: { readonly diggable?: boolean; readonly hardness?: number | null }): number | null {
+  if (block.diggable === false) return null;
+  const hardness = block.hardness;
+  return typeof hardness === "number" && hardness >= 0 ? hardness : null;
+}
+
+/** The kind given to a cell name the registry does not know (an unloaded cell): nothing is known, so nothing is claimed. */
+const UNKNOWN_BOX_KIND: BoxBlockKind = { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: false, tags: [], known: false };
 
 function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNullable<ViewBlocksReport["box"]> {
   const layers: NonNullable<ViewBlocksReport["box"]>["layers"] = [];
@@ -126,10 +158,10 @@ function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNulla
     halfHeight: request.halfHeight,
     layers,
     kinds: Object.fromEntries(
-      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => [
-        name,
-        kindOf(bot, name) ?? { tool: null, solid: false, full_cube: false, harvest: null },
-      ]),
+      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => {
+        const kind = kindOf(bot, name);
+        return [name, kind === null ? UNKNOWN_BOX_KIND : { ...kind, tags: [...tagsOf(name, bot.version)], known: true }];
+      }),
     ),
   };
 }
@@ -179,7 +211,16 @@ function shapeWords(block: ObservedBlock): string {
     block.shape === "liquid" ? (block.level === 0 ? "source" : `flowing level ${block.level ?? "?"}`) : block.shape,
   ];
   if (block.waterlogged) words.push("waterlogged");
+  // A liquid and a waterlogged block already say it; a water plant (kelp, seagrass) does not.
+  else if (block.holds_water && block.shape !== "liquid") words.push("holds water");
   return words.join(", ");
+}
+
+const SITUATION_WORDS = { under_water: "under water", roofed: "roofed over" } as const;
+
+/** The words of a found block: its shape, then the situation of its column when it is not open. */
+function foundWords(hit: FoundBlock): string {
+  return hit.situation === undefined ? shapeWords(hit) : `${shapeWords(hit)}, ${SITUATION_WORDS[hit.situation]}`;
 }
 
 /** One grid per layer, x across and z down, with a legend of one symbol per block name. */
@@ -221,7 +262,7 @@ export function formatViewBlocksResult(result: ViewBlocksResult): string {
     lines.push("", entry.found > entry.listed.length ? `${heading}, nearest ${entry.listed.length} listed` : heading);
     for (const hit of entry.listed) {
       lines.push(
-        `- ${hit.name} at ${hit.x}, ${hit.y}, ${hit.z}, ${hit.distance} blocks away (${shapeWords(hit)}); above ${hit.above}, below ${hit.below}`,
+        `- ${hit.name} at ${hit.x}, ${hit.y}, ${hit.z}, ${hit.distance} blocks away (${foundWords(hit)}); above ${hit.above}, below ${hit.below}`,
       );
     }
     if (entry.listed.length === 0) lines.push("- none loaded");

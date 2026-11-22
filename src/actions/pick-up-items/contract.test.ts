@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {parsePickUpItemsRequest, pickUpItemsInputSchema} from './contract.js';
+import {parsePickUpItemsRequest, pickUpItemsInputSchema, pickUpItemsResultSchema} from './contract.js';
+
+test('pickup sightings accept a confirmed collector and require nullable collector evidence', () => {
+  const sighting = {id: 1, item: 'gold_ingot', observedCount: 1, position: {x: 0, y: 0, z: 0}, outcome: 'taken_by_other', takenBy: 'piglin'};
+  const pickup = {item: null, center: sighting.position, radius: 8, observed: 1, collected: 0, gainedByItem: {}, emptySlots: 1, sightings: [sighting], recovery: null};
+  const result = {status: 'failed', error: 'no pickup', pickup};
+  assert.throws(() => pickUpItemsResultSchema.parse({...result, pickup: {...pickup, sightings: [{...sighting, takenBy: undefined}]}}));
+});
 
 test('pickup area requires either all coordinates or none and caps its loaded radius', () => {
   assert.throws(() => pickUpItemsInputSchema.parse({x: 1, radius: 8}), /x, y, and z/);

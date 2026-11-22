@@ -3,6 +3,7 @@ import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Action, ActionOutput, ActionResult } from "../actions/index.js";
@@ -31,7 +32,8 @@ import {
 import { observeIncidents } from "../diagnostics/incident-observer.js";
 import { INCIDENT_HISTORY_MS, type IncidentProvenance } from "../diagnostics/incident-recorder.js";
 import { ExecutionScope, observeExecution } from "../execution/execution-scope.js";
-import { createNavigationRuntime, RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
+import { RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
+import { createForegroundNavigation } from "./foreground-cover.js";
 import type { StepFieldProvider } from "../navigation/step-field.js";
 import { ActionRunner, type ActionRunnerStatus } from "../session/action-runner.js";
 import type { ReflexLimitKind } from "../session/abort.js";
@@ -39,12 +41,14 @@ import { createPinnedEscape } from "../session/pinned-escape.js";
 import { PinnedWatch } from "../session/pinned-watch.js";
 import { attachIdleWaterControl } from "../survival/baseline/idle-water.js";
 import { monotonicNow } from "../utils/index.js";
+import { serverTickPace } from "../world/server-tick-pace.js";
+import { swingReadiness } from "../survival/weapons/swing-readiness.js";
 import { ReflexDriver } from "../survival/control/driver.js";
-import type { SurvivalStatus } from "../survival/evidence/contract.js";
+import type { SurvivalReceipt, SurvivalStatus } from "../survival/evidence/contract.js";
 import { attachSurvivalReceipts } from "../survival/evidence/receipts.js";
 import { SurvivalObserver } from "../survival/evidence/status.js";
 import { attachEndermanGazeControl } from "../survival/guards/enderman-gaze.js";
-import { createCombatController, createHostileStepFieldProvider, type CombatController } from "../survival/index.js";
+import { createCombatController, type CombatController } from "../survival/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
 import { isInWater } from "../survival/perception/body.js";
@@ -53,6 +57,7 @@ import { attachFireReflex } from "../survival/reflexes/fire.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { guardFooting } from "../survival/weapons/footing-guard.js";
 import { attachHostileReflex } from "../survival/reflexes/hostile.js";
+import { routeAroundHostiles } from "../survival/reflexes/hostile-routing.js";
 import { attachHungerReflex } from "../survival/reflexes/hunger.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus } from "./frontier.js";
@@ -69,6 +74,7 @@ import { snapshotTools } from "../world/tool-tiers.js";
 
 export interface MinecraftRuntimeOptions {
   readonly botData: SqlBotDataOptions;
+  readonly onSurvivalReceipt?: (receipt: SurvivalReceipt) => void;
   readonly highlighter?: BlockHighlighter;
   readonly debugExecuteJavaScript?: boolean;
   readonly onDisconnect?: (reason: string) => void;
@@ -333,6 +339,8 @@ interface BodyIncidents {
  * back on where she is (run 14b).
  */
 function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, record: BodyIncidents): { readonly runner: ActionRunner; readonly routes: RouteOutcomes } {
+  resources.use(serverTickPace(bot));
+  resources.use(swingReadiness(bot));
   const position = () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null;
@@ -341,6 +349,7 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
   // The one record of how this bot's routes end: navigation notes them, the runner counts a movement failure only if one failed.
   const routes = new RouteOutcomes();
   const runner = new ActionRunner({
+    worldAge: () => bot.time?.age ?? null,
     highlighter: options.highlighter,
     pinned,
     pinnedEscape: createPinnedEscape(bot, routesAsEscape),
@@ -405,11 +414,22 @@ function observeBotEvents(
   };
 }
 
+/** Select an incident directory and register cleanup when the runtime owns it. */
+function incidentDirectory(options: MinecraftRuntimeOptions, botData: SqlBotData, resources: AsyncDisposableStack): string {
+  if (options.incidents?.directory !== undefined) return options.incidents.directory;
+  if (botData.location.kind === "persistent") return path.join(path.dirname(botData.location.file), "incidents");
+  const directory = path.join(os.tmpdir(), "mine-ai-incidents", randomUUID());
+  resources.defer(async () => { try { await rm(directory, { recursive: true, force: true }); } catch { /* Best effort. */ } });
+  return directory;
+}
+
+/** A diagnostic observer cannot interrupt receipt publication or mutate its evidence. */
+function notifySurvivalReceipt(observer: MinecraftRuntimeOptions["onSurvivalReceipt"], receipt: SurvivalReceipt): void {
+  if (observer) { try { observer(structuredClone(receipt)); } catch { /* Diagnostics cannot interrupt survival. */ } }
+}
+
 /** Own every long-lived facility attached to one connected Minecraft bot. */
-export async function createMinecraftRuntime(
-  bot: Bot,
-  options: MinecraftRuntimeOptions,
-): Promise<MinecraftRuntime> {
+export async function createMinecraftRuntime(bot: Bot, options: MinecraftRuntimeOptions): Promise<MinecraftRuntime> {
   await using resources = new AsyncDisposableStack();
   const botData = resources.use(SqlBotData.create(options.botData));
   // One list per bot: routes read it through the provider, the region tools write it (ADR-012).
@@ -420,8 +440,8 @@ export async function createMinecraftRuntime(
   // The incident observer is built after the runner and reads it: the runner records through this until it exists.
   const bodyIncidents: BodyIncidents = { physicsStalled: () => {}, reflexLimit: () => {} };
   const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, bodyIncidents);
-  const reflexes = resources.use(new ReflexDriver(bot, runner));
-  const navigation = resources.use(createNavigationRuntime(bot, { routes }));
+  const reflexes = resources.use(new ReflexDriver(bot, runner, { lifeSaving: { data: botData, navigate: (route) => navigation.navigate(route) } }));
+  const navigation = createForegroundNavigation(bot, runner, routes, resources, () => combat.activeEngagement() !== null);
   installMinecraftKnowledge(botData, bot.registry);
   const frontier = resources.use(attachSessionFrontier(bot, botData));
   const perception = resources.use(new CombatPerception(bot));
@@ -438,11 +458,7 @@ export async function createMinecraftRuntime(
     observeIncidents(bot, navigation, {
       perception,
       survival: () => survival.snapshot(),
-      directory:
-        options.incidents?.directory ??
-        (botData.location.kind === "persistent"
-          ? path.join(path.dirname(botData.location.file), "incidents")
-          : path.join(os.tmpdir(), "mine-ai-incidents", randomUUID())),
+      directory: incidentDirectory(options, botData, resources),
       identity: {
         ...options.botData.identity,
         username: bot.username,
@@ -473,9 +489,8 @@ export async function createMinecraftRuntime(
   bodyIncidents.physicsStalled = incidents.physicsStalled;
   bodyIncidents.reflexLimit = incidents.reflexLimit;
   resources.use(
-    attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation, (receipt) =>
-      incidents.recorder.record("survival_receipt", { receipt }),
-    ),
+    attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation,
+      (receipt) => { incidents.recorder.record("survival_receipt", { receipt }); notifySurvivalReceipt(options.onSurvivalReceipt, receipt); }),
   );
   resources.defer(observeReflexActivity(reflexes, combat, runner));
   resources.defer(
@@ -545,7 +560,7 @@ export async function createMinecraftRuntime(
       frontier,
       navigation,
       strongholdEyeFlights,
-      combat,
+      combat, combatContext: { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds },
       cancelForegroundAction: runner.cancelActive,
       observeStatusActivity: () => {
         const { owner, activeAction } = runner.status();
@@ -557,21 +572,15 @@ export async function createMinecraftRuntime(
   installActionQueryCatalog(botData, actionSqlQueries(actions));
   resources.use(attachBreathReflex(bot, reflexes, () => navigation.diveBackstop?.() ?? null));
   resources.use(attachIdleWaterControl(bot, navigation, runner));
-  resources.use(attachFireReflex(bot, reflexes, navigation.world));
+  resources.use(attachFireReflex(bot, reflexes, navigation.world, footingRecovery));
   resources.use(attachFootingReflex(reflexes, combat, footingRecovery, navigation.releaseForTakeover,
     { maintain: () => guardFooting(bot, combat.policy.combat), release: () => bot.deactivateItem() }));
   resources.use(attachDragonReflex(bot, reflexes, combat));
   resources.use(attachEndermanGazeControl(bot, () => combat.activeEngagement()));
   const hostiles = resources.use(attachHostileReflex(bot, reflexes, navigation, combat, perception));
-  // The one place that holds both the navigation runtime and combat's live view
-  // of who is a threat, so the one place that can join them. Every route the
-  // bot takes from here is priced to prefer going around a hostile; combat's
-  // own routes, which walk toward one on purpose, pass `stepField: null`.
-  navigation.setStepFieldProvider(
-    options.stepFieldProvider ?? createHostileStepFieldProvider(
-      bot, hostiles.threats, hostiles.activeResponse, () => combat.policy.effective.navigation,
-    ),
-  );
+  // The one place that holds both the navigation runtime and combat's live view of who is a threat, so the one place that
+  // can join them: prices and vetoes (`hostile-routing.ts`).
+  routeAroundHostiles(bot, navigation, hostiles, combat, options.stepFieldProvider);
   resources.use(attachHungerReflex(bot, reflexes, combat, combat.policy));
 
   return new AttachedMinecraftRuntime(

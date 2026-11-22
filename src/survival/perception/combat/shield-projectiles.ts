@@ -1,8 +1,9 @@
 import type { EntityBody } from "../../../world/entity-geometry.js";
 import type { Bot } from "mineflayer";
 import { PROJECTILE_HIT_MARGIN, projectileContact } from "../../positioning/combat/exposure.js";
-import { isIncomingBlazeProjectile } from "./blaze-projectiles.js";
-import { arrowFlight } from "./arrow-flight.js";
+import { arrowFlight, isArrowEntity } from "./arrow-flight.js";
+import { directionalProjectileContact } from "./directional-projectiles.js";
+import type { Vec3 } from "vec3";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -12,7 +13,7 @@ export function arrowImpactInTicks(bot: Bot, arrow: Entity, movementAllowance = 
 }
 
 export function arrowImpact(bot: Bot, arrow: Entity, movementAllowance = 0, target: EntityBody = bot.entity) {
-  if (!arrow.isValid || (arrow.name !== "arrow" && arrow.name !== "spectral_arrow")) return null;
+  if (!arrow.isValid || !isArrowEntity(bot, arrow)) return null;
   const keys = bot.registry.entitiesByName[arrow.name]?.metadataKeys ?? [];
   const grounded: unknown = arrow.metadata?.[keys.indexOf("in_ground")];
   const piercing: unknown = arrow.metadata?.[keys.indexOf("pierce_level")];
@@ -22,8 +23,13 @@ export function arrowImpact(bot: Bot, arrow: Entity, movementAllowance = 0, targ
     width: target.width + movementAllowance * 2,
     height: target.height,
   };
-  let { position, velocity } = arrowFlight(bot, arrow);
+  const flight = arrowFlight(bot, arrow);
+  let { position, velocity } = flight;
   if (velocity.norm() === 0) return null;
+  // The launch overlaps its shooter's body. Candidate cover and a later return still need collision prediction (a11 T1c).
+  const launch = flight.ownLaunch;
+  if (launch && position.distanceTo(launch.position) <= 1e-6 && velocity.dot(launch.direction) > 0 &&
+      target.position.distanceTo(launch.feet) <= 1e-6) return null;
   // Horizontal drag cannot reverse an arrow. Stop once it has passed the
   // body's expanded footprint, fallen below it, or hit terrain, rather than
   // predicting an arbitrary number of ticks into the future.
@@ -58,16 +64,43 @@ export function isIncomingArrow(bot: Bot, arrow: Entity, movementAllowance = 0, 
   return arrowImpactInTicks(bot, arrow, movementAllowance, target) !== null;
 }
 
+/** Judge a candidate body by the same retained flight or directional contact as the shield. */
+export function projectileThreatensBody(bot: Bot, projectile: Entity, movementAllowance: number, body: EntityBody): boolean {
+  if (isArrowEntity(bot, projectile)) return isIncomingArrow(bot, projectile, movementAllowance, body);
+  return directionalProjectileContact(bot, projectile, { ...body, width: body.width + movementAllowance * 2 }) !== null;
+}
+
 /** Shield-facing and retreat admission must consider the same set of blockable shots. */
 export function incomingShieldProjectiles(bot: Bot, movementAllowance = 0): Entity[] {
-  const travelTime = (entity: Entity) => {
-    const state = arrowFlight(bot, entity);
-    return state.position.distanceTo(bot.entity.position) / state.velocity.norm();
-  };
-  return Object.values(bot.entities)
-    .filter(
-      (entity) =>
-        isIncomingBlazeProjectile(bot, entity, movementAllowance) || isIncomingArrow(bot, entity, movementAllowance),
-    )
-    .sort((a, b) => travelTime(a) - travelTime(b));
+  return assessIncomingShieldProjectiles(bot, movementAllowance).map(({ entity }) => entity);
+}
+
+/** Known collision times order each threat class; unknown observations remain in the assessment. */
+export function compareImpactTimes(a: { impactInTicks: number | null }, b: { impactInTicks: number | null }): number {
+  if (a.impactInTicks === null) return b.impactInTicks === null ? 0 : 1;
+  if (b.impactInTicks === null) return -1;
+  return a.impactInTicks - b.impactInTicks;
+}
+
+/** One contact assessment for shield admission and facing, with ballistic timing only for arrows. */
+export function assessIncomingShieldProjectiles(bot: Bot, movementAllowance = 0) {
+  const forecasts: { entity: Entity; impactInTicks: number | null; contact: Vec3 }[] = [];
+  const body = { ...bot.entity, width: bot.entity.width + movementAllowance * 2 };
+  for (const entity of Object.values(bot.entities)) {
+    // One judgement per entity: the branch's own forecast is the filter (`projectileThreatensBody` runs the same two predicates).
+    if (isArrowEntity(bot, entity)) {
+      const impact = arrowImpact(bot, entity, movementAllowance);
+      if (impact) forecasts.push({ entity, impactInTicks: impact.ticks, contact: impact.position });
+    } else {
+      const contact = directionalProjectileContact(bot, entity, body);
+      // The observed bearing is where the shield must face; an offset ray's entry
+      // into our expanded body can lie on a different side (EyesBot crossfire).
+      if (contact) forecasts.push({ entity, impactInTicks: null, contact: entity.position.clone() });
+    }
+  }
+  return forecasts.sort((a, b) => compareImpactTimes(a, b) ||
+    (a.impactInTicks === null && b.impactInTicks === null
+      // Order unknown shots by observed motion, then proximity, without claiming an arrival time.
+      ? b.entity.velocity.norm() - a.entity.velocity.norm() ||
+        a.entity.position.distanceTo(bot.entity.position) - b.entity.position.distanceTo(bot.entity.position) : 0));
 }

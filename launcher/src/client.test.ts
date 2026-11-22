@@ -4,7 +4,7 @@ import test from "node:test";
 import { bannerLines, emphasise, runConsole, startBackgroundLauncher, type ConsoleDeps } from "./client.ts";
 import { startControlServer, type LauncherLock } from "./control.ts";
 import type { StackStatus } from "./stack.ts";
-import { RecordingHandlers, STATUS as RUNNING } from "./cli-test-support.ts";
+import { freeTestPort, RecordingHandlers, STATUS as RUNNING } from "./cli-test-support.ts";
 
 const STATUS: StackStatus = { ...RUNNING, bots: [] };
 
@@ -43,7 +43,7 @@ function harness(find: () => LauncherLock | null, extra: Partial<ConsoleDeps> = 
 }
 
 test("a running launcher: the client prints the banner, then the lines, and ends with the stream", async () => {
-  const control = await startControlServer({ startPort: 26_300, handlers: handlers(STATUS) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   control.publish("Ayla is running (host port 25575).");
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }));
   const finished = runConsole(h.deps);
@@ -58,21 +58,22 @@ test("a running launcher: the client prints the banner, then the lines, and ends
   assert.ok(h.out.indexOf("Ayla is running (host port 25575).") > h.out.findIndex((line) => line.includes("localhost:25565")), "the banner comes first");
   assert.ok(h.out.includes("Brea is running (host port 25576)."));
   assert.match(h.out.at(-1)!, /stopped/u);
-  assert.equal(h.enterWaits, 1, "the window waits for Enter so the player can read why it ended");
+  assert.equal(h.enterWaits, 0);
 });
 
 /**
- * A launcher whose `/attach` answers with `attachAnswer` (a body, or an error the fetch throws); `/status` is the real
+ * A launcher whose `/attach` answers with `attachAnswer` (a body, response, or error); `/status` is the real
  * endpoint's. `inits` records the `/attach` request options.
  */
-async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Error) {
-  const control = await startControlServer({ startPort: 26_340, handlers: handlers(STATUS) });
+async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Response | Error) {
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   const inits: (RequestInit | undefined)[] = [];
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
       if (!String(input).endsWith("/attach")) return await fetch(input, init);
       inits.push(init);
       if (attachAnswer instanceof Error) throw attachAnswer;
+      if (attachAnswer instanceof Response) return attachAnswer;
       return new Response(attachAnswer, { status: 200 });
     }) as typeof fetch,
   });
@@ -81,20 +82,89 @@ async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Erro
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-test("a stream that ends normally says Mine AI has stopped; heartbeat comment blocks are not shown; the attach has fetch timeout false (Bun ends a stream silent for 360 s otherwise)", async () => {
+for (const [label, data, lines, waits] of [
+  ["empty", "", [], 0],
+  ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n", ["first", "second"], 0],
+  ["failed start", "data: Check the server log.\n\ndata: Stopping Mine AI (mine-ai stop)...\n\nevent: outcome\ndata: failed\n\n", ["Check the server log.", "Stopping Mine AI (mine-ai stop)..."], 1],
+] as const) {
+test(`a ${label} stream shows its lines and waits for Enter only after failure`, async () => {
   const body = new ReadableStream<Uint8Array>({
     start: (stream) => {
-      stream.enqueue(bytes(": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n"));
+      if (data) stream.enqueue(bytes(data));
       stream.close();
     },
   });
   const { control, h, inits } = await consoleWithAttach(body);
-  await runConsole(h.deps);
-  await control.close();
-  assert.deepEqual(h.out.slice(-3), ["first", "second", "Mine AI has stopped."]);
-  assert.ok(!h.out.some((line) => line.includes("ping")));
-  assert.equal(inits.length, 1);
-  assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
+  try {
+    assert.equal(await runConsole(h.deps), 0);
+    assert.deepEqual(h.out.slice(-lines.length - 1), [...lines, "Mine AI has stopped."]);
+    assert.ok(!h.out.includes(": ping"));
+    assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
+    assert.equal(h.enterWaits, waits);
+  } finally {
+    await control.close();
+  }
+});
+}
+
+test("a failure after attachment waits for Enter even when another stop wins", async () => {
+  const recording = handlers(STATUS);
+  const control = await startControlServer({ startPort: 26_380, handlers: recording });
+  let sawLine!: () => void;
+  const seen = new Promise<void>((resolve) => { sawLine = resolve; });
+  const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
+    write: (line) => { h.out.push(line); if (line === "Check the server log.") sawLine(); },
+  });
+  const finished = runConsole(h.deps);
+  try {
+    control.publish("Check the server log.");
+    await seen;
+    recording.status$ = { ...STATUS, phase: "stopping", problem: "Check the server log." };
+    control.publish("Stopping Mine AI (mine-ai stop)...");
+    await control.close();
+    assert.equal(await finished, 0);
+    assert.equal(h.enterWaits, 1);
+  } finally {
+    await control.close();
+  }
+});
+
+for (const [label, response, status] of [
+  ["attach 503", new Response("stopping", { status: 503 }), 503],
+  ["null body", new Response(null, { status: 200 }), 200],
+] as const) {
+  test(`${label} does not say stopped and waits for Enter`, async () => {
+    const { control, h } = await consoleWithAttach(response);
+    assert.equal(await runConsole(h.deps), 0);
+    await control.close();
+    assert.equal(h.out.at(-1), `Could not attach to Mine AI (HTTP ${status}).`);
+    assert.ok(!h.out.includes("Mine AI has stopped."));
+    assert.equal(h.enterWaits, 1);
+  });
+}
+
+test("a new console attaches and finishes while an earlier error waits for Enter", async () => {
+  const { control, h } = await consoleWithAttach(new Response(null, { status: 503 }));
+  let release!: () => void, signalPaused!: () => void, signalUnexpected!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const paused = new Promise<void>((resolve) => { signalPaused = resolve; });
+  const unexpected = new Promise<"blocked">((resolve) => { signalUnexpected = () => resolve("blocked"); });
+  h.deps = { ...h.deps, waitForEnter: () => { h.enterWaits++; if (h.enterWaits === 1) signalPaused(); else signalUnexpected(); return gate; } };
+  const first = runConsole(h.deps);
+  try {
+    await paused;
+    const fetchFirst = h.deps.fetch;
+    h.deps = { ...h.deps, fetch: (async (input: string | URL | Request, init?: RequestInit) => String(input).endsWith("/attach")
+      ? new Response(new ReadableStream<Uint8Array>({ start: (stream) => { stream.enqueue(bytes("data: fresh attachment\n\n")); stream.close(); } }))
+      : await fetchFirst(input, init)) as typeof fetch };
+    assert.equal(await Promise.race([runConsole(h.deps), unexpected]), 0);
+    assert.ok(h.out.includes("fresh attachment"));
+    assert.equal(h.enterWaits, 1);
+  } finally {
+    release();
+    assert.equal(await first, 0);
+    await control.close();
+  }
 });
 
 for (const [label, attachAnswer, reason] of [
@@ -135,8 +205,8 @@ test("no launcher yet: the client starts one, and when it never appears says so 
 });
 
 test("a launcher that is stopping is waited for, then a new one is started", async () => {
-  const stopping = await startControlServer({ startPort: 26_320, handlers: handlers({ ...STATUS, phase: "stopping" }) });
-  const fresh = await startControlServer({ startPort: 26_330, handlers: handlers(STATUS) });
+  const stopping = await startControlServer({ startPort: await freeTestPort(), handlers: handlers({ ...STATUS, phase: "stopping" }) });
+  const fresh = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   let polls = 0;
   let started = false;
   const h = harness(
@@ -156,7 +226,7 @@ test("a launcher that is stopping is waited for, then a new one is started", asy
 });
 
 for (const [label, status, patterns, absent] of [
-  ["a remote server says what the server must be", { ...STATUS, server: "remote", join: "play.example:25570" }, [/play\.example:25570/u, /vanilla Minecraft 1\.21\.4/u, /online-mode=false/u], []],
+  ["a remote server says what the server must be", { ...STATUS, server: "remote", join: "play.example:25570" }, [/play\.example:25570/u, /vanilla or Paper Minecraft 1\.21\.4/u, /online-mode=false/u], []],
   ["no server in the settings file says where to set one, with the model line", { ...STATUS, server: "none", join: null }, [/Model: gemma4:12b on this PC/u, /No Minecraft server is set/u, /C:\/MineAI\/settings\.json/u], []],
   ["a launcher from before settingsFound existed (field absent) keeps the no-server line", { ...STATUS, server: "none", join: null, settingsFound: undefined as unknown as boolean }, [/No Minecraft server is set/u], []],
   [
@@ -183,7 +253,7 @@ test("no settings file: a console that replays the stack's line shows that text 
       stream.close();
     },
   });
-  const control = await startControlServer({ startPort: 26_360, handlers: handlers({ ...STATUS, server: "none", join: null, settingsFound: false }) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers({ ...STATUS, server: "none", join: null, settingsFound: false }) });
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => (String(input).endsWith("/attach") ? new Response(body, { status: 200 }) : await fetch(input, init))) as typeof fetch,
   });
@@ -198,7 +268,7 @@ const CHAT_LINE = "In the game chat: !bots lists the bots, !bot start <name> and
 
 for (const [label, status, emphasised] of [
   ["local server", STATUS, [JOIN_LINE, CHAT_LINE]],
-  ["remote server", { ...STATUS, server: "remote", join: "play.example:25570", commands: { prefix: "!", audience: "disabled" } }, ["The bots join play.example:25570. That server must be vanilla Minecraft 1.21.4 with online-mode=false.", "Chat commands are off (commands.enabled is false in the settings file)."]],
+  ["remote server", { ...STATUS, server: "remote", join: "play.example:25570", commands: { prefix: "!", audience: "disabled" } }, ["The bots join play.example:25570. That server must be vanilla or Paper Minecraft 1.21.4 with online-mode=false.", "Chat commands are off (commands.enabled is false in the settings file)."]],
 ] as const) {
   test(`the ${label} banner: the join line and the chat-commands line are bold with color on and no other line is; with color off nothing changes`, () => {
     const plain = bannerLines(status);
@@ -212,7 +282,7 @@ for (const [label, status, emphasised] of [
 }
 
 test("the console writes the bold lines when its deps say color", async () => {
-  const control = await startControlServer({ startPort: 26_370, handlers: handlers(STATUS) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), { color: true });
   const finished = runConsole(h.deps);
   await new Promise((resolve) => setTimeout(resolve, 100));

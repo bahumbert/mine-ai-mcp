@@ -1,11 +1,15 @@
 import type { Bot } from "mineflayer";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
+import { serverTickPace, type TickMark } from "../../world/server-tick-pace.js";
+import { serverPacedWallMs } from "../../world/world-age.js";
+import { monotonicNow } from "../../utils/index.js";
 
 /** A vanilla shield blocks only after five ticks of use. */
 export const SHIELD_READY_TICKS = 5;
 
-interface BowDraw extends Disposable {
+export interface BowDraw extends Disposable {
+  readonly startedAt: TickMark;
   release(): void;
 }
 
@@ -13,9 +17,9 @@ interface BowDraw extends Disposable {
 export class CombatItemUse {
   #posture: "idle" | "shield" | "drawing" = "idle";
   readonly #bot: Bot;
-  readonly #holdFacing: (ticks: number) => Promise<void>;
+  readonly #holdFacing: (ticks: number, wallEnd?: number) => Promise<void | "held" | "interrupted">;
 
-  constructor(bot: Bot, holdFacing: (ticks: number) => Promise<void>,
+  constructor(bot: Bot, holdFacing: (ticks: number, wallEnd?: number) => Promise<void | "held" | "interrupted">,
     private readonly trace: (event: { stage: string; posture: string; usingHeldItem: boolean }) => void = () => {}) {
     this.#bot = bot;
     this.#holdFacing = holdFacing;
@@ -35,16 +39,23 @@ export class CombatItemUse {
     this.record("shield_invalidated");
   }
 
-  async raiseShield(): Promise<void> {
+  async raiseShield(stop: () => boolean = () => false): Promise<void> {
     if (this.shieldRaised) { this.record("shield_activation_skipped"); return; }
     this.#cancelDraw();
     this.activateShield();
-    await this.#holdFacing(SHIELD_READY_TICKS);
+    const pace = serverTickPace(this.#bot), mark = pace.mark();
+    const wallEnd = mark.ms + serverPacedWallMs(SHIELD_READY_TICKS);
+    let clientTicks = 0;
+    while (!stop() && !pace.ready(mark, SHIELD_READY_TICKS, clientTicks) &&
+        monotonicNow() < wallEnd) {
+      if (await this.#holdFacing(1, wallEnd) === "interrupted" || !this.shieldRaised) return;
+      clientTicks++;
+    }
   }
 
   /** One owner for shield readiness and waiting; the caller assesses geometry and its own lifecycle. */
   async guardUntil<Outcome>(assess: () => Outcome | null): Promise<Outcome> {
-    await this.raiseShield();
+    await this.raiseShield(() => assess() !== null);
     for (;;) {
       const outcome = assess();
       if (outcome !== null) return outcome;
@@ -75,6 +86,7 @@ export class CombatItemUse {
     this.#posture = "drawing";
     this.record("bow_draw_started");
     return {
+      startedAt: serverTickPace(this.#bot).mark(),
       release: () => {
         this.#bot.deactivateItem();
         recordCombatResourceReceipt(this.#bot, { kind: "arrow_release_command" });

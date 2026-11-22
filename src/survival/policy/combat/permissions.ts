@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { FamilyIndex } from "../../../world/item-families.js";
 import type { CombatPolicy } from "./contract.js";
 export function permitsHide(policy: Readonly<CombatPolicy>, recoveryAvailable: boolean): boolean {
   return (
@@ -9,10 +10,14 @@ export function permitsHide(policy: Readonly<CombatPolicy>, recoveryAvailable: b
 
 /** Keep weapon eligibility identical in ordinary, prepared, and retreat combat. */
 export function permittedCombatItems<Item extends { name: string }>(
+  index: FamilyIndex,
   items: readonly Item[],
   policy: Readonly<CombatPolicy>,
 ): Item[] {
-  return items.filter((item) => (item.name === "bow" ? policy.bow : item.name === "shield" ? policy.shield : true));
+  return items.filter((item) => {
+    const families = index.itemFamilies(item.name);
+    return families.includes("bow") ? policy.bow : families.includes("shield") ? policy.shield : true;
+  });
 }
 
 /** Only changed permissions consumed by this response require physical reconciliation. */
@@ -42,13 +47,15 @@ export function responsePermissions(policy: Readonly<CombatPolicy>, response: "f
     critical_health: policy.critical_health,
   };
   return response === "evade"
-    ? { ...defence, evade_timeout_ms: policy.evade_timeout_ms, evade_safe_range: policy.evade_safe_range }
+    ? { ...defence, evade_timeout_ms: policy.evade_timeout_ms, evade_safe_range: policy.evade_safe_range,
+        evade_clear_range: policy.evade_clear_range, evade_cover_range: policy.evade_cover_range }
     : {
         ...defence,
         engagement: policy.engagement,
         bow: policy.bow,
         ...recovery,
         protected_wait_ticks: policy.protected_wait_ticks,
+        quarry_wait_ticks: policy.quarry_wait_ticks,
         enderman_wait_ticks: policy.enderman_wait_ticks,
         volley_wait_ticks: policy.volley_wait_ticks,
       };

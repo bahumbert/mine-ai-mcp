@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { carriedCountField } from "../../test-support/carried-counts.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
 import { TestEndCombat, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
 import { DragonShotObservation } from "../../survival/perception/combat/dragon-shot.js";
 import type { FootingRecovery } from "../../survival/responses/footing.js";
@@ -28,7 +29,7 @@ function fixture() {
   let drawing = false, releases = 0;
   const dragon = () => ({ name: "ender_dragon", position: new Vec3(30, 84, 0), velocity: new Vec3(0, 0, 0), yaw: 0,
     metadata: { 9: 190, 16: 1 } });
-  const harness = createFakeBot({ dimension: "the_end", entities: { [DRAGON_ID]: dragon(), [REUSED_ID]: dragon() },
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), dimension: "the_end", entities: { [DRAGON_ID]: dragon(), [REUSED_ID]: dragon() },
     carried: { bow: 1, arrow: 3 } });
   const { bot, clock } = harness;
   const draw = bot.activateItem.bind(bot), release = bot.deactivateItem.bind(bot);
@@ -45,6 +46,7 @@ function fixture() {
 
 test("shoot_dragon refuses absent arrows and arrow-immune perches without releasing", async () => {
   const f = fixture();
+  using _timers = f.clock.install();
   f.arrows.count = 0;
   using missing = new DragonShotObservation(f.bot, 42);
   assert.equal((await f.clock.settle(f.end.shootDragon(new AbortController().signal, missing), SHOT_MS)).outcome, "weapon_unavailable");
@@ -57,6 +59,7 @@ test("shoot_dragon refuses absent arrows and arrow-immune perches without releas
 
 test("caller cancellation during the draw does not release an arrow", async () => {
   const f = fixture(), stop = new AbortController();
+  using _timers = f.clock.install();
   f.bot.activateItem = () => { stop.abort("cancelled while drawing"); };
   using observation = new DragonShotObservation(f.bot, 42);
   await assert.rejects(f.clock.settle(f.end.shootDragon(stop.signal, observation), SHOT_MS));
@@ -66,6 +69,7 @@ test("caller cancellation during the draw does not release an arrow", async () =
 
 test("a released shot survives takeover, reports health loss, and is never fired twice", async () => {
   const f = fixture(), runner = new ActionRunner();
+  using _timers = f.clock.install();
   let first: DragonShotObservation | undefined, attempts = 0;
   const runEnd: CombatController["runEnd"] = async (request, signal) => {
     if (request.kind !== "dragon_bow") throw Error("wrong request");
@@ -124,6 +128,7 @@ test("native death remains terminal when its health metadata packet is still sta
 
 test("a released arrow without health loss is a miss and is not retried", async () => {
   const f = fixture();
+  using _timers = f.clock.install();
   using observation = new DragonShotObservation(f.bot, 42);
   const result = await f.clock.settle(f.end.shootDragon(new AbortController().signal, observation), SHOT_MS);
   assert.equal(result.outcome, "shot_missed");
@@ -134,20 +139,26 @@ test("a released arrow without health loss is a miss and is not retried", async 
 
 test("a perch update during the final aim cancels the charged arrow", async () => {
   const f = fixture();
+  using _timers = f.clock.install();
+  using _pace = serverTickPace(f.bot);
+  await f.clock.advance(2_000);
   let looks = 0;
-  f.bot.look = async () => { if (++looks === 22) Reflect.set(f.dragon.metadata, 16, 5); };
+  f.bot.look = async () => { if (++looks === 21) Reflect.set(f.dragon.metadata, 16, 5); };
   using observation = new DragonShotObservation(f.bot, 42);
   const result = await f.clock.settle(f.end.shootDragon(new AbortController().signal, observation), SHOT_MS);
   assert.match(result.reason!, /DRAGON_PERCHED/);
-  assert.equal(looks, 22);
+  assert.equal(looks, 21);
   assert.equal(f.releases(), 0);
 });
 
 test("even the strictest shot margin yields the charged bow to dragon evasion", async () => {
   const f = fixture(), stop = new AbortController();
+  using _timers = f.clock.install();
+  using _pace = serverTickPace(f.bot);
+  await f.clock.advance(2_000);
   let danger = false, looks = 0, evasions = 0;
   Object.defineProperty(f.end, "danger", { get: () => danger });
-  f.bot.look = async () => { if (++looks === 22) danger = true; };
+  f.bot.look = async () => { if (++looks === 21) danger = true; };
   f.end.evade = async () => {
     evasions++;
     assert.equal(f.releases(), 0);

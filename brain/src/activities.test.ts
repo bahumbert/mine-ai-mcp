@@ -46,6 +46,7 @@ test("each skill has its activity, hunting by the mob's category, errands none",
     { skill: "drop_item", item: "dirt" },
     { skill: "protect_area", radius: 8, label: "farm" },
     { skill: "eat", food: "bread" },
+    { skill: "dig_shelter" },
   ] satisfies Step[]) assert.equal(activityOf(step, [], facts), null, step.skill);
 });
 

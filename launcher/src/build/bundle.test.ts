@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import { loadPaperSettings } from "../install/paper-settings.ts";
 import { APP_ASSETS, bundleEntries, copyAssets, ENTRY_POINTS, minecraftDataFiles, packageApp, WORKER_ENTRY_POINTS, WORKER_FOLDER } from "./bundle.ts";
 
 // Real `Bun.build` of the repository into a temp folder under the OS temp dir: no `node_modules` above it, so a module
@@ -93,7 +94,7 @@ test("the trimmed minecraft-data gives the 1.21.4 data the bots read, from a fol
   assert.equal(version, MINECRAFT_VERSION);
 });
 
-// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills.ts` for the
+// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills/explore.ts` for the
 // entity types), not the server's version: a copy trimmed to 1.21.4 alone threw in play, from the first boat or creature
 // question (task review 2026-10-31; `brain --help` never calls them).
 test("the trimmed minecraft-data also gives the newest registry the brain reads for boat recipes and entity types", () => {
@@ -137,6 +138,11 @@ test("copyAssets copies the manifest, styles, personas, bun.exe and licence, and
   } finally {
     for (const folder of [stage, app, secondApp]) rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("the real pack ships the Paper settings file where the install step and the stack read it, and it loads", () => {
+  assert.ok(appFiles().includes("packaging/paper-settings.json"));
+  assert.ok(Object.keys(loadPaperSettings(join(appDir, "packaging", "paper-settings.json"))).length > 0);
 });
 
 test("the real pack ships THIRD-PARTY-NOTICES.txt in the app folder only, with the libraries, minecraft-data and Bun", () => {

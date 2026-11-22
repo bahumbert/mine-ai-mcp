@@ -23,8 +23,8 @@ test("an open furnace supplies live carried slots in player-inventory coordinate
 
   assert.deepEqual(snapshotBotStatus(bot).inventory, [
     // A worn helmet wears down: Prismarine's item reads its maximum from the version's data, as at runtime.
-    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 } },
-    { slot: 11, location: "main", name: "birch_planks", count: 11, held: false, durability: null },
+    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 }, families: ["helmet"] },
+    { slot: 11, location: "main", name: "birch_planks", count: 11, held: false, durability: null, families: [] },
     {
       slot: 38,
       location: "hotbar",
@@ -32,6 +32,7 @@ test("an open furnace supplies live carried slots in player-inventory coordinate
       count: 1,
       held: true,
       durability: { remaining: 1, maximum: 131 },
+      families: ["sword"],
     },
   ]);
   assert.equal(fuel.slot, 5);

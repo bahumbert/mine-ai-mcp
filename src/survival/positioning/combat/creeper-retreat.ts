@@ -2,7 +2,8 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { isHostile } from "../../perception/combat/threats.js";
-import { isCreeper, type CreeperObservation } from "../../perception/combat/creepers.js";
+import type { CreeperObservation } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 type Entity = Bot["entity"];
 const RETREAT_HEADING_FAN_DEGREES = [0, 45, -45, 90, -90];
 function groundAheadIsSafe(bot: Bot, heading: Vec3): boolean {
@@ -57,7 +58,7 @@ export function creeperRetreatHeading(bot: Bot, nearby: readonly CreeperObservat
   // establish that a heading separates from a creeper.
   const away = new Vec3(0, 0, 0);
   const threats = new Map<number, { id: number; position: Vec3 }>();
-  const crowd = Object.values(bot.entities).filter(entity => entity.isValid && !dead.has(entity.id) && isHostile(entity) && !isCreeper(entity) && entity.position.distanceTo(bot.entity.position) <= 16);
+  const crowd = Object.values(bot.entities).filter(entity => entity.isValid && !dead.has(entity.id) && isHostile(entity) && !hasSelfExplosion(entity.name, bot.version) && entity.position.distanceTo(bot.entity.position) <= 16);
   for (const threat of [...nearby, ...crowd]) threats.set(threat.id, threat);
   for (const threat of threats.values()) {
     const separation = bot.entity.position.minus(threat.position);

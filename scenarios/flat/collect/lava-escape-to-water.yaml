@@ -12,7 +12,8 @@ geometry:
   - setblock: { block: water, at: [2, -60, 0] }
 players:
   - name: FireMiner
-    pos: [0.5, -60, 0.5]
+    pos: [-2.5, -59, 0.5]
+    op: true
     inventory: [{ item: diamond_pickaxe, count: 1 }]
 client:
   command: bun

@@ -3,6 +3,8 @@ import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
+import { raceSignal } from "../../utils/index.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import {
   equipAnnotations,
   equipOutcomes,
@@ -126,8 +128,8 @@ async function equipRequested(
   const selection = sourceSlot === undefined ? {} : { sourceSlot, durabilityUsed: item.durabilityUsed ?? null };
   if (sourceSlot !== undefined) progress.selected.set(index, selectedProperties);
   try {
-    if (sourceSlot === undefined) await bot.equip(item, destination);
-    else await equipFromSlot(bot, sourceSlot, destination);
+    // A swap's clicks go on in the background after a cancel, so its restore click still puts the hand slot back.
+    await raceSignal(sourceSlot === undefined ? bot.equip(item, destination) : equipFromSlot(bot, sourceSlot, destination), signal);
   } catch (cause) {
     signal?.throwIfAborted();
     return { item: itemName, destination, ...selection, equipped: false, error: equipOutcomes.rejected(itemName, cause) };
@@ -203,7 +205,7 @@ export function createEquipAction(bot: Bot) {
     formatResult: formatEquipResult,
     execution: { kind: "resumable_task" },
     annotations: equipAnnotations,
-    parse: parseEquipRequest,
+    parse: (input) => parseEquipRequest(input, familyIndexOf(bot)),
     begin: (request, _lifetime, observe) => beginEquip(bot, request, observe),
   });
 }

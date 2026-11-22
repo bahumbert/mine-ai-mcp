@@ -7,6 +7,7 @@ import { fallsUnder, risesOver, watchBodyTicks } from "../control/reflex-progres
 import { selectPolicyFood } from "../perception/food.js";
 import { BodyAbort } from "../../session/abort.js";
 import { isRawFood } from "../../world/food.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { rawFoodPermitted } from "../policy/food.js";
 import type { SurvivalPolicyState } from "../state/survival-policy.js";
 import { decideHungerResponse, needsFood } from "../policy/environment.js";
@@ -15,7 +16,7 @@ import { decideHungerResponse, needsFood } from "../policy/environment.js";
 export const HUNGER_REFLEX = "hunger_reflex" as const;
 const CHECK_INTERVAL_TICKS = 20;
 /** A meal is a few seconds; 8 s without a bite, food gained or a stack spent ends it, then a 2 s pause (owner 2026-10-19). */
-const HUNGER_LIMITS: ReflexLimits = { ceilingMs: 20_000, noProgressMs: 8_000, standDownMs: 2_000 };
+const HUNGER_LIMITS: ReflexLimits = { ceilingTicks: 400, noProgressTicks: 160, standDownTicks: 40 };
 
 /** What counts as getting somewhere during a meal: food or saturation rose, the stack shrank, a bite is in progress. */
 function mealProgress(bot: Bot, food: string, mark: (reason: string) => void): () => void {
@@ -60,6 +61,7 @@ export function attachHungerReflex(
   policy: SurvivalPolicyState,
 ): AsyncDisposable {
   let activeFood: string | null = null;
+  const isRaw = (name: string) => isRawFood(familyIndexOf(bot), name);
   const registration = driver.register({
     name: HUNGER_REFLEX,
     // Eating needs packets and a wall-clock bound, not physics: it goes on in a boat.
@@ -78,13 +80,13 @@ export function attachHungerReflex(
           .filter((item) => item.name === food)
           .map((item) => item.count),
       }),
-      permissions: () => isRawFood(food) ? { ...policy.food.raw } : null,
+      permissions: () => isRaw(food) ? { ...policy.food.raw } : null,
     }),
     limits: () => HUNGER_LIMITS,
     progress: (food, mark) => mealProgress(bot, food, mark),
     act: async (food, signal) => {
       // A policy edit can land after sensing but before body admission.
-      if (isRawFood(food) && !rawFoodPermitted(policy.food.raw, { health: bot.health, hunger: bot.food }).permitted)
+      if (isRaw(food) && !rawFoodPermitted(policy.food.raw, { health: bot.health, hunger: bot.food }).permitted)
         throw new BodyAbort({ kind: "policy_changed", revision: policy.snapshot().revision }, "Food policy revoked this meal.");
       const hungerBefore = bot.food;
       const saturationBefore = bot.foodSaturation;
@@ -110,7 +112,7 @@ export function attachHungerReflex(
     describe: (outcome) => outcome,
   });
   const unsubscribe = policy.onChange(async (snapshot) => {
-    if (activeFood === null || !isRawFood(activeFood)) return;
+    if (activeFood === null || !isRaw(activeFood)) return;
     if (rawFoodPermitted(policy.food.raw, { health: bot.health, hunger: bot.food }).permitted) return;
     await driver.cancel(HUNGER_REFLEX,
       new BodyAbort({ kind: "policy_changed", revision: snapshot.revision }, "Food policy revoked this meal."));

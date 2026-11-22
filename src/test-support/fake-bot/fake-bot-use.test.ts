@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { type FakeBotOptions, type FakeHarness, createFakeBot } from "./fake-bot.js";
 import { createFakeClock } from "./fake-clock.js";
@@ -20,6 +21,63 @@ const SKY_AIM = new Vec3(0.5, 20, 0.5);
 const NEAR = 0.02;
 /** Hotbar slot 0 is window slot 36. */
 const HOTBAR_START = 36;
+
+test("a bow's launch velocity follows its server-tick draw and look at 20 and 10 tps", async () => {
+  for (const ticksPerSecond of [20, 10]) {
+    for (const [drawTicks, speed] of [[20, 3], [10, 1.25]] as const) {
+      const { bot, clock, server } = createFakeBot({ carried: { bow: 1, arrow: 1 }, server: { ticksPerSecond } });
+      await bot.look(-Math.PI / 2, Math.PI / 6, true);
+      const started = new Promise<void>((resolve) => bot.once("entityUpdate", () => resolve()));
+      bot.activateItem();
+      await clock.settle(started, 1_000);
+      const startTick = server.gameTime;
+      const startMs = clock.now();
+      await clock.advance((drawTicks - 1) * 1_000 / ticksPerSecond);
+      const spawned = new Promise<Entity>((resolve) => bot.once("entitySpawn", resolve));
+      bot.deactivateItem();
+      const arrow = await clock.settle(spawned, 1_000);
+      assert.equal(server.gameTime - startTick, drawTicks, `server ticks at ${ticksPerSecond} tps`);
+      assert.equal(clock.now() - startMs, (drawTicks - 1) * 1_000 / ticksPerSecond + 50, `clock at ${ticksPerSecond} tps`);
+      assert.ok(Math.abs(arrow.velocity.x - speed * Math.cos(Math.PI / 6)) < 0.01, `x velocity ${arrow.velocity.x}, clock ${clock.now()}, age ${bot.time.age}`);
+      assert.ok(Math.abs(arrow.velocity.y - speed * 0.5) < 0.01, `y velocity ${arrow.velocity.y}, clock ${clock.now()}, age ${bot.time.age}`);
+      assert.ok(Math.abs(arrow.velocity.z) < 0.01, `z velocity ${arrow.velocity.z}, clock ${clock.now()}, age ${bot.time.age}`);
+    }
+  }
+});
+
+test("a stopped mid-draw server resumes and shoots once per release across the next draw", async () => {
+  for (const ticksPerSecond of [20, 10]) {
+    const { bot, clock, server } = createFakeBot({ carried: { bow: 1, arrow: 2 }, server: { ticksPerSecond } });
+    const arrows: Entity[] = [];
+    bot.on("entitySpawn", (entity) => { if (entity.name === "arrow") arrows.push(entity); });
+    const started = new Promise<void>((resolve) => bot.once("entityUpdate", () => resolve()));
+    bot.activateItem();
+    await clock.settle(started, 1_000);
+    await clock.advance(5_000 / ticksPerSecond);
+    server.stop();
+    const stoppedAt = server.gameTime;
+    await clock.advance(11_000);
+    assert.equal(server.gameTime, stoppedAt, `${ticksPerSecond} tps: stopped at ${stoppedAt}, clock ${clock.now()}`);
+    assert.equal(arrows.length, 0, `no shot while stopped, clock ${clock.now()}, age ${bot.time.age}`);
+    server.resume();
+    const first = new Promise<Entity>((resolve) => bot.once("entitySpawn", resolve));
+    bot.deactivateItem();
+    await clock.settle(first, 1_000);
+    assert.equal(arrows.length, 1, `first release, clock ${clock.now()}, age ${bot.time.age}`);
+    const restarted = new Promise<void>((resolve) => bot.once("entityUpdate", () => resolve()));
+    bot.activateItem();
+    await clock.settle(restarted, 1_000);
+    await clock.advance(5_000 / ticksPerSecond);
+    const second = new Promise<Entity>((resolve) => bot.once("entitySpawn", resolve));
+    bot.deactivateItem();
+    await clock.settle(second, 1_000);
+    const nextTick = new Promise<void>((resolve) => { const off = server.onTick(() => { off(); resolve(); }); });
+    await clock.settle(nextTick, 1_000);
+    assert.equal(arrows.length, 2, `two releases, clock ${clock.now()}, age ${bot.time.age}`);
+    assert.notEqual(arrows[0]!.id, arrows[1]!.id);
+    assert.equal(bot.inventory.count(bot.registry.itemsByName.arrow!.id, null), 0, `two arrows spent, clock ${clock.now()}, age ${bot.time.age}`);
+  }
+});
 
 function boatBot(options: FakeBotOptions = {}): FakeHarness {
   return createFakeBot({ position: new Vec3(0.5, -60, 0.5), cells: { ...POOL, "-3,-60,0": "stone" }, carried: { oak_boat: 3 }, ...options });

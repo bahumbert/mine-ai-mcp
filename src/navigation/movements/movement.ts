@@ -45,6 +45,8 @@ export type PlannedOperation =
       readonly position: BlockPosition;
       readonly expectedStateId: number;
       readonly toolType: number | null;
+      /** Refuse removal of the body's sole support, including a centred downward dig. */
+      readonly retainSupport?: boolean;
       /**
        * Falling blocks this break brings down into its cell, lowest first. The
        * effect waits for each to land and breaks it again where it stands, so
@@ -102,6 +104,8 @@ export interface RoutePlan {
   readonly steps: readonly PlannedStep[];
   /** Every cell the route's preconditions read, as packed cell keys. */
   readonly dependencies: ReadonlySet<number>;
+  /** The cells lava could flow through into a route cell, as packed cell keys: only a change involving lava there invalidates. */
+  readonly lavaDependencies: ReadonlySet<number>;
   readonly totalCost: number;
   readonly complete: boolean;
 }

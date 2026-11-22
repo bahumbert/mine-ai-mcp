@@ -1,0 +1,80 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-light-in-cells
+tags:
+  - contract
+description: "The light the server sends for a cell and what bot.blockAt holds of it: open air at noon, a closed stone box, the cells along a torch inside a second box, the cells above each roof and one cell far above the arena. Contract check tests/minecraft/contract/checks/light-in-cells.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: light-in-cells
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -4 -60 -1 stone
+  - setblock -4 -60 0 stone
+  - setblock -4 -60 1 stone
+  - setblock -4 -59 -1 stone
+  - setblock -4 -59 0 stone
+  - setblock -4 -59 1 stone
+  - setblock -3 -60 -1 stone
+  - setblock -3 -60 1 stone
+  - setblock -3 -59 -1 stone
+  - setblock -3 -59 0 stone
+  - setblock -3 -59 1 stone
+  - setblock -2 -60 -1 stone
+  - setblock -2 -60 0 stone
+  - setblock -2 -60 1 stone
+  - setblock -2 -59 -1 stone
+  - setblock -2 -59 0 stone
+  - setblock -2 -59 1 stone
+  - setblock 1 -60 -1 stone
+  - setblock 1 -60 0 stone
+  - setblock 1 -60 1 stone
+  - setblock 1 -59 -1 stone
+  - setblock 1 -59 0 stone
+  - setblock 1 -59 1 stone
+  - setblock 2 -60 -1 stone
+  - setblock 2 -60 1 stone
+  - setblock 2 -59 -1 stone
+  - setblock 2 -59 0 stone
+  - setblock 2 -59 1 stone
+  - setblock 3 -60 -1 stone
+  - setblock 3 -60 1 stone
+  - setblock 3 -59 -1 stone
+  - setblock 3 -59 0 stone
+  - setblock 3 -59 1 stone
+  - setblock 4 -60 -1 stone
+  - setblock 4 -60 1 stone
+  - setblock 4 -59 -1 stone
+  - setblock 4 -59 0 stone
+  - setblock 4 -59 1 stone
+  - setblock 5 -60 -1 stone
+  - setblock 5 -60 1 stone
+  - setblock 5 -59 -1 stone
+  - setblock 5 -59 0 stone
+  - setblock 5 -59 1 stone
+  - setblock 6 -60 -1 stone
+  - setblock 6 -60 0 stone
+  - setblock 6 -60 1 stone
+  - setblock 6 -59 -1 stone
+  - setblock 6 -59 0 stone
+  - setblock 6 -59 1 stone
+  - setblock 2 -60 0 torch
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor
