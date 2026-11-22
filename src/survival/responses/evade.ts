@@ -16,6 +16,7 @@ import { defendWhileRetreating } from "../weapons/retreat-melee.js";
 import { evadeExhaustion } from "./evade-detail.js";
 import { EvadeClock, evadeBudgetTicks } from "./evade-clock.js";
 import { EvadeObservation } from "./evade-observation.js";
+import { FIRE_LINE_PRICE_TICKS, FIRE_LINE_THETA_RAD, withFireLine } from "./evade-fire-line.js";
 
 export { evadeDetail } from "./evade-detail.js";
 type Route = Awaited<ReturnType<NavigationRuntime["navigate"]>>;
@@ -81,8 +82,10 @@ async function navigateEvade(flight: Flight): Promise<{ route: Route; reached: b
       ? { status: "stopped", reason: String(incoming.signal.reason), elapsedMs: 0 }
       : await navigation.navigate({
         // Supported routes cannot depend on momentum that an incoming hit can reset (fortress replay, P4-29).
-        movements: createMovements(bot, { allowParkour: false, allowDigging: context.policy.terrain.dig,
+        // A step that runs straight away from a projectile shooter pays the line-of-fire price (plan a5 T16b).
+        movements: withFireLine(createMovements(bot, { allowParkour: false, allowDigging: context.policy.terrain.dig,
           scaffolding: context.policy.terrain.place }),
+        { shooters: () => observed.shooters(), thetaRad: FIRE_LINE_THETA_RAD, priceTicks: FIRE_LINE_PRICE_TICKS }),
         goal: { resolve: (observation) => observed.goal.resolve(observation) },
         signal, stopSignal: AbortSignal.any([incoming.signal, reached.signal, clock.signal]), timeoutMs: clock.remainingMs(),
         searchLimits: { primaryTimeoutMs: 500, failureTimeoutMs: 500, maximumRadius: 48 },

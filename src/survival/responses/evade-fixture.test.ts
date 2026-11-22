@@ -14,6 +14,8 @@ import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
 import { EvadeObservation } from "./evade-observation.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
+import type { MovementPolicy, PolicyDecision } from "../../navigation/movements/policy.js";
+import type { BlockPosition } from "../../navigation/world/world.js";
 
 export const EVADE_BUDGET_MS = 3_000;
 export const ROUTE_MS = 1_000;
@@ -144,4 +146,33 @@ export function assertEndedOnTicks(result: Awaited<ReturnType<ReturnType<typeof 
   assert.equal(result.result.kind, "exhausted", "the clock's abort is the budget ending, not a failure");
   assert.ok(spent >= 60 && spent < 60 + PACKET_TICKS, `age moved ${spent}`);
   assert.ok(result.elapsedTicks! >= 60 && result.elapsedTicks! < 60 + PACKET_TICKS, `elapsed ${result.elapsedTicks} ticks`);
+}
+
+// T16b: walks from the bot's cell (0, 0) for the line-of-fire tests: a bow shooter at (9.5, 0.5) prices the straight-away
+// walk only; the slant is priced by a second shooter at (9.5, 2.5) alone.
+export interface Walk { readonly from: BlockPosition; readonly to: BlockPosition }
+export const STRAIGHT_AWAY: Walk = { from: { x: 0, y: 64, z: 0 }, to: { x: -1, y: 64, z: 0 } };
+export const ACROSS_THE_LINE: Walk = { from: { x: 0, y: 64, z: 0 }, to: { x: 0, y: 64, z: 1 } };
+export const SLANT_OFF_SECOND: Walk = { from: { x: 0, y: 64, z: 0 }, to: { x: -1, y: 64, z: -1 } };
+
+/** The decision a walk gets from the route's movement policy; a policy without `decideMovement` allows every walk. */
+export function walkAnswer(movements: MovementPolicy, walk: Walk): PolicyDecision {
+  return movements.decideMovement?.("walk", walk.from, walk.to) ?? { kind: "allowed" };
+}
+
+/** The reason of a price (`line_of_fire`), or the kind of a decision that carries none. */
+export function fireVerdict(decision: PolicyDecision): string {
+  return decision.kind === "penalized" ? decision.reason : decision.kind;
+}
+
+/** The answers to `walks` asked by the first route, during the route (live shooter positions), then the evade runs on. */
+export async function firstRouteAnswers(fixture: ReturnType<typeof reachFixture>, walks: readonly Walk[]): Promise<PolicyDecision[]> {
+  const navigate = fixture.navigation.navigate;
+  const answers: PolicyDecision[] = [];
+  fixture.navigation.navigate = async (options) => {
+    if (answers.length === 0) answers.push(...walks.map((walk) => walkAnswer(options.movements, walk)));
+    return navigate(options);
+  };
+  await fixture.run();
+  return answers;
 }
