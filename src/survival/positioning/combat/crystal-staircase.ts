@@ -170,8 +170,8 @@ function* staircaseClearance(path: readonly Vec3[]): Iterable<Vec3> {
 function nativeTower(bot: Bot, center: Vec3, ground: number, top: number, cells: readonly BuildCell[]): Vec3[] {
   const core = bot.blockAt(center.offset(0, -4, 0));
   if (!core) throw new Error("[CRYSTAL_TOWER_UNLOADED] Load the tower before planning its staircase.");
-  if (core.type !== bot.registry.blocksByName.obsidian?.id)
-    throw new Error("[CRYSTAL_TOWER_UNSUPPORTED] The surveyed tower is missing its native obsidian core.");
+  if ((observeMineflayerBlock(core).bits & GEOMETRY_FULL_CUBE) === 0)
+    throw new Error("[CRYSTAL_TOWER_UNSUPPORTED] The surveyed tower is missing its native full-block core.");
   const planned = new Set(cells.map(({ position }) => keyOf(position)));
   for (const { position, blockName } of cells) {
     if (isAir({ name: blockName }) && bot.blockAt(new Vec3(position.x, position.y, position.z))?.name === core.name)

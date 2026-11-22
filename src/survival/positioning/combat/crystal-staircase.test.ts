@@ -121,12 +121,12 @@ test("a tread inside another owner's region is not built: the build names the re
   assert.equal(bot.blockAt(new Vec3(1, 64, 0))?.name, "air");
 });
 
-for (const replacement of ["air", "end_stone"]) {
+for (const replacement of ["air", "iron_bars"]) {
   test(`the staircase refuses a native tower with ${replacement} in its surveyed core`, () => {
     const blocks = spikeCells(2);
     blocks["0,86,0"] = replacement;
     const { bot } = createFakeBot({ cells: blocks, groundY: null });
-    assert.throws(() => planCrystalStaircase(bot, crystal), /CRYSTAL_TOWER_UNSUPPORTED.*native obsidian core/);
+    assert.throws(() => planCrystalStaircase(bot, crystal), /CRYSTAL_TOWER_UNSUPPORTED.*native full-block core/);
   });
 }
 
