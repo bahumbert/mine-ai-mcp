@@ -10,7 +10,6 @@ import { INCIDENT_HISTORY_MS } from "../diagnostics/incident-recorder.js";
 import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervisor.js";
 import { createFakeRuntimeChild } from "../test-support/fake-runtime-child.js";
 import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
-import { sleepMs } from "../utils/wall-timers.js";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
 const executable = process.execPath;
@@ -105,13 +104,12 @@ async function whenHealthy(url: string): Promise<void> {
  * Waits for the supervisor's `failed` state and returns its `/health` answer. A 503 alone is not enough: it also covers
  * `failing`, where the failure and its incident are not saved yet. The wait is bounded by the test's own timeout.
  */
-async function whenFailed(url: string, pollMs = 100) {
+async function whenFailed(url: string) {
   while (true) {
     const response = await fetch(`${url}/health`);
     const status = await response.json();
     if (status.runtime?.state === "failed") return { httpStatus: response.status, status };
-    if (pollMs > 0) await sleepMs(pollMs);
-    else await nextTurn();
+    await nextTurn();
   }
 }
 
@@ -230,7 +228,7 @@ test(
     assert.equal(await stateOf(url), "ready", "The runtime wedges only after the ring's age.");
     // Last beat at 5 000 ms, failure at 6 000 ms of clock.
     await clock.advance(250 + fastDeadlines.unresponsiveMs + 250, 250);
-    const { httpStatus, status } = await whenFailed(url, 0);
+    const { httpStatus, status } = await whenFailed(url);
 
     assert.equal(httpStatus, 503);
     const reference = status.runtime.failure.incident;
@@ -327,13 +325,14 @@ test("a long operation with a live event loop is not timed out", async (t) => {
   assert.ok(supervisor.child.exitCode !== null || supervisor.child.signalCode !== null, "close must reap its runtime.");
 });
 
-test("a runtime launch failure stays observable and can be closed", { timeout: 5000 }, async (t) => {
+// limit: 49 ms measured n=10 at load 25-26, 2026-11-22
+test("a runtime launch failure stays observable and can be closed", { timeout: 1_000 }, async (t) => {
   const { supervisor, url } = await supervised(t, "launch-failure", (directory) => ({
     executable: path.join(directory, "missing-runtime-executable"),
     args: [],
   }));
 
-  const { status } = await whenFailed(url, 20);
+  const { status } = await whenFailed(url);
   assert.match(JSON.stringify(status), /RUNTIME_EXITED/);
 
   await Promise.all([supervisor.close(), supervisor.close()]);
@@ -394,17 +393,31 @@ test("a heartbeat at 900 ms resets the window", async (t) => {
   assert.equal(await stateOf(url), "ready");
 });
 
-/** Polls until the supervisor answers `/health` 200 (state `ready`); bounded by the test's own timeout. */
-async function whenReady(url: string): Promise<void> {
-  while ((await fetch(`${url}/health`)).status !== 200) await sleepMs(50);
+/** The restart waits of `fastRestart` and `waiting` below end within this much clock (their longest is 2 000 ms): a restart that is going to happen has happened by then. */
+const PAST_ANY_RESTART_WAIT_MS = 10_000;
+
+/** The latest runtime child gets a call that never returns: after the silence deadline and a watchdog tick (1 250 ms of the clock) the supervisor declares it unresponsive and answers the call with the failure. */
+async function hangLatest(runtime: Awaited<ReturnType<typeof fakeSupervised>>, id: number): Promise<string> {
+  const { url, clock, children } = runtime;
+  const request = mcpCall(url, id, "hang");
+  await children.at(-1)!.arrived("/hang");
+  await clock.advance(1_250);
+  return (await request).text();
 }
 
-test("a runtime killed as unresponsive is started again; a second failure inside healthyMs restarts it again and answers", { timeout: 25_000 }, async (t) => {
+/** After a failure: the clock runs through the restart wait until the `count`-th runtime child is the one answering as ready. */
+async function untilRestarted(runtime: Awaited<ReturnType<typeof fakeSupervised>>, count: number): Promise<void> {
+  const { url, clock, children } = runtime;
+  while (children.length < count || (await stateOf(url)) !== "ready") await clock.advance(250);
+}
+
+// limit: 2 936 ms measured n=10 at load 25-26, 2026-11-22
+test("a runtime killed as unresponsive is started again; a second failure inside healthyMs restarts it again and answers", { timeout: 6_000 }, async (t) => {
   const { supervisor, url, lines } = await supervised(t, "restart-twice", undefined, fastDeadlines, fastRestart);
   await whenHealthy(url);
   const firstPid = supervisor.child.pid;
   assert.match(await (await mcpCall(url, 91, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
-  await whenReady(url);
+  await whenHealthy(url);
   assert.notEqual(supervisor.child.pid, firstPid, "the restarted child is a new process");
   const reply = await (await mcpCall(url, 92, "hang")).text();
   // Read from the reply, not from /health: the wait is 100-200 ms. The first child's exit, seen while the supervisor
@@ -417,7 +430,7 @@ test("a runtime killed as unresponsive is started again; a second failure inside
   assert.deepEqual(keys[0] === "actionId" ? keys.slice(1, 3) : keys.slice(0, 2), ["code", "observedAt"]);
   assert.equal(keys.at(-1), "restart", "restart is the last field");
 
-  await whenReady(url);
+  await whenHealthy(url);
   assert.equal(await stateOf(url), "ready");
   const events = eventsOf(lines);
   assert.deepEqual(
@@ -436,18 +449,21 @@ test("a runtime killed as unresponsive is started again; a second failure inside
   assert.ok(Number.isFinite(Date.parse(scheduled!.observedAt as string)));
 });
 
-test("a failure past the attempts stays down and says so", { timeout: 40_000 }, async (t) => {
-  const { url } = await supervised(t, "restart-given-up", undefined, fastDeadlines, fastRestart, 120_000);
+test("a failure past the attempts stays down and says so", async (t) => {
+  const runtime = await fakeSupervised(t, "restart-given-up", { deadlines: fastDeadlines, restart: fastRestart, historyMs: 120_000 });
+  const { url, clock, children } = runtime;
   await whenHealthy(url);
-  await mcpCall(url, 94, "hang");
-  await whenReady(url);
-  await mcpCall(url, 95, "hang");
-  await whenReady(url);
-  const reply = JSON.parse(await (await mcpCall(url, 96, "hang")).text());
+  await hangLatest(runtime, 94);
+  await untilRestarted(runtime, 2);
+  await hangLatest(runtime, 95);
+  await untilRestarted(runtime, 3);
+  const reply = JSON.parse(await hangLatest(runtime, 96));
   assert.match(reply.error.message, /stays down after 2 restarts in a row without 1 min of play: restart the host/);
   assert.equal(reply.error.data.restart, null);
 
-  await sleepMs(1_000);
+  await whenFailed(url);
+  await clock.advance(PAST_ANY_RESTART_WAIT_MS);
+  assert.equal(children.length, 3, "no runtime was started after the give-up");
   const status = await (await fetch(`${url}/health`)).json();
   assert.equal(status.runtime.state, "failed");
   const records = (await readFile(status.runtime.failure.incident.artifact.path, "utf8"))
@@ -462,28 +478,34 @@ test("a failure past the attempts stays down and says so", { timeout: 40_000 }, 
   assert.match(await afterwards.text(), /stays down after 2 restarts/);
 });
 
-test("no restart option never restarts", { timeout: 15_000 }, async (t) => {
-  const { url, lines } = await supervised(t, "restart-null", undefined, fastDeadlines, null);
+test("no restart option never restarts", async (t) => {
+  const runtime = await fakeSupervised(t, "restart-null", { deadlines: fastDeadlines });
+  const { url, clock, children, lines } = runtime;
   await whenHealthy(url);
-  const reply = JSON.parse(await (await mcpCall(url, 97, "hang")).text());
+  const reply = JSON.parse(await hangLatest(runtime, 97));
   assert.match(reply.error.message, /runtime has been stopped and requires a restart\./);
   assert.equal(reply.error.data.restart, null);
-  await sleepMs(1_000);
+  await whenFailed(url);
+  await clock.advance(PAST_ANY_RESTART_WAIT_MS);
   assert.equal(await stateOf(url), "failed");
+  assert.equal(children.length, 1, "no runtime was started after the failure");
   assert.deepEqual(eventsOf(lines), []);
 });
 
-test("a supervisor closed while a restart waits spawns nothing", { timeout: 25_000 }, async (t) => {
-  const waiting: RestartSettings = { ...fastRestart, delays: [{ minMs: 0, maxMs: 0 }, { minMs: 2_000, maxMs: 2_000 }] };
-  const { supervisor, url } = await supervised(t, "restart-close-waiting", undefined, fastDeadlines, waiting);
-  await whenHealthy(url);
-  await mcpCall(url, 101, "hang");
-  await whenReady(url);
-  assert.match(await (await mcpCall(url, 102, "hang")).text(), /\(restart 2 of 2\)/);
+test("a supervisor closed while a restart waits spawns nothing", async (t) => {
+  const longWait = 2_000;
+  const waiting: RestartSettings = { ...fastRestart, delays: [{ minMs: 0, maxMs: 0 }, { minMs: longWait, maxMs: longWait }] };
+  const runtime = await fakeSupervised(t, "restart-close-waiting", { deadlines: fastDeadlines, restart: waiting });
+  const { supervisor, clock, children } = runtime;
+  await whenHealthy(runtime.url);
+  await hangLatest(runtime, 101);
+  await untilRestarted(runtime, 2);
+  assert.match(await hangLatest(runtime, 102), /\(restart 2 of 2\)/);
   const killed = supervisor.child;
   await supervisor.close();
-  await sleepMs(2_500);
+  await clock.advance(longWait + 500);
   assert.equal(supervisor.child, killed, "no child was spawned after close");
+  assert.equal(children.length, 2, "the restart wait ended with no start");
 });
 
 /** A runtime that reports ready on a port nobody serves and then ignores SIGTERM, as a runtime whose own close hangs. */
@@ -492,13 +514,13 @@ const sigtermIgnoringRuntime = (): { executable: string; args: string[] } => ({
   args: ["-e", 'process.on("SIGTERM", () => {}); process.once("disconnect", () => process.exit(0)); process.send({ kind: "ready", port: 1 }); setInterval(() => {}, 1_000);'],
 });
 
-test("a runtime that ignores SIGTERM is killed once the kill grace has passed", { timeout: 8_000 }, async (t) => {
+// limit: 270 ms measured n=10 at load 25-26, 2026-11-22
+test("a runtime that ignores SIGTERM is killed once the kill grace has passed", { timeout: 1_000 }, async (t) => {
   const { supervisor, url } = await supervised(t, "kill-grace", sigtermIgnoringRuntime, { startupMs: 60_000, unresponsiveMs: 60_000, killGraceMs: 200 });
   while ((await stateOf(url)) !== "ready") await nextTurn();
-  const closing = performance.now();
+  // The 200 ms kill grace of a real process is the subject: `close` returns only once it was killed, so the test's own limit above is its bound.
   await supervisor.close();
-  const closedAfterMs = performance.now() - closing;
-  assert.ok(closedAfterMs < 2_000, `close took ${Math.round(closedAfterMs)} ms with a 200 ms kill grace`);
+  assert.ok(supervisor.child.exitCode !== null || supervisor.child.signalCode !== null, "close must reap the runtime that ignored SIGTERM");
 });
 
 test("the watchdog judges the runtime only on its own ticks, every heartbeatMs", async (t) => {
@@ -517,12 +539,13 @@ test("the watchdog judges the runtime only on its own ticks, every heartbeatMs",
   assert.ok(declaredAfterMs >= 2_950, `the hang was declared ${Math.round(declaredAfterMs)} ms after start, before the first 3 s tick`);
 });
 
-test("a supervisor stopped during a restart leaves no runtime behind", { timeout: 25_000 }, async (t) => {
+// limit: 1 333 ms measured n=10 at load 25-26, 2026-11-22
+test("a supervisor stopped during a restart leaves no runtime behind", { timeout: 3_000 }, async (t) => {
   const { supervisor, url } = await supervised(t, "restart-stop", undefined, fastDeadlines, fastRestart);
   await whenHealthy(url);
   await mcpCall(url, 95, "hang");
   // Right after the hang reply `supervisor.child` is still the killed one: close only once the restarted child spawned.
-  while (!["starting", "ready"].includes(await stateOf(url))) await sleepMs(20);
+  while (!["starting", "ready"].includes(await stateOf(url))) await nextTurn();
   const restarted = supervisor.child;
   await supervisor.close();
   assert.ok(restarted.exitCode !== null || restarted.signalCode !== null, "close must reap the restarted runtime");

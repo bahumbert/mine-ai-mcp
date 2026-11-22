@@ -28,6 +28,7 @@ const PATHFINDER_LOAD_REAL_MS = 5_000;
 async function pathfinderLoaded(bot: object): Promise<void> {
   const loaded = () => Reflect.get(bot, "pathfinder") != null;
   const deadline = performance.now() + PATHFINDER_LOAD_REAL_MS;
+  // real wait: the tool plugin's own 0 ms real timer (the comment of PATHFINDER_LOAD_REAL_MS)
   while (!loaded() && performance.now() < deadline) await sleepMs(1);
   assert.ok(loaded(),`the tool plugin did not load the pathfinder within ${PATHFINDER_LOAD_REAL_MS} ms of real time`);
 }
