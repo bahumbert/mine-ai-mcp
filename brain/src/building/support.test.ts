@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildBatches, MAX_BATCH_CELLS, placeBlueprint, type Blueprint, type Role, type Variants, type WorldCell } from "./blueprint.ts";
-import { clingsBehindFacing, fullCube, placeAgainst, supportGroups, validateBlueprint, withStatesItHas } from "./support.ts";
+import minecraftData from "minecraft-data";
+import { clingsBehindFacing, faceFits, fullCube, placeAgainst, supportGroups, TEMPLATE_REGISTRY_VERSION, validateBlueprint, withStatesItHas } from "./support.ts";
+import { faceFits as runtimeFaceFits } from "#src/navigation/processes/building/build-cell.ts";
 
 const BLOCKS: Partial<Record<Role, string>> = { foundation: "cobblestone", floor: "oak_planks", wall: "oak_planks", pillar: "oak_log", roof: "spruce_planks", accent: "ladder", door: "oak_door" };
 
@@ -127,7 +129,7 @@ test("a cell keeps the states its block has and loses the ones it lacks", () => 
 // Task 7b bug 1 (scenarios pagoda-house, adobe-pueblo, saltbox): the engine took the floor as a ladder's support; the
 // server refuses a ladder placed on a floor face, it clings to the wall behind its facing.
 test("a block that clings to the face behind its facing is read from the game's collision shapes, not from a list of names", () => {
-  // (that the ladder is the one block that clings in 1.21.4 is held by face-fits-agree.test.ts)
+  // (that the ladder is the one block that clings in 1.21.4 is held by the registry-wide assert in "faceFits is the runtime's, and only a ladder clings")
   for (const block of ["oak_stairs", "oak_door", "oak_trapdoor", "oak_fence_gate", "furnace", "lantern", "cobblestone", "oak_log", "spruce_slab"]) {
     assert.equal(clingsBehindFacing(block), false, block);
   }
@@ -240,6 +242,16 @@ test("over 2048 cells is invalid", () => {
 test("18 layers is invalid", () => {
   const messages = problems({ ...blueprintOf(HUT), size: { x: 5, y: 18, z: 6 } });
   assert.ok(messages.some((message) => /17 layers/u.test(message)), messages.join("; "));
+});
+
+// The runtime's face rule and clinging rule are the brain's too: one function, no copy (moved from face-fits-agree.test.ts,
+// which kept the two equal with a case per face, half and axis).
+test("faceFits is the runtime's, and only a ladder clings", () => {
+  assert.equal(faceFits, runtimeFaceFits);
+  assert.equal(clingsBehindFacing("ladder"), true);
+  assert.equal(clingsBehindFacing("oak_planks"), false);
+  const registry = minecraftData(TEMPLATE_REGISTRY_VERSION);
+  assert.deepEqual(registry.blocksArray.map((block) => block.name).filter(clingsBehindFacing), ["ladder"]);
 });
 
 test("31 wide is invalid", () => {

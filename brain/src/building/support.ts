@@ -1,6 +1,9 @@
 // What a cell can rest on, the order cells must go in so each one has a support when it is placed, and the check that a template builds (house templates).
 import minecraftData from "minecraft-data";
-import { FACING_VECTOR, placeBlueprint, STRUCTURAL_ROLES, type Blueprint, type BlockRole, type Variants, type WorldCell } from "./blueprint.ts";
+import { DIG_ROLE, FACING_VECTOR, placeBlueprint, STRUCTURAL_ROLES, type Blueprint, type BlockRole, type Variants, type WorldCell } from "./blueprint.ts";
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
+import { faceFits } from "#src/navigation/processes/building/build-cell.ts";
+import { clingsBehindFacing as runtimeClings } from "#src/world/block-states.ts";
 
 /** The registry templates are checked against: the server's version (ADR-007), never the newest. */
 export const TEMPLATE_REGISTRY_VERSION = "1.21.4";
@@ -36,71 +39,10 @@ export function fullCube(block: string): boolean {
   });
 }
 
-const HORIZONTAL_FACINGS = ["north", "south", "west", "east"] as const;
-const clingingBlocks = new Map<string, boolean>();
+/** Whether the block clings to the face behind its `facing` (a ladder): the runtime's rule (`src/world/block-states.ts`), not a copy. */
+export const clingsBehindFacing = (block: string): boolean => runtimeClings(registry, block);
 
-/** Whether `box` is a plate spanning the whole cell but the `thickness` along `facing`'s axis, flush with the face behind `facing`. */
-function isPlateBehind(box: readonly number[], facing: (typeof HORIZONTAL_FACINGS)[number]): boolean {
-  const [dx, dz] = FACING_VECTOR[facing];
-  const axis = dx !== 0 ? 0 : 2;
-  const sign = dx !== 0 ? dx : dz;
-  const [lo, hi] = [box[axis]!, box[axis + 3]!];
-  const flush = sign < 0 ? lo > 0 && hi === 1 : lo === 0 && hi < 1;
-  const full = [0, 1, 2].filter((index) => index !== axis).every((index) => box[index] === 0 && box[index + 3] === 1);
-  return flush && full;
-}
-
-/**
- * Whether the block clings to the face behind its `facing` (a ladder): its horizontal `facing` is the face it was
- * placed against, and in every state of one facing its collision is the one thin plate flush with the cell's face behind
- * it (a door or trapdoor changes shape with `open` or `half`, stairs and gates are no plate). Read from the registry's
- * collision shapes, no list of names; a clinging block with no collision (torch, sign) is not seen. A copy of
- * `clingsBehindFacing` in `src/world/block-states.ts`; `face-fits-agree.test.ts` keeps them one.
- */
-export function clingsBehindFacing(block: string): boolean {
-  const known = clingingBlocks.get(block);
-  if (known !== undefined) return known;
-  const clings = computeClings(block);
-  clingingBlocks.set(block, clings);
-  return clings;
-}
-
-function computeClings(block: string): boolean {
-  const states = registry.blocksByName[block]?.states ?? [];
-  const facingIndex = states.findIndex((state) => state.name === "facing");
-  const facing = states[facingIndex];
-  const values = facing?.values;
-  if (facing === undefined || values === undefined || values.length !== HORIZONTAL_FACINGS.length || !HORIZONTAL_FACINGS.every((name) => values.includes(name))) return false;
-  const reference = registry.blockCollisionShapes.blocks[block];
-  if (reference === undefined) return false;
-  const shapeIds = Array.isArray(reference) ? reference : [reference];
-  // State ids run through the properties in order, the last one fastest: the facing changes every `stride` states.
-  const stride = states.slice(facingIndex + 1).reduce((product, state) => product * (state.num_values ?? 1), 1);
-  return HORIZONTAL_FACINGS.every((name) => {
-    const index = values.indexOf(name);
-    const shapes = new Set(shapeIds.filter((_, stateIndex) => Math.floor(stateIndex / stride) % values.length === index));
-    const [only] = [...shapes];
-    const boxes = only === undefined ? undefined : registry.blockCollisionShapes.shapes[only];
-    return shapes.size === 1 && boxes?.length === 1 && isPlateBehind(boxes[0]!, name);
-  });
-}
-
-/**
- * Whether placing against this face (pointing from the support into the cell) gives the cell its asked states: a copy of
- * `faceFits` in `src/navigation/processes/building/build-cell.ts` (the brain imports no `src/` module);
- * `face-fits-agree.test.ts` keeps them one. A block that clings (`clings`, a ladder) is placed against the face behind
- * its facing only: the server refuses its click on any other.
- */
-export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: { readonly half?: "top" | "bottom"; readonly axis?: "x" | "y" | "z"; readonly facing?: (typeof HORIZONTAL_FACINGS)[number] }, clings = false): boolean {
-  if (clings && cell.facing !== undefined) {
-    const [dx, dz] = FACING_VECTOR[cell.facing];
-    if (face.x !== dx || face.y !== 0 || face.z !== dz) return false;
-  }
-  if (cell.axis !== undefined && (cell.axis === "x" ? face.x : cell.axis === "y" ? face.y : face.z) === 0) return false;
-  if (cell.half === "top" && face.y > 0) return false;
-  if (cell.half === "bottom" && face.y < 0) return false;
-  return true;
-}
+export { faceFits } from "#src/navigation/processes/building/build-cell.ts";
 
 /**
  * The cell as it asks states: the facing, half (a slab's `type`) and axis its block has a property for, never one it
@@ -121,14 +63,14 @@ const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
 /** The group and round of a cell, undefined for an air cell (it keeps its layer: the doorway's air shares its key with the door, whose group is its support's) or one with no entry. */
 export function groupEntryOf(cell: WorldCell, groups: ReadonlyMap<string, SupportGroup> | undefined): SupportGroup | undefined {
-  return cell.role === "air" ? undefined : groups?.get(key(cell.x, cell.y, cell.z));
+  return cell.role === DIG_ROLE ? undefined : groups?.get(key(cell.x, cell.y, cell.z));
 }
 
 /** Floor first, as the runtime looks for a support. */
 const SUPPORT_OFFSETS = [[0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]] as const;
 
 /** A cell left as air (a role `air`, or a block `air` a temporary house asks for) is dug, never placed. */
-const isDug = (cell: WorldCell) => cell.role === "air" || cell.block === "air";
+const isDug = (cell: WorldCell) => cell.role === DIG_ROLE || cell.block === DIG_CLEAR_BLOCK;
 
 /** The cells the engine places, the lowest layer and the footprint of the structure. */
 interface Layout {
@@ -214,7 +156,7 @@ function limitProblems(blueprint: Blueprint): string[] {
   const { x, y, z } = blueprint.size;
   if (x > MAX_FOOTPRINT || z > MAX_FOOTPRINT) problems.push(`the footprint is ${x} x ${z}: at most ${MAX_FOOTPRINT} x ${MAX_FOOTPRINT} with the overhang.`);
   if (y > MAX_LAYERS) problems.push(`${y} layers is too tall: at most ${MAX_LAYERS} layers (the leveling clears ${MAX_LAYERS - 1} above the floor).`);
-  const placed = blueprint.cells.filter((cell) => cell.role !== "air").length;
+  const placed = blueprint.cells.filter((cell) => cell.role !== DIG_ROLE).length;
   if (placed > MAX_CELLS) problems.push(`${placed} cells to place: at most ${MAX_CELLS} (what one build keeps).`);
   return problems;
 }
@@ -222,7 +164,7 @@ function limitProblems(blueprint: Blueprint): string[] {
 /** Block ids that do not exist, roles a cell uses with no block, a structural block that is no full block, a door block with no hinge. */
 function blockProblems(blueprint: Blueprint, palette: RolePalette, variants: Variants): string[] {
   const problems: string[] = [];
-  const used = new Set(blueprint.cells.map((cell) => cell.role).filter((role): role is BlockRole => role !== "air"));
+  const used = new Set(blueprint.cells.map((cell) => cell.role).filter((role): role is BlockRole => role !== DIG_ROLE));
   for (const role of used) if (palette[role] === undefined) problems.push(`role ${role}: a cell uses it and the palette has no block for it.`);
   for (const [role, block] of Object.entries(palette)) {
     if (registry.blocksByName[block] === undefined) problems.push(`palette ${role}: ${block} is no block in ${TEMPLATE_REGISTRY_VERSION}.`);
@@ -289,7 +231,7 @@ function doorProblems(cells: ReadonlyMap<string, WorldCell>, door: WorldCell, la
 export function validateBlueprint(blueprint: Blueprint, palette: RolePalette, variants: Variants): string[] {
   const problems = [...blockProblems(blueprint, palette, variants)];
   const anchor = blueprint.cells.find((cell) => cell.role === "door");
-  const rolesMissing = blueprint.cells.some((cell) => cell.role !== "air" && palette[cell.role] === undefined);
+  const rolesMissing = blueprint.cells.some((cell) => cell.role !== DIG_ROLE && palette[cell.role] === undefined);
   if (anchor === undefined) problems.push("the blueprint has no door cell.");
   else if (!rolesMissing) {
     const placed = placeBlueprint(blueprint, palette, anchor, "north", variants);

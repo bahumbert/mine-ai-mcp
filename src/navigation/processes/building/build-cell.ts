@@ -28,7 +28,7 @@ export interface BuildCell {
  * (`clings`, a ladder: `clingsBehindFacing`) is placed against the face behind its facing only, the face that points
  * the way it faces: the server refuses its click on any other.
  */
-export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: BuildCell, clings = false): boolean {
+export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: Pick<BuildCell, "facing" | "half" | "axis">, clings = false): boolean {
   if (clings && cell.facing !== undefined) {
     const way = facingVector(cell.facing);
     if (face.x !== way.x || face.y !== way.y || face.z !== way.z) return false;

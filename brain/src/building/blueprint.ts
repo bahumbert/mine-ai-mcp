@@ -6,6 +6,7 @@ import { groupEntryOf, supportGroups, type SupportGroup } from "./support.ts";
  * cells are dug clear (interior, doorway); cells a blueprint does not list are left as they are.
  */
 export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "accent", "railing", "air"] as const;
+export const DIG_ROLE = "air";
 export type Role = (typeof ROLES)[number];
 export type BlockRole = Exclude<Role, "air">;
 

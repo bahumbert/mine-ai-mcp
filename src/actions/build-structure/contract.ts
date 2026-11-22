@@ -7,6 +7,7 @@ import { REFUSAL_CAUSES } from "../../world/placement.js";
 import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
 import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
 
+export { DIG_CLEAR_BLOCK } from "./dig-clear.js";
 export const BUILD_STRUCTURE = "build_structure" as const;
 export const BUILD_STRUCTURE_DESCRIPTION =
   "Build a structure given as cells, each an absolute x, y, z and a carried block name, or air for a cell to dig clear, or as a nether portal frame using 10 obsidian and 4 cobblestone corner supports at an interior corner with its interior kept clear. Places every cell it can reach from where the bot stands, walks within reach of the rest lowest first, never builds itself in, and reports what was placed, dug, and short, and why each cell still wrong was left: holding another block, nothing to place against, its block not carried, would seal the bot in, or refused. Required tool-tier loss stops with partial progress by default; on_tool_loss=continue keeps the same build running. Sending the same structure again resumes or audits it. Works inside protected regions this bot owns; a request with a cell in anyone else's protected region is refused before any block is touched.";

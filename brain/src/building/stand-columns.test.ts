@@ -1,5 +1,5 @@
-// The brain's copy of the runtime's reach and stand-column cover (`src/navigation/processes/building/build-reach.ts`,
-// `stand-columns.ts`; `brain/` does not import `src/`). The expected columns below are written out from the runtime's own
+// The brain's stand-column cover: the runtime's rule imported through `#src/` (`stand-cover.ts`, re-exported by
+// `stand-columns.ts`; `build-reach.ts` re-exports it for the runtime). The expected columns below are written out from the runtime's own
 // functions on the same input (plan 2026-11-14-house-build-fixes-2 Task 2c), so a change to either side fails here.
 import assert from "node:assert/strict";
 import test from "node:test";
