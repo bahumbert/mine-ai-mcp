@@ -70,10 +70,10 @@ export function failStatusReads(runtime: FakeRuntime, logs: readonly string[], e
 
 export const toAyla = { spoken_to: ["Ayla"], route: "talk" };
 
-/** The next call answers 400 ms after the test starts, as a live model takes seconds: every bot has registered its distance to the speaker before any claims the line. */
-export function slowModel(model: { hold(): () => void }): void {
+/** The next call answers 400 ms of clock after the test starts, as a live model takes seconds: every bot has registered its distance to the speaker before any claims the line. */
+export function slowModel(model: { hold(): () => void }, clock: FakeClock): void {
   const release = model.hold();
-  setTimeout(release, 400);
+  void clock.sleep(400).then(release);
 }
 
 /** A running agent (chat handling and work loop) over a fake runtime; stopped when the test ends. */

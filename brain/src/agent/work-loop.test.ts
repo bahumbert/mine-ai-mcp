@@ -8,11 +8,7 @@ import type { BrainEvent } from "../brain-log.ts";
 import { CHAT_RETRY_MS } from "../model-wait.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import { planFollowStep } from "../skills/follow.ts";
-import { say, agentFor, clockedAgentFor, clockedJournaledAgent, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
-
-function bodyCalls(runtime: FakeRuntime): string[] {
-  return runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool);
-}
+import { say, agentFor, bodyCalls, clockedAgentFor, clockedJournaledAgent, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
 
 /**
  * The clock moves in 1 ms slices while a test waits on it: the fake's duration is a count of 1 ms polls (one poll per

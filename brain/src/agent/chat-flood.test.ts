@@ -1,10 +1,10 @@
 // Tests of how a flood of chat lines is read as one message, stops inside a flood and the speaker budget.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { SpeakerBudget } from "../speaker-budget.ts";
-import { FakeRuntime, steppedClocks, testPersona, until } from "../testing.ts";
-import { agentFor, floodSettings, journaledAgent, say, talk } from "./agent-fixtures.test.ts";
+import { FakeRuntime, testPersona, until } from "../testing.ts";
+import { clockedAgentFor, clockedJournaledAgent, clockUntil, floodSettings, journaledAgent, say, talk } from "./agent-fixtures.test.ts";
 
 test("a flood is read as one message of its newest lines, and the journal counts the rest", async (t) => {
   const runtime = new FakeRuntime();
@@ -96,78 +96,101 @@ test("a second player is answered while the first floods", async (t) => {
   assert.ok(speakerBudget.waitMs("Steve") > 0);
 });
 
-test("a held speaker's stop is read at the next token", async (t) => {
-  const clocks = steppedClocks(t);
+test("a held speaker's stop is read at the next token", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 100_000;
   const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 1 });
-  const { agent, chat, action, events } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
-  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" }, talk("Hi!"));
-  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
-  await agent.handle(say("Steve", "collect some wood"));
-  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
-  runtime.inbox.push(say("Steve", "Ayla hello"));
-  await until(() => runtime.said.includes("Hi!"));
-  assert.equal(speakerBudget.tryTake("Steve"), false, "the line spent Steve's only token");
-  const before = chat.requests.length;
-  chat.reply({ say: "Stopping.", route: "stop", request: "" });
-  runtime.inbox.push(say("Steve", "Ayla stop"));
-  await sleep(150);
-  assert.equal(chat.requests.length, before, "the stop is held: no token");
-  assert.equal(runtime.cancelled.length, 0);
-  clocks.monotonic(10_000);
-  await until(() => runtime.cancelled.length === 1);
-  assert.equal(agent.activity, "idle");
-  const stop = events.find((event) => event.kind === "chat" && event.text === "Ayla stop");
-  assert.ok(stop?.kind === "chat" && (stop.heldMs ?? 0) >= 1_000, "the journal says how long the stop was held");
+  const { agent, chat, action, events, stop: stopAgent } = clockedJournaledAgent(clock, runtime, { settings: budgetSettings() }, { speakerBudget });
+  try {
+    chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" }, talk("Hi!"));
+    action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+    await agent.handle(say("Steve", "collect some wood"));
+    await clockUntil(clock, () => runtime.submitted.some((call) => call.tool === "collect_block"));
+    runtime.inbox.push(say("Steve", "Ayla hello"));
+    await clockUntil(clock, () => runtime.said.includes("Hi!"));
+    assert.equal(speakerBudget.tryTake("Steve"), false, "the line spent Steve's only token");
+    const before = chat.requests.length;
+    chat.reply({ say: "Stopping.", route: "stop", request: "" });
+    runtime.inbox.push(say("Steve", "Ayla stop"));
+    await clock.advance(150);
+    assert.equal(chat.requests.length, before, "the stop is held: no token");
+    assert.equal(runtime.cancelled.length, 0);
+    await clock.advance(10_000);
+    await clockUntil(clock, () => runtime.cancelled.length === 1);
+    assert.equal(agent.activity, "idle");
+    const stop = events.find((event) => event.kind === "chat" && event.text === "Ayla stop");
+    assert.ok(stop?.kind === "chat" && (stop.heldMs ?? 0) >= 1_000, "the journal says how long the stop was held");
+  } finally {
+    await stopAgent();
+  }
 });
 
-test("three agents on one budget spend one token per handed-out message", async (t) => {
+test("three agents on one budget spend one token per handed-out message", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const speakerBudget = new SpeakerBudget({ perMinute: 1, burst: 3 });
   const bots = [1, 2, 3].map(() => {
     const runtime = new FakeRuntime();
-    const built = agentFor(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+    const built = clockedAgentFor(clock, runtime, { settings: budgetSettings() }, { speakerBudget });
     built.chat.reply(talk("Hi!"), talk("Again!"));
-    return { runtime, chat: built.chat };
+    return { runtime, chat: built.chat, stop: built.stop };
   });
-  const whisper = (message: string) => ({ username: "Steve", channel: "whisper" as const, message, addressed: true });
-  for (const bot of bots) {
-    bot.runtime.inbox.push(whisper("first"));
-    await until(() => bot.runtime.said.length === 1);
+  try {
+    const whisper = (message: string) => ({ username: "Steve", channel: "whisper" as const, message, addressed: true });
+    for (const bot of bots) {
+      bot.runtime.inbox.push(whisper("first"));
+      await clockUntil(clock, () => bot.runtime.said.length === 1);
+    }
+    for (const bot of bots) bot.runtime.inbox.push(whisper("second"));
+    await clock.advance(150);
+    assert.deepEqual(bots.map((bot) => bot.chat.requests.length), [1, 1, 1], "the second lines wait: the brain's budget for Steve is spent");
+    assert.ok(speakerBudget.waitMs("Steve") > 0);
+  } finally {
+    for (const bot of bots) await bot.stop();
   }
-  for (const bot of bots) bot.runtime.inbox.push(whisper("second"));
-  await sleep(150);
-  assert.deepEqual(bots.map((bot) => bot.chat.requests.length), [1, 1, 1], "the second lines wait: the brain's budget for Steve is spent");
-  assert.ok(speakerBudget.waitMs("Steve") > 0);
 });
 
-test("lines refused before the model give their token back", async (t) => {
+test("lines refused before the model give their token back", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 2, y: 64, z: 0 } }, { username: "Ann", position: { x: 3, y: 64, z: 0 } }] };
   const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 2 });
-  const { chat } = journaledAgent(t, runtime, { listensTo: ["Ann"], settings: budgetSettings() }, { speakerBudget });
-  for (let at = 0; at < 5; at += 1) {
-    runtime.inbox.push(say("Steve", `Ayla ${at}`));
-    await until(() => runtime.inbox.length === 0);
-    await sleep(30);
+  const { chat, stop } = clockedJournaledAgent(clock, runtime, { listensTo: ["Ann"], settings: budgetSettings() }, { speakerBudget });
+  try {
+    for (let at = 0; at < 5; at += 1) {
+      runtime.inbox.push(say("Steve", `Ayla ${at}`));
+      await clockUntil(clock, () => runtime.inbox.length === 0);
+      await clock.advance(30);
+    }
+    assert.equal(chat.requests.length, 0, "she does not listen to Steve");
+    assert.equal(speakerBudget.waitMs("Steve"), 0);
+    assert.equal(speakerBudget.tryTake("Steve") && speakerBudget.tryTake("Steve"), true, "both tokens are still there");
+  } finally {
+    await stop();
   }
-  assert.equal(chat.requests.length, 0, "she does not listen to Steve");
-  assert.equal(speakerBudget.waitMs("Steve"), 0);
-  assert.equal(speakerBudget.tryTake("Steve") && speakerBudget.tryTake("Steve"), true, "both tokens are still there");
 });
 
-test("a line the chat tier leaves alone without asking the model gives its token back", async (t) => {
+test("a line the chat tier leaves alone without asking the model gives its token back", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 2, y: 64, z: 0 } }, { username: "Ann", position: { x: 3, y: 64, z: 0 } }] };
   const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 1 });
-  const { chat } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
-  for (let at = 0; at < 3; at += 1) {
-    runtime.inbox.push(say("Steve", `Ann, come here ${at}`, false));
-    await until(() => runtime.inbox.length === 0);
-    await sleep(30);
+  const { chat, stop } = clockedJournaledAgent(clock, runtime, { settings: budgetSettings() }, { speakerBudget });
+  try {
+    for (let at = 0; at < 3; at += 1) {
+      runtime.inbox.push(say("Steve", `Ann, come here ${at}`, false));
+      await clockUntil(clock, () => runtime.inbox.length === 0);
+      await clock.advance(30);
+    }
+    assert.equal(chat.requests.length, 0, "a line between two other players is left alone without the model");
+    assert.equal(speakerBudget.tryTake("Steve"), true, "its token came back each time");
+  } finally {
+    await stop();
   }
-  assert.equal(chat.requests.length, 0, "a line between two other players is left alone without the model");
-  assert.equal(speakerBudget.tryTake("Steve"), true, "its token came back each time");
 });
 
 test("a retry after ModelUnavailable takes no second token", async (t) => {

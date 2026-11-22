@@ -5,13 +5,8 @@ import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.t
 import { Agent } from "../agent.ts";
 import { INSTANT_TYPING } from "../body.ts";
 import type { BrainEvent } from "../brain-log.ts";
-import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
-import { say, agentFor, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
-
-/** Who each spoken line went to: a player's name for a whisper, undefined for public chat. */
-function spokenTo(runtime: FakeRuntime): unknown[] {
-  return runtime.submitted.filter((call) => call.tool === "send_message").map((call) => call.input.to);
-}
+import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
+import { say, agentFor, others, spokenTo, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
 
 test("chatting while working is answered at once and the work goes on", async (t) => {
   const runtime = new FakeRuntime();
@@ -435,22 +430,26 @@ test("a stop with a request ends the speaker's orders and the character's own go
   assert.equal(runtime.cancelled.length, 1);
 });
 
-test("a line naming nobody within 60 s of its speaker naming another character is ignored, unless the model says it speaks to her or everyone (A5, live 2026-10-11, L6)", async (t) => {
+test("a line naming nobody within 60 s of its speaker naming another character is ignored, unless the model says it speaks to her or everyone (A5, live 2026-10-11, L6)", async () => {
   const outcome = async (to: string[], afterMs: number) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
     const runtime = new FakeRuntime();
     const tiers = scriptedMind();
     const mind = { ...tiers.mind, chat: async (input: { message: { message: string } }) => input.message.message === "thanks" ? { to, say: "You're welcome!", route: "talk" as const, request: "" } : { to: ["Vex"], say: "", route: "ignore" as const, request: "" } } as unknown as typeof tiers.mind;
     const agent = new Agent({ persona: testPersona({ username: "Ayla", displayName: "Ayla" }), runtime, mind, otherAgents: others("Vex"), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0 });
     const controller = new AbortController();
     const running = agent.run(controller.signal);
-    t.after(async () => { controller.abort(); await running; });
-    const clocks = steppedClocks(t);
-    await agent.handle(say("Tester", "Vex, mine some stone", false));
-    runtime.said.length = 0;
-    clocks.monotonic(afterMs);
-    await agent.handle(say("Tester", "thanks", false));
-    clocks.restore();
-    return runtime.said.length;
+    try {
+      await clock.settle(agent.handle(say("Tester", "Vex, mine some stone", false)), 10_000);
+      runtime.said.length = 0;
+      await clock.advance(afterMs, 1_000);
+      await clock.settle(agent.handle(say("Tester", "thanks", false)), 10_000);
+      return runtime.said.length;
+    } finally {
+      controller.abort();
+      await clock.settle(running, 10_000);
+    }
   };
   assert.equal(await outcome(["Tester"], 20_000), 0, "the model read it as for the speaker only: ignored");
   assert.equal(await outcome(["unclear"], 20_000), 0);

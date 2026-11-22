@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BrainEvent } from "../brain-log.ts";
 import { BodyDown } from "../runtime-client.ts";
+import { createFakeClock, flush } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { FakeRuntime, until } from "../testing.ts";
-import { agentFor, bodyDownAt, failStatusReads, journaledAgent, others, say, talkOptions } from "./agent-fixtures.test.ts";
+import { agentFor, bodyDownAt, clockedJournaledAgent, failStatusReads, journaledAgent, others, say, talkOptions } from "./agent-fixtures.test.ts";
 
 const DIRT = { step: { skill: "collect_block", block: "dirt", count: 2 } };
 
@@ -133,27 +134,33 @@ test("a body that comes back at a known time is asked again within a poll of it"
   // The waits the agent asks for are read on a simulated wall clock that moves by exactly each wait: no real time passes,
   // so neither load nor a step of the host's wall clock (WSL's, about 2 s every 30 s) can move the answer (2026-11-12:
   // the version that timed the sixth read in real time against a 2.5 s bound failed once at 2610 ms).
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  let wall = Date.now();
-  t.mock.method(Date, "now", () => wall);
-  const at = new Date(wall + 2_000).toISOString();
+  const at = new Date(Date.now() + 2_000).toISOString();
   const errors = Array.from({ length: 5 }, () => new BodyDown({ at, attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent")));
   const reads = failStatusReads(runtime, logs, errors);
   const waits: number[] = [];
-  const { agent } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), pollMs: 100 });
+  const { agent, stop } = clockedJournaledAgent(clock, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), pollMs: 100 });
   const idle = agent as unknown as { idle(ms: number): Promise<void> };
   const waitFor = idle.idle.bind(agent);
   t.mock.method(idle, "idle", (ms: number) => {
     // After the sixth read the loop's own errors (no scripted planner reply) wait as the agent asks, so it does not spin.
-    if (reads.calls < 1 || reads.calls >= 6) return waitFor(ms);
-    // The goal tier's own pacing waits are not the error back-off this test measures.
-    if ((new Error().stack ?? "").includes("waitForGoalBudget")) return waitFor(0);
+    if (reads.calls >= 6) return waitFor(ms);
+    // Before the first read and the goal tier's own pacing waits, no time passes: the loop only yields.
+    if (reads.calls < 1 || (new Error().stack ?? "").includes("waitForGoalBudget")) return flush();
+    // A back-off wait of reads 1-5 moves the clock by exactly its length: the only time that passes in this test.
     waits.push(ms);
-    wall += ms;
-    return waitFor(0);
+    return clock.advance(ms);
   });
-  await until(() => reads.calls >= 6, 4_000);
-  // Without the cap the five failures wait 100, 200, 400, 800 and 1600 ms; the cap cuts the fifth to the 500 ms left.
-  assert.deepEqual(waits, [100, 200, 400, 800, 500]);
+  try {
+    // Driven by the reads themselves, not by clock.settle: a settle would move the clock past the waits it measures.
+    for (let turn = 0; turn < 1_000 && reads.calls < 6; turn += 1) await flush();
+    assert.equal(reads.calls, 6, "the sixth read came: the loop did not stall");
+    // Without the cap the five failures wait 100, 200, 400, 800 and 1600 ms; the cap cuts the fifth to the 500 ms left.
+    assert.deepEqual(waits, [100, 200, 400, 800, 500]);
+  } finally {
+    await stop();
+  }
 });
