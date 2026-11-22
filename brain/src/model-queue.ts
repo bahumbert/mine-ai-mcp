@@ -2,6 +2,7 @@ import { renameSync, writeFileSync } from "node:fs";
 import type { ChatModel, ChatReply, ChatTurn, CompleteOptions, ModelLane } from "./chat-model.ts";
 import { chatSlotsRefusal } from "./model-lanes.ts";
 import { monotonicNow } from "./monotonic-clock.ts";
+import { timeoutSignal } from "./wall-timers.ts";
 
 /** Where the brain tells the monitor how busy the model is, next to the bots' folders (monitor "Model queue" panel). */
 export const MODEL_QUEUE_FILE = "brain-model-queue.json";
@@ -186,7 +187,7 @@ export class ModelQueue {
   /** Whether `agentId` may start a skippable call within `ms`: true once a slot is free, false on time-out or abort. */
   async freeWithin(agentId: string, ms: number, signal: AbortSignal): Promise<boolean> {
     try {
-      await this.whenFree(AbortSignal.any([signal, AbortSignal.timeout(ms)]));
+      await this.whenFree(AbortSignal.any([signal, timeoutSignal(ms)]));
     } catch {
       return false;
     }

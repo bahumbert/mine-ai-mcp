@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.ts";
 import { ModelQueue, startStaggered, type QueueSnapshot } from "./model-queue.ts";
 import { controlledModel, steppedClocks, tick } from "./testing.ts";
 
@@ -267,22 +268,41 @@ test("freeFor: with known slots a free slot, with unknown slots no call of this 
   assert.equal(unknown.freeFor("cy"), true);
 });
 
-test("freeWithin is true once a slot frees in time, false on time-out or abort", async () => {
+test("freeWithin is true at once with a free slot and false when its signal aborts while every slot is held", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
   assert.equal(await queue.freeWithin("ada", 50, signal), true, "free at once");
   const fake = controlledModel();
   const call = queue.track(fake.model, "ada").complete([], signal);
-  assert.equal(await queue.freeWithin("bob", 20, signal), false, "time-out");
   const abort = new AbortController();
   const aborted = queue.freeWithin("bob", 5_000, abort.signal);
   abort.abort();
   assert.equal(await aborted, false, "abort");
-  const freed = queue.freeWithin("bob", 5_000, signal);
   fake.settle(0);
   await call;
-  assert.equal(await freed, true);
 });
 
+test("freeWithin with every slot held stays pending 1 ms short of its bound and resolves false at it; a slot freed before it resolves true", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const queue = new ModelQueue({ slots: 1, file: null });
+  const fake = controlledModel();
+  const call = queue.track(fake.model, "ada").complete([], signal);
+  let outcome: boolean | undefined;
+  void queue.freeWithin("bob", 200, signal).then((value) => void (outcome = value));
+  await clock.advance(199);
+  assert.equal(outcome, undefined, "still pending at ms - 1");
+  await clock.advance(1);
+  assert.equal(outcome, false, "false at ms");
+  assert.equal(clock.pendingGlobalTimers(), 0, "the bound's timer is not left behind");
+  let freedOutcome: boolean | undefined;
+  void queue.freeWithin("bob", 200, signal).then((value) => void (freedOutcome = value));
+  await clock.advance(199);
+  assert.equal(freedOutcome, undefined, "pending while the slot is held");
+  fake.settle(0);
+  await call;
+  await clock.advance(1);
+  assert.equal(freedOutcome, true, "a slot freed before the bound resolves true");
+});
 
 test("the third call on two slots is held until one ends, and only it reports a wait", async () => {
   let clock = 0;
