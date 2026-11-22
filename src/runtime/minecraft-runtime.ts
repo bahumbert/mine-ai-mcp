@@ -3,10 +3,6 @@ import { regionProviderFor } from "../bot-data/shared-regions.js";
 import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
-import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import type { Action, ActionOutput, ActionResult } from "../actions/index.js";
 import { actionSqlQueries, createActions, StrongholdEyeFlights } from "../actions/index.js";
 import { AsyncActions, ExecutionStore } from "../session/async-actions.js";
@@ -62,17 +58,14 @@ import { routeAroundHostiles } from "../survival/reflexes/hostile-routing.js";
 import { attachHungerReflex } from "../survival/reflexes/hunger.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus } from "./frontier.js";
-import { observeEquipmentEvents } from "./equipment-events.js";
-import { observeNavigationEvents } from "./navigation-events.js";
+import { incidentDirectory, notifySurvivalReceipt, observeBotEvents } from "./runtime-incidents.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { currentVehicle, recoverPhysics, watchVehicle } from "../actions/navigate/vehicle-sync.js";
 import { watchGhostBlocks } from "./ghost-block.js";
 import { placeOffsetShapes } from "./offset-shapes.js";
 import { watchServerSeat } from "../actions/navigate/server-seat-watch.js";
 import { observeReflexActivity } from "./reflex-activity.js";
-import { observeBotStatus } from "./bot-status.js";
 import { ChatCommandRing } from "./chat-commands.js";
-import { observePlayerEvents } from "./player-events.js";
 import { snapshotTools } from "../world/tool-tiers.js";
 
 export interface MinecraftRuntimeOptions {
@@ -398,39 +391,6 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
   resources.defer(watchGhostBlocks(bot));
   resources.defer(watchServerSeat(bot).stop);
   return { runner, routes };
-}
-
-/** Starts the observers that write what happens to the bot into its event log; the returned function stops them all. */
-function observeBotEvents(
-  bot: Bot,
-  botData: SqlBotData,
-  runner: ActionRunner,
-  navigation: NavigationRuntime,
-  commandLines: { readonly prefix: string; readonly ring: ChatCommandRing } | null,
-): () => void {
-  const stops = [
-    observePlayerEvents(bot, botData, (reason) => runner.cancelActive(reason, { kind: "death" }), commandLines ?? undefined),
-    observeEquipmentEvents(bot, botData),
-    observeNavigationEvents(navigation, bot.username, botData),
-    observeBotStatus(bot, botData),
-  ];
-  return () => {
-    for (const stop of stops.toReversed()) stop();
-  };
-}
-
-/** Select an incident directory and register cleanup when the runtime owns it. */
-function incidentDirectory(options: MinecraftRuntimeOptions, botData: SqlBotData, resources: AsyncDisposableStack): string {
-  if (options.incidents?.directory !== undefined) return options.incidents.directory;
-  if (botData.location.kind === "persistent") return path.join(path.dirname(botData.location.file), "incidents");
-  const directory = path.join(os.tmpdir(), "mine-ai-incidents", randomUUID());
-  resources.defer(async () => { try { await rm(directory, { recursive: true, force: true }); } catch { /* Best effort. */ } });
-  return directory;
-}
-
-/** A diagnostic observer cannot interrupt receipt publication or mutate its evidence. */
-function notifySurvivalReceipt(observer: MinecraftRuntimeOptions["onSurvivalReceipt"], receipt: SurvivalReceipt): void {
-  if (observer) { try { observer(structuredClone(receipt)); } catch { /* Diagnostics cannot interrupt survival. */ } }
 }
 
 /** Own every long-lived facility attached to one connected Minecraft bot. */

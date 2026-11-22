@@ -267,24 +267,17 @@ function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: Mo
   return { creatureOf, hurtCreature, hurtTheBot, pushBot, die };
 }
 
-/** Give `bot` the server's answers to a hit and the scene controls of the harness. */
-export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
-  const sender = createSender(bot, parts);
-  const { swing } = parts;
-  attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender, ticks: () => parts.server.gameTime });
-  const knock = attachMobKnockback(bot, sender);
-  const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock, sender.beforeBotHurt);
-  parts.server.onPacket("client_command", (data) => {
-    const { payload, actionId } = data as { payload?: number; actionId?: number };
-    const deathAsked = sender.deaths(); // the request is the death's that wrote it
-    if ((payload ?? actionId) === RESPAWN_COMMAND) parts.server.answer(() => sender.answerRespawn(deathAsked));
-  });
-  const fireballs = attachFakeFireballs(bot, { server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
-  const sprint = trackSprint(parts.server);
-  const burn = attachFakeBurn(bot, { server: parts.server, deaths: sender.deaths, hurtTheBot });
-  const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, burn, hurtTheBot, pushBot });
+/** The collaborators a player's `use_entity` attack answers with: fireball deflection, sprint, knockback and the hurt. */
+type PlayerAttackParts = {
+  readonly fireballs: ReturnType<typeof attachFakeFireballs>;
+  readonly sprint: ReturnType<typeof trackSprint>;
+  readonly knock: MobKnockback;
+  readonly hurtCreature: ReturnType<typeof createHurts>["hurtCreature"];
+};
 
-  // `entities.js:860-873`: A2's `attack` writes the packet; a boat's answer is `fake-bot-boat-damage.ts`.
+/** `entities.js:860-873`: A2's `attack` writes the packet; a boat's answer is `fake-bot-boat-damage.ts`. */
+function attachPlayerAttacks(bot: FakeBot, parts: CombatParts, { fireballs, sprint, knock, hurtCreature }: PlayerAttackParts): void {
+  const { swing } = parts;
   parts.server.onPacket("use_entity", (data) => {
     const { target, mouse } = data as { target: number; mouse: number };
     if (mouse !== 1) return;
@@ -308,6 +301,25 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
       if (sprintBonus && result !== "missed") sprint.clear();
     });
   });
+}
+
+/** Give `bot` the server's answers to a hit and the scene controls of the harness. */
+export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
+  const sender = createSender(bot, parts);
+  attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender, ticks: () => parts.server.gameTime });
+  const knock = attachMobKnockback(bot, sender);
+  const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock, sender.beforeBotHurt);
+  parts.server.onPacket("client_command", (data) => {
+    const { payload, actionId } = data as { payload?: number; actionId?: number };
+    const deathAsked = sender.deaths(); // the request is the death's that wrote it
+    if ((payload ?? actionId) === RESPAWN_COMMAND) parts.server.answer(() => sender.answerRespawn(deathAsked));
+  });
+  const fireballs = attachFakeFireballs(bot, { server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
+  const sprint = trackSprint(parts.server);
+  const burn = attachFakeBurn(bot, { server: parts.server, deaths: sender.deaths, hurtTheBot });
+  const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, burn, hurtTheBot, pushBot });
+
+  attachPlayerAttacks(bot, parts, { fireballs, sprint, knock, hurtCreature });
 
   return {
     hurt: (entityId, sourceId, amount) => {

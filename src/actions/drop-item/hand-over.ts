@@ -1,3 +1,4 @@
+// Hands a tossed item to the recipient and recounts what the bot still holds: the pickup watch, the recount and the toss aim.
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import type { Vec3 } from "vec3";
