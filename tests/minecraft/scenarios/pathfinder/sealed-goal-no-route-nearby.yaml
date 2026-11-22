@@ -1,0 +1,70 @@
+template: ../../templates/flat-single-action.yaml
+
+name: sealed-goal-no-route-nearby
+tags: [regression]
+description: >-
+  A route search toward a goal that nothing reaches must end as a typed region limit worded "no route nearby", not
+  run until its time budget ("search timed out") or flood the frontier before "no path found" (plan
+  2026-11-20-route-region-bound; fortress, evade resume and crystal staircase reports). The target is the hollow
+  of a bedrock shell 10 blocks east: the cell has support but no entry exists and nothing can be dug. The first
+  navigate must fail naming "no route nearby"; the next navigate, to a cell on the open flat west of the start,
+  must succeed, so the failed search leaves the bot able to move.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+geometry:
+  # A bedrock shell, outer x 8..12, y -63..-57, z -2..2, with a two-cell air room inside; its floor is bedrock.
+  - fill: { block: bedrock, from: [ 8, -63, -2 ], to: [ 12, -57, 2 ] }
+  - fill: { block: air, from: [ 10, -60, 0 ], to: [ 10, -59, 0 ] }
+
+players:
+  - name: Actor
+    pos: [ 0.5, -60, 0.5 ]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+      - { item: cobblestone, count: 32 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+
+params:
+  actions:
+    - action: navigate
+      input: { x: 10, y: -60, z: 0, range: 0 }
+      expect: failed
+      errorContains: ["no route nearby"]
+      waitServerTicks: 0
+    - action: navigate
+      input: { x: -8, y: -60, z: 0, range: 0 }
+      expect: succeeded
+      waitServerTicks: 40
+
+goal:
+  kind: all
+  # wall: the whole trial's budget (goal.timeout is wall seconds). The route is server-paced, so a slower tick rate runs longer.
+  # Measured: red 11.7-12.2 s (part A, 20 and 10 tps); green 10.7-11.9 s at 20 tps and 13.4-14.4 s at 10 tps (part B step 2,
+  # 3 runs each). 30 is 2 x the slowest measured run (14.4 s), rounded up (P5).
+  timeout: 30
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [ -7.5, -60, 0.5 ]
+      radius: 1.0
+    - kind: health
+      who: Actor
+      health: 20
+    - kind: completion
+      who: Actor
