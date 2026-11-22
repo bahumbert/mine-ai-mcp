@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { currentVehicle } from "../actions/navigate/vehicle-sync.js";
+import { monotonicNow } from "../utils/monotonic-clock.js";
 
 /** Corrections at one spot inside `WINDOW_MS` that mean the client and the server disagree about the cells around her. */
 const CORRECTIONS = 8;
@@ -33,9 +34,9 @@ export interface GhostBlockOptions {
 /** What the watcher knows of the spot the server keeps putting her back to. */
 interface Spot {
   readonly position: Vec3;
-  /** Wall-clock times of the corrections at this spot still inside `WINDOW_MS`. */
+  /** Monotonic times of the corrections at this spot still inside `WINDOW_MS`. */
   corrections: number[];
-  /** Wall-clock times of the resyncs at this spot still inside `RESYNC_WINDOW_MS`. */
+  /** Monotonic times of the resyncs at this spot still inside `RESYNC_WINDOW_MS`. */
   resyncs: number[];
   pausedUntil: number;
   offHandLogged: boolean;
@@ -55,7 +56,7 @@ export function cellsAround(position: Vec3): Vec3[] {
 
 /** Watches one bot's forced moves (the server's "go back there") and resyncs the cells around a spot it repeats; returns the cleanup. */
 export function watchGhostBlocks(bot: Bot, options: GhostBlockOptions = {}): () => void {
-  const now = options.now ?? Date.now;
+  const now = options.now ?? monotonicNow;
   const log = options.log ?? ((line: string) => console.error(line));
   let spot: Spot | null = null;
 
