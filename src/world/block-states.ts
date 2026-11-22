@@ -24,7 +24,7 @@ const clingingByRegistry = new WeakMap<IndexedData, Map<string, boolean>>();
  * (a door or trapdoor changes shape with `open` or `half`, stairs and gates are no plate). Read from the registry's
  * collision shapes, no list of names; a clinging block with no collision (torch, sign) is not seen. The server refuses
  * the click of such a block on any other face (house-templates scenarios, pagoda-house: "Server processed placement,
- * but block ... is still air"). `brain/src/building/support.ts` keeps a copy; `face-fits-agree.test.ts` keeps them one.
+ * but block ... is still air"). `brain/src/building/support.ts` reads this one through `#src`.
  */
 export function clingsBehindFacing(registry: IndexedData, block: string): boolean {
   const known = clingingByRegistry.get(registry) ?? new Map<string, boolean>();

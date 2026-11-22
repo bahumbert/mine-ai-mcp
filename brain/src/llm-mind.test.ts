@@ -690,7 +690,9 @@ test("a reply that speaks to her when the line answers someone else who just spo
 });
 
 test("no function of the chat tier reads what a player wrote beyond whether it names someone (ADR-017)", () => {
-  const source = readFileSync(new URL("./llm-mind.ts", import.meta.url), "utf8");
+  const source = [new URL("./llm-mind.ts", import.meta.url), new URL("./chat-addressing.ts", import.meta.url)]
+    .map((file) => readFileSync(file, "utf8"))
+    .join("\n");
   for (const gone of ["openingName", "OPENING_WORDS", "WHERE_YOU_ARE", "finishSentBack", "requestSentBack"]) assert.ok(!source.includes(gone), gone);
   // No regex literal over the line for "me", "my", "I", "where" or "first" (the English patches this replaced).
   assert.doesNotMatch(source, /\\b\(?(?:\?:)?(?:\[Mm\]e|my|where|let me|first|finish)/u);
