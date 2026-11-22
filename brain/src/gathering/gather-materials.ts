@@ -1,4 +1,5 @@
 // Gets a bill of items into the inventory the way a player would: round after round of collect, hunt, craft and smelt.
+import { EMPTY_BUCKET } from "#src/world/empty-bucket.ts";
 import { describeMaterials, shortfall } from "../building/blueprint.ts";
 import { MAX_TOOL_LOSSES } from "../building/tool-loss.ts";
 import type { Body } from "../body.ts";
@@ -194,12 +195,12 @@ async function gatherRounds(
     // A full bucket is no drop and no craft: a bucket (made like any item) filled at the liquid.
     const liquids = await context.runtime.toolEnum("use_bucket", "liquid");
     const filling = missing.find((entry) => bucketLiquid(entry.item, liquids) !== null);
-    if (filling !== undefined && carried(inventory, "bucket") > 0) {
+    if (filling !== undefined && carried(inventory, EMPTY_BUCKET) > 0) {
       const refused = await fillBucketRound(context, bucketLiquid(filling.item, liquids)!, state, purpose);
       if (refused !== null) return refused;
       continue;
     }
-    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, freeBag(context, inventory), knowledge);
+    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: EMPTY_BUCKET, count: entry.count } : entry), inventory, freeBag(context, inventory), knowledge);
     if (typeof plan === "string") return failing(context, state, { status: "failed", detail: plan });
 
     // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home

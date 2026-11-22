@@ -1,4 +1,5 @@
 // Sending a planned house to the runtime part by part, shared by build and improve_house.
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import type { MaterialCount } from "../building/blueprint.ts";
 import type { HousePlan } from "../building/plan.ts";
 import { ToolLosses } from "../building/tool-loss.ts";
@@ -153,7 +154,7 @@ export function builtBefore(batches: readonly (readonly { x: number; y: number; 
   for (const cell of batches.slice(0, index).flat()) {
     const key = `${cell.x},${cell.y},${cell.z}`;
     // Only what stays as built: a cell a later part changes again (the doorway) is not kept.
-    if (cell.block === "air" || seen.has(key) || (lastPart.get(key) ?? -1) >= index) continue;
+    if (cell.block === DIG_CLEAR_BLOCK || seen.has(key) || (lastPart.get(key) ?? -1) >= index) continue;
     seen.add(key);
     cells.push({ x: cell.x, y: cell.y, z: cell.z });
   }

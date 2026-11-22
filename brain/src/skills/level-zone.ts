@@ -1,4 +1,5 @@
 // Making a zone flat at a walking level: the protection of its margin, the plan, the tools and fill, the batches.
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import { SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "../building/terrain.ts";
 import { lostToolClass, remadeClause, ToolLosses, toolToMake } from "../building/tool-loss.ts";
 import type { Stacks } from "../gathering/stacks.ts";
@@ -139,7 +140,7 @@ function toolsMissing(context: SkillContext, plan: LevelPlan, stacks: Stacks, re
 
 /** The tool classes (game data: what each block is mined with) of the cells these batches dig clear. */
 function toolsDug(area: LevelArea, batches: Batches): Set<string | null | undefined> {
-  return new Set(batches.flat().filter((cell) => cell.block === "air").map((cell) => area.kinds[area.blocks.get(areaKey(cell.x, cell.y, cell.z)) ?? ""]?.tool).filter((tool) => tool !== null && tool !== undefined));
+  return new Set(batches.flat().filter((cell) => cell.block === DIG_CLEAR_BLOCK).map((cell) => area.kinds[area.blocks.get(areaKey(cell.x, cell.y, cell.z)) ?? ""]?.tool).filter((tool) => tool !== null && tool !== undefined));
 }
 
 /** What the batches of one leveling work from; `counts` runs on across its dig and its fill. */

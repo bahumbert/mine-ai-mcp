@@ -1,3 +1,4 @@
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import { z } from "zod";
 import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
@@ -207,7 +208,7 @@ async function prepareAndPlant(context: SkillContext, plot: FarmPlot, crop: stri
     if (middle !== undefined && middle !== "air") {
       // An air cell of build_structure, which works inside her own farm region (live 2026-10-03: collect_block refused
       // the hole there, the farm being protected before it is dug).
-      const hole = { blocks: [{ x: water.x, y: water.y, z: water.z, block_name: "air" }], remove_wrong_blocks: true };
+      const hole = { blocks: [{ x: water.x, y: water.y, z: water.z, block_name: DIG_CLEAR_BLOCK }], remove_wrong_blocks: true };
       const dug = await context.body.act("build_structure", hole, `Dig the hole for the water of ${what}.`, { signal: context.signal });
       if (context.signal.aborted) return { status: "stopped" };
       if (dug.status !== "succeeded") return { status: "failed", detail: `could not dig the water hole of ${what}: ${dug.error ?? dug.status}` };

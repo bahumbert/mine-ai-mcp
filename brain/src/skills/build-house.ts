@@ -1,4 +1,5 @@
 // Building a house from a template (build): the site, its protection and leveling, then the stages and the claim sign.
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import type { Step } from "../actions.ts";
 import { billOfMaterials, type MaterialCount } from "../building/blueprint.ts";
 import { unfinishedHousePlan } from "../building/house-facts.ts";
@@ -52,7 +53,7 @@ export async function build(context: SkillContext, step: Extract<Step, { skill: 
   // A resumed house keeps the materials it was started with; the step's are ignored then.
   const materials = resumed === null ? step.materials ?? {} : resumed.materials ?? {};
   if (resumed === null && Object.keys(materials).length > 0) {
-    const refusal = checkMaterials(materials, template, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== "air")));
+    const refusal = checkMaterials(materials, template, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== DIG_CLEAR_BLOCK)));
     if (refusal !== null) return { status: "failed", detail: `cannot build ${what} with those materials: ${refusal}` };
   }
   const shapes = resumed === null ? shapesForMaterials(template, materials) : resumed.shapes ?? {};
@@ -257,7 +258,7 @@ async function prepareSite(context: SkillContext, site: { plan: HousePlan; what:
     // Blocks do not fall: a house needs its ring level and the water above its floor gone, not a pond filled under
     // it (live 2026-10-02: 258 cobblestone mined for a site over a pond). Its own floor goes in even over water.
     below: 1,
-    placedLater: new Set(plan.batches.flat().filter((cell) => cell.block !== "air").map((cell) => `${cell.x},${cell.y},${cell.z}`)),
+    placedLater: new Set(plan.batches.flat().filter((cell) => cell.block !== DIG_CLEAR_BLOCK).map((cell) => `${cell.x},${cell.y},${cell.z}`)),
   }, remaining, [regionId, ...earlierProtections(context, plan.template.kind, plan.site.door, regionId, await context.runtime.protectedRegions())]);
   // Nothing of the house stands yet: its site is not kept protected (a resume protects it again).
   if (prepared.status === "stopped" || context.signal.aborted) {
