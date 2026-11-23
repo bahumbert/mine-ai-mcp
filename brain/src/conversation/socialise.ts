@@ -25,7 +25,7 @@ export interface Clock {
 /** An abort ends the wait early, never throws: the routine reads `signal.aborted` after it. */
 const sleepOn = (ms: number, signal: AbortSignal): Promise<void> => sleepMs(ms, signal).catch(() => undefined);
 
-/** Wall time: the relations' clock (book, trades, hand-offs: Task B2 of plan 2026-11-05-held-wording-and-relations-clock moves their windows off it). */
+/** Wall time: the relations book's clock, for the wall times it persists (`agent-relations.ts`); the waits for a partner run on `monotonicClock`. */
 export const realClock: Clock = {
   now: () => Date.now(),
   sleep: sleepOn,

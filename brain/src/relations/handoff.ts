@@ -106,7 +106,7 @@ export interface PartnerWitness {
   readonly cannotReach: () => void;
   /** Told when its record cannot be read (the partner is read as a player then). */
   readonly log?: (line: string) => void;
-  /** The wall clock the wait for its record runs on. */
+  /** The clock the wait for its record runs on (monotonic unless a test moves it). */
   readonly clock: Clock;
 }
 
