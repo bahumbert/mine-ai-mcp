@@ -8,6 +8,8 @@ import { structureWorld } from "../../../test-support/structure-world.js";
 import { createFakeClock, itemOf } from "../../../test-support/fake-bot/index.js";
 import { build, BuildProgress, BuildTargeting, enclosesBot, holdsCell, keptWith, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
+import { digsClear } from "./build-cell.js";
+import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 
 const goalTestWorld = new GoalTestWorld();
 
@@ -1176,4 +1178,9 @@ test("the cell-state cache is refreshed 1 s later though the wall clock stepped 
   await clock.advance(100);
   clock.stepWallClock(1_200);
   assert.equal(kindOfCell(), "correct", "100 ms of clock: the cache still holds");
+});
+
+test("digsClear: a dig-clear cell is dug, an end_stone cell is placed", () => {
+  assert.equal(digsClear({ blockName: DIG_CLEAR_BLOCK }), true);
+  assert.equal(digsClear({ blockName: "end_stone" }), false);
 });

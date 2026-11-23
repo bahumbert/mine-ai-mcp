@@ -1,4 +1,4 @@
-import { buildCrystalStaircase, DIG_CLEAR_BLOCK, pillarShortfall, planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
+import { buildCrystalStaircase, placesBlock, pillarShortfall, planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
 import { standingCell } from "../../positioning/combat/geometry.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
@@ -798,7 +798,7 @@ export class EndCombat {
       allowDigging: this.policy().combat.terrain.dig, scaffolding: pillar && this.policy().combat.terrain.place,
       protectedCells: new Set([packKey(pedestal.x, pedestal.y, pedestal.z),
         ...(observation.staircase?.tower.map(p => packKey(p.x, p.y, p.z)) ?? []),
-        ...(observation.staircase?.cells.filter(cell => cell.blockName !== DIG_CLEAR_BLOCK)
+        ...(observation.staircase?.cells.filter(placesBlock)
           .map(({ position: p }) => packKey(p.x, p.y, p.z)) ?? [])]),
     });
     while (!observation.destroyed && !observation.shot) {

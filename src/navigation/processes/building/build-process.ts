@@ -57,7 +57,7 @@ import type { Position3 } from "../../world/world.js";
 import type { CellKeys } from "../../mineflayer/movement-policy.js";
 import { facingVector } from "../../../world/facing.js";
 import { clingsBehindFacing } from "../../../world/block-states.js";
-import { described, DIG_CLEAR_BLOCK, faceFits, holdsCell, type BuildCell } from "./build-cell.js";
+import { described, digsClear, faceFits, holdsCell, type BuildCell } from "./build-cell.js";
 import { takeScaffoldDown } from "./scaffold-takedown.js";
 import { blockRangeOf, eyeOver, reachGoal, withinBlockReach } from "./build-reach.js";
 import { planStandColumns, type StandColumns } from "./stand-columns.js";
@@ -220,7 +220,7 @@ export class BuildTargeting {
   ) {
     this.#bounds = boundsOf(request.cells);
     this.#cellAt = new Map(request.cells.map((cell) => [keyOf(cell.position), cell]));
-    this.#ownBlockCells = new Set(request.cells.filter((cell) => cell.blockName !== DIG_CLEAR_BLOCK).map((cell) => keyOf(cell.position)));
+    this.#ownBlockCells = new Set(request.cells.filter((cell) => !digsClear(cell)).map((cell) => keyOf(cell.position)));
     this.#range = blockRangeOf(bot);
     this.progress.groundY ??= feetOf(bot).y;
   }
@@ -280,7 +280,7 @@ export class BuildTargeting {
     this.protectedCells.clear();
     this.#obstructingCells.clear();
     for (const cell of this.request.cells) {
-      if (cell.blockName === DIG_CLEAR_BLOCK) continue;
+      if (digsClear(cell)) continue;
       const block = bot.blockAt(asVec3(cell.position));
       if (block === null || !holdsCell(block, cell)) continue;
       this.protectedCells.add(keyOf(cell.position));
@@ -303,13 +303,13 @@ export class BuildTargeting {
     const position = asVec3(cell.position);
     const block = this.bot.blockAt(position);
     if (block === null) return { kind: "unloaded" };
-    if (holdsCell(block, cell) || (cell.blockName === DIG_CLEAR_BLOCK && isAir(block))) return { kind: "correct" };
+    if (holdsCell(block, cell) || (digsClear(cell) && isAir(block))) return { kind: "correct" };
     const refused = this.progress.refused.get(keyOf(cell.position));
     if (refused !== undefined && (refused.stamp === undefined || refused.stamp === routeStamp())) {
       return { kind: "refused", cause: refused.cause, reason: refused.reason };
     }
     // A cell asked to be air can only be dug clear, so asking is allowing.
-    if (cell.blockName === DIG_CLEAR_BLOCK) return { kind: "diggable", holds: block.name };
+    if (digsClear(cell)) return { kind: "diggable", holds: block.name };
     if (!isReplaceableForPlacement(block, this.bot.version)) {
       return this.request.removeWrongBlocks
         ? { kind: "diggable", holds: described(block, cell) }
@@ -339,7 +339,7 @@ export class BuildTargeting {
    */
   private awaitsFinalBlock(support: WorldBlock): boolean {
     const cell = this.#cellAt.get(keyOf(support.position));
-    return cell !== undefined && !holdsCell(support, cell) && (this.request.removeWrongBlocks || cell.blockName === DIG_CLEAR_BLOCK);
+    return cell !== undefined && !holdsCell(support, cell) && (this.request.removeWrongBlocks || digsClear(cell));
   }
 
   stateOf(cell: BuildCell): BuildCellState {
@@ -430,7 +430,7 @@ export class BuildTargeting {
     const cells = this.request.cells.flatMap((cell) => {
       const kind = this.stateOf(cell).kind;
       // Every block still owed, the layers waiting for their support included: a roof's layers share their pillars.
-      return OWED_KINDS.has(kind) && cell.blockName !== DIG_CLEAR_BLOCK
+      return OWED_KINDS.has(kind) && !digsClear(cell)
         ? [{ ...cell.position, key: keyOf(cell.position), placeable: kind === "placeable" }]
         : [];
     });

@@ -12,7 +12,10 @@ import { placeBlock } from "../../../world/index.js";
 import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 import type { SurvivalPolicy } from "../../policy/contract.js";
 
-export { DIG_CLEAR_BLOCK };
+/** Whether a staircase cell is a block the builder places, not a cell it digs clear. */
+export function placesBlock(cell: BuildCell): boolean {
+  return cell.blockName !== DIG_CLEAR_BLOCK;
+}
 
 type WorkBox = { readonly min: Vec3; readonly max: Vec3 };
 
@@ -279,7 +282,7 @@ function topStance(bot: Bot, crystal: Vec3, center: Vec3, radius: number, rim: V
 export function staircaseShortfall(bot: Bot, plan: CrystalStaircase): string | null {
   const needed = new Map<string, number>();
   for (const cell of plan.cells) {
-    if (cell.blockName !== DIG_CLEAR_BLOCK && bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName)
+    if (placesBlock(cell) && bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName)
       needed.set(cell.blockName, (needed.get(cell.blockName) ?? 0) + 1);
   }
   for (const [name, count] of needed) {
@@ -294,7 +297,7 @@ export function staircaseShortfall(bot: Bot, plan: CrystalStaircase): string | n
 export async function buildCrystalStaircase(bot: Bot, navigation: NavigationRuntime,
   policy: Readonly<SurvivalPolicy>, plan: CrystalStaircase, signal: AbortSignal,
   startEnclosed?: () => boolean): Promise<string | null> {
-  const needsBlocks = plan.cells.some(cell => cell.blockName !== DIG_CLEAR_BLOCK &&
+  const needsBlocks = plan.cells.some(cell => placesBlock(cell) &&
     bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName);
   if (needsBlocks && (!policy.combat.terrain.place || !policy.navigation.scaffold_blocks.includes("end_stone")))
     return "[CRYSTAL_STAIRCASE_CONSTRAINED] Building this reusable staircase requires end_stone placement permitted by the survival policy.";

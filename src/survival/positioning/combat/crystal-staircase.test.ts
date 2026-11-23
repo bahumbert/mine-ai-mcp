@@ -7,7 +7,8 @@ import type { Item } from "prismarine-item";
 import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 import { protectedRegion } from "../../../test-support/protected-region.js";
-import { buildCrystalStaircase, pillarShortfall, planCrystalStaircase, staircaseShortfall } from "./crystal-staircase.js";
+import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
+import { buildCrystalStaircase, pillarShortfall, placesBlock, planCrystalStaircase, staircaseShortfall } from "./crystal-staircase.js";
 
 /** Native spike geometry with a damaged column and a cage on the narrow tower. */
 function spikeCells(radius: number): Record<string, string> {
@@ -136,4 +137,10 @@ test("a tread inside the bot's own region is built", async () => {
   const result = await clock.settle(buildCrystalStaircase(bot, {} as NavigationRuntime, DEFAULT_SURVIVAL_POLICY, plan, new AbortController().signal), 30_000);
   assert.equal(result, null);
   assert.equal(bot.blockAt(new Vec3(1, 64, 0))?.name, "end_stone");
+});
+
+test("placesBlock: a dig-clear cell is no placed block, an end_stone tread is one", () => {
+  const position = { x: 0, y: 64, z: 0 };
+  assert.equal(placesBlock({ position, blockName: DIG_CLEAR_BLOCK }), false);
+  assert.equal(placesBlock({ position, blockName: "end_stone" }), true);
 });

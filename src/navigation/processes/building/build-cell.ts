@@ -4,7 +4,12 @@ import type { BlockPosition } from "../../index.js";
 import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
 import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
 
-export { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
+import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
+
+/** Whether the request asks this cell dug clear, not a block placed. */
+export function digsClear(cell: Pick<BuildCell, "blockName">): boolean {
+  return cell.blockName === DIG_CLEAR_BLOCK;
+}
 
 export interface BuildCell {
   readonly position: BlockPosition;
